@@ -646,14 +646,10 @@ debug = false
 [profile.bench]
 inherits = "release"
 
-# Coverage adds `-C instrument-coverage` to every crate in the graph. Paying
-# that on top of release's `lto = true` and `codegen-units = 1` more than
-# doubles the build: 25m38s against 11m56s for the same instrumented
-# `--all-features` graph at four parallel jobs. That is what put the CI job
-# past its cap before it had run a single test. Optimisation still matters
-# here because the tests execute under this profile, so only the two
-# link-time knobs relax, back to the stock release defaults.
-[profile.coverage]
+# CI tests and coverage keep release optimisation without fat LTO. Four
+# concurrent fat-LTO links of the all-features test binaries exhaust a hosted
+# runner's memory, and coverage instrumentation on top of LTO overruns the cap.
+[profile.ci]
 inherits = "release"
 lto = false
 codegen-units = 16

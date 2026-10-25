@@ -125,11 +125,9 @@ jobs:
       # `std`-only.
       - run: cargo check --lib --no-default-features --locked --target ${{ matrix.target }}
 
-  # Compiling the workspace with every feature in release mode is the expensive
-  # part of this pipeline by a wide margin: the same tests under default features
-  # finish in a quarter of the time. So it happens once, here, and everything that
-  # needs those binaries runs from the archive rather than building its own copy.
-  # The cap is generous because a cold cache pays the whole compile.
+  # The every-feature test compile happens once, here, and every job that needs
+  # those binaries runs from the archive. The cap is generous because a cold
+  # cache pays the whole compile.
   test-build:
     name: test build (all features)
     runs-on: ubuntu-latest
@@ -142,28 +140,7 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest
-      - name: Resources before archive build
-        run: |
-          free -h
-          df -h . "$RUNNER_TEMP"
-          ulimit -a
-          cat /proc/self/cgroup
-          cat /proc/pressure/memory
-          cgroup=$(cut -d: -f3 /proc/self/cgroup)
-          cat /sys/fs/cgroup"$cgroup"/memory.{current,peak,max,events} || true
-      - name: Build test archive
-        run: /usr/bin/time -v cargo nextest archive --workspace --all-features --release --locked --archive-file nextest.tar.zst
-      - name: Resources and termination diagnostics
-        if: always()
-        run: |
-          free -h
-          df -h . "$RUNNER_TEMP"
-          cat /proc/pressure/memory
-          cgroup=$(cut -d: -f3 /proc/self/cgroup)
-          cat /sys/fs/cgroup"$cgroup"/memory.{current,peak,max,events} || true
-          ps -eo pid,ppid,comm,rss --sort=-rss
-          sudo -n journalctl --no-pager -k --since "-90 minutes" || true
-          sudo -n journalctl --no-pager -u systemd-oomd --since "-90 minutes" || true
+      - run: cargo nextest archive --workspace --all-features --cargo-profile ci --locked --archive-file nextest.tar.zst
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nextest-archive
@@ -343,7 +320,7 @@ jobs:
       # Ignored tests are the Docker-backed ones, and code only they reach would otherwise read as uncovered.
       - run: |
           ulimit -c unlimited
-          cargo llvm-cov nextest --workspace --all-features --cargo-profile coverage --locked --run-ignored all --no-fail-fast --test-threads 8 --codecov --output-path codecov.json
+          cargo llvm-cov nextest --workspace --all-features --cargo-profile ci --locked --run-ignored all --no-fail-fast --test-threads 8 --codecov --output-path codecov.json
       - name: Backtrace crashed test processes
         if: failure()
         run: |
