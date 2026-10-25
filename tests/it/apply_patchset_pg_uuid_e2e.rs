@@ -58,7 +58,7 @@ fn apply_patchset_uuid_roundtrip_blob_and_text_clients() {
     let engine: SubscriptionEngine<PgChangeEvent, DefaultIds, ParserDB> =
         SubscriptionEngine::new(catalog, PostgreSqlDialect {});
 
-    let things = SimpleTable::new("things", &["id", "tag"], &[0]);
+    let things = SimpleTable::new("things", &[("id", ""), ("tag", "")], &[0]);
     let adapter = PgAdapter::new(engine.database()).expect("the catalog indexes");
 
     // Two UUIDs, one delivered by a BLOB-preferring client, one by a

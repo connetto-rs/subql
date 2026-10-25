@@ -126,6 +126,14 @@ impl NamedColumns for WireTable {
     fn column_index(&self, column_name: &str) -> Option<usize> {
         self.inner.column_index(column_name)
     }
+
+    fn column_affinity(&self, column_index: usize) -> Option<sqlite_diff_rs::Affinity> {
+        self.inner.column_affinity(column_index)
+    }
+
+    fn rowid_alias(&self) -> Option<usize> {
+        self.inner.rowid_alias()
+    }
 }
 
 impl WireColumnTypes for WireTable {

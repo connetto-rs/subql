@@ -383,7 +383,7 @@ mod tests {
     }
 
     fn table() -> SimpleTable {
-        SimpleTable::new("items", &["id", "name", "qty"], &[0])
+        SimpleTable::new("items", &[("id", ""), ("name", ""), ("qty", "")], &[0])
     }
 
     /// Craft the raw patchset bytes the SQLite session extension would
@@ -511,7 +511,7 @@ mod tests {
         let (engine, mut conn) = fixture();
         let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
 
-        let ghost = SimpleTable::new("ghosts", &["id"], &[0]);
+        let ghost = SimpleTable::new("ghosts", &[("id", "")], &[0]);
         let insert = Insert::<_, String, Vec<u8>>::from(ghost)
             .set(0, Value::Integer(1))
             .unwrap();
@@ -548,7 +548,7 @@ mod tests {
     }
 
     fn composite_table() -> SimpleTable {
-        SimpleTable::new("pairs", &["a", "b", "v"], &[0, 1])
+        SimpleTable::new("pairs", &[("a", ""), ("b", ""), ("v", "")], &[0, 1])
     }
 
     fn composite_fixture() -> (Engine, SqliteConnection) {

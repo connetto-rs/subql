@@ -53,7 +53,11 @@ fn apply_patchset_sqlite_roundtrip_insert_update_delete() {
         SubscriptionEngine::new(catalog, SQLiteDialect {});
     let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
 
-    let things = SimpleTable::new("things", &["id", "name", "active", "blob_col"], &[0]);
+    let things = SimpleTable::new(
+        "things",
+        &[("id", ""), ("name", ""), ("active", ""), ("blob_col", "")],
+        &[0],
+    );
 
     // Round 1: INSERT two rows spanning all four SQLite affinities.
     let inserts = PatchSet::<SimpleTable, String, Vec<u8>>::new()
@@ -194,7 +198,7 @@ fn apply_patchset_sqlite_binds_real_and_null_cells() {
         SubscriptionEngine::new(catalog, SQLiteDialect {});
     let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
 
-    let readings = SimpleTable::new("readings", &["id", "score", "note"], &[0]);
+    let readings = SimpleTable::new("readings", &[("id", ""), ("score", ""), ("note", "")], &[0]);
 
     let inserts = PatchSet::<SimpleTable, String, Vec<u8>>::new()
         .insert(
