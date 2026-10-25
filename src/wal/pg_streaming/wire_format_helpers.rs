@@ -4,9 +4,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-pub(super) const XLOG_DATA_HEADER_LEN: usize = 1 + 8 + 8 + 8; // 'w' + start + end + clock
-pub(super) const PRIMARY_KEEPALIVE_LEN: usize = 1 + 8 + 8 + 1; // 'k' + end + clock + reply
-
 /// Append `replication=database` to a libpq conninfo string if the
 /// caller did not already include it. Accepts both URL-style
 /// (`postgresql://...`) and key=value forms. The latter just needs the
@@ -64,8 +61,7 @@ pub(super) fn parse_timeline_history(
 #[cfg(test)]
 mod tests {
     use super::super::{PgStreamingError, TimelineSwitch};
-    use super::parse_timeline_history;
-    use super::{ensure_replication_param, PRIMARY_KEEPALIVE_LEN, XLOG_DATA_HEADER_LEN};
+    use super::{ensure_replication_param, parse_timeline_history};
     use crate::PgLsn;
     use alloc::vec;
 
@@ -114,12 +110,6 @@ mod tests {
                 other => panic!("expected Protocol, got {other:?}"),
             }
         }
-    }
-
-    #[test]
-    fn xlog_data_header_constants_match_spec() {
-        assert_eq!(XLOG_DATA_HEADER_LEN, 25);
-        assert_eq!(PRIMARY_KEEPALIVE_LEN, 18);
     }
 
     #[test]

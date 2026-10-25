@@ -6,6 +6,7 @@ All notable changes to subql are recorded here. The format follows [Keep a Chang
 
 ### Changed
 
+- `PgStreamingCdcSource` reads through `pg_walstream::LogicalReplicationStream` without reconnecting, requires an existing slot, and queues acknowledged commit ends through shared LSN feedback. The consumer must keep polling during idle periods for keepalive replies.
 - Row-derived visibility records support literal membership guards over Boolean, integer, decimal, and text columns, with every literal checked against the catalog kind before evaluation.
 - Grouped aggregate `HAVING` follows backend numeric literal typing and coercion, preserving exact integer and decimal boundaries.
 - `AutoResolvingEngine::match_rows` matches without moving memberships or stamping activity, through the new `SubscriptionEngine::match_rows`, and its result carries no narrowings. It ran `consumers`, so replaying a membership insert after the later delete admitted the subject again, and every replay counted as activity for eviction. Per consumer it answers as `matches_consumer` does, in one evaluation of the event for every consumer it reaches.
