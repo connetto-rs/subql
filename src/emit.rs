@@ -787,6 +787,35 @@ mod tests {
     }
 
     #[test]
+    fn wire_tables_record_sql_literals_without_declared_type_coercion() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE ledger (id INTEGER PRIMARY KEY, amount NUMERIC, note TEXT);",
+        )
+        .unwrap();
+        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let mut builder = PatchSet::<WireTable, String, Vec<u8>>::new();
+        builder.add_table(catalog.get(None, "ledger").expect("ledger resolves"));
+        builder
+            .digest_sql("INSERT INTO ledger (id, amount, note) VALUES ('k1', '12.50', 7)")
+            .expect("an untyped key is no rowid alias");
+        let parsed = PatchsetOps {
+            parsed: parse_patchset(&builder.build()),
+        };
+        let ops = parsed.ops();
+        let PatchsetOp::Insert { values, .. } = &ops[0] else {
+            panic!("expected an insert op, got {:?}", ops[0]);
+        };
+        assert_eq!(
+            values.to_vec(),
+            vec![
+                WireValue::Text("k1".into()),
+                WireValue::Text("12.50".into()),
+                WireValue::Integer(7),
+            ]
+        );
+    }
+
+    #[test]
     fn insert_emits_patchset_insert_with_row_values() {
         let db = orders_db();
         let line = r#"{"action":"I","schema":"public","table":"orders","columns":[{"name":"id","type":"integer","value":1},{"name":"amount","type":"integer","value":100},{"name":"status","type":"text","value":"new"}]}"#;
