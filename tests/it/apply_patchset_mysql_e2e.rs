@@ -116,7 +116,7 @@ fn apply_patchset_boolean_column_takes_any_nonzero_integer_and_null_mysql() {
     let catalog = ParserDB::parse::<MySqlDialect>(DDL).expect("parse subql DDL");
     let engine: SubscriptionEngine<MaxwellEvent, DefaultIds, ParserDB> =
         SubscriptionEngine::new(catalog, MySqlDialect {});
-    let things = SimpleTable::new("things", &["id", "active"], &[0]);
+    let things = SimpleTable::new("things", &[("id", ""), ("active", "")], &[0]);
 
     let inserts = PatchSet::<SimpleTable, String, Vec<u8>>::new()
         .insert(

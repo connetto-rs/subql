@@ -23,8 +23,15 @@ const PG_DDL: &str = "CREATE TABLE rich (id INT PRIMARY KEY, amount NUMERIC(12,3
                       at TIMESTAMP, at_tz TIMESTAMPTZ, on_day DATE, at_time TIME, \
                       doc JSON, docb JSONB)";
 
-const COLUMNS: [&str; 8] = [
-    "id", "amount", "at", "at_tz", "on_day", "at_time", "doc", "docb",
+const COLUMNS: [(&str, &str); 8] = [
+    ("id", ""),
+    ("amount", ""),
+    ("at", ""),
+    ("at_tz", ""),
+    ("on_day", ""),
+    ("at_time", ""),
+    ("doc", ""),
+    ("docb", ""),
 ];
 
 #[derive(QueryableByName, Debug, PartialEq)]

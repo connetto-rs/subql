@@ -53,7 +53,7 @@ fn load_items(conn: &mut diesel::PgConnection) -> Vec<Item> {
 }
 
 fn items_table() -> SimpleTable {
-    SimpleTable::new("items", &["id", "label", "qty"], &[0])
+    SimpleTable::new("items", &[("id", ""), ("label", ""), ("qty", "")], &[0])
 }
 
 fn engine() -> SubscriptionEngine<PgChangeEvent, DefaultIds, ParserDB> {

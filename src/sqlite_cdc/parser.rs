@@ -352,7 +352,11 @@ mod tests {
     }
 
     fn orders_table() -> SimpleTable {
-        SimpleTable::new("orders", &["id", "amount", "status"], &[0])
+        SimpleTable::new(
+            "orders",
+            &[("id", ""), ("amount", ""), ("status", "")],
+            &[0],
+        )
     }
 
     #[test]
@@ -552,7 +556,11 @@ mod tests {
         )
         .expect("lots DDL parses");
         // Key order `(status, id)`, which is columns 2 then 0.
-        let lots = SimpleTable::new("lots", &["id", "amount", "status"], &[2, 0]);
+        let lots = SimpleTable::new(
+            "lots",
+            &[("id", ""), ("amount", ""), ("status", "")],
+            &[2, 0],
+        );
         let changeset = ChangeSet::<_, alloc::string::String, Vec<u8>>::new().insert(
             Insert::from(lots)
                 .set(0, 7_i64)

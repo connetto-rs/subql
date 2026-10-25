@@ -126,6 +126,14 @@ impl NamedColumns for WireTable {
     fn column_index(&self, column_name: &str) -> Option<usize> {
         self.inner.column_index(column_name)
     }
+
+    fn column_affinity(&self, column_index: usize) -> Option<sqlite_diff_rs::Affinity> {
+        self.inner.column_affinity(column_index)
+    }
+
+    fn rowid_alias(&self) -> Option<usize> {
+        self.inner.rowid_alias()
+    }
 }
 
 impl WireColumnTypes for WireTable {
@@ -776,6 +784,35 @@ mod tests {
         assert_eq!(table.column_type(0), WireType::Int);
         assert_eq!(table.column_type(2), WireType::Text);
         assert!(catalog.get(None, "missing").is_none());
+    }
+
+    #[test]
+    fn wire_tables_record_sql_literals_without_declared_type_coercion() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE ledger (id INTEGER PRIMARY KEY, amount NUMERIC, note TEXT);",
+        )
+        .unwrap();
+        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let mut builder = PatchSet::<WireTable, String, Vec<u8>>::new();
+        builder.add_table(catalog.get(None, "ledger").expect("ledger resolves"));
+        builder
+            .digest_sql("INSERT INTO ledger (id, amount, note) VALUES ('k1', '12.50', 7)")
+            .expect("an untyped key is no rowid alias");
+        let parsed = PatchsetOps {
+            parsed: parse_patchset(&builder.build()),
+        };
+        let ops = parsed.ops();
+        let PatchsetOp::Insert { values, .. } = &ops[0] else {
+            panic!("expected an insert op, got {:?}", ops[0]);
+        };
+        assert_eq!(
+            values.to_vec(),
+            vec![
+                WireValue::Text("k1".into()),
+                WireValue::Text("12.50".into()),
+                WireValue::Integer(7),
+            ]
+        );
     }
 
     #[test]

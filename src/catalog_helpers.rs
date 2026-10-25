@@ -329,6 +329,8 @@ pub fn column_name<DB: DatabaseLike>(
 /// table shape through this one helper, so a single catalog is the source
 /// of truth for the column order and the primary key on both sides.
 ///
+/// Columns are untyped and have no rowid alias because CDC values carry their storage classes.
+///
 /// # Errors
 /// [`CatalogError`](crate::CatalogError) when the table id or any of its
 /// columns cannot be resolved.
@@ -351,7 +353,10 @@ pub fn simple_table<DB: DatabaseLike>(
         .into_iter()
         .map(usize::from)
         .collect();
-    let column_refs: Vec<&str> = column_names.iter().map(String::as_str).collect();
+    let column_refs: Vec<(&str, &str)> = column_names
+        .iter()
+        .map(|name| (name.as_str(), ""))
+        .collect();
     Ok(SimpleTable::new(table_name, &column_refs, &pk_indices))
 }
 

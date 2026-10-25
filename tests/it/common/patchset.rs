@@ -34,7 +34,7 @@ pub type Ops = PatchSet<SimpleTable, String, Vec<u8>>;
 
 /// The three patchsets the round-trip applies, in order.
 pub fn bool_roundtrip_ops() -> (Ops, Ops, Ops) {
-    let table = SimpleTable::new("things", &["id", "active"], &[0]);
+    let table = SimpleTable::new("things", &[("id", ""), ("active", "")], &[0]);
     let inserts = PatchSet::<SimpleTable, String, Vec<u8>>::new()
         .insert(
             Insert::from(table.clone())
