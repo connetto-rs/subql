@@ -124,6 +124,25 @@ pub struct DurableCommit<I: IdTypes, C: Checkpoint> {
     pub operation: DurableOperation<C>,
 }
 
+/// Why a restore left one stored instance out.
+#[derive(Debug, thiserror::Error)]
+pub enum DurableRefusalCause {
+    /// The caller denied the declaration's fresh authorization.
+    #[error("the declaration is no longer authorized")]
+    Denied,
+    /// The stored operator no longer verifies against the configured plan and catalog.
+    #[error(transparent)]
+    Operator(ReplayError),
+}
+
+/// A stored instance a restore left out.
+#[derive(Debug)]
+pub struct DurableRefusal<I: IdTypes> {
+    pub instance: u64,
+    pub consumer: I::ConsumerId,
+    pub cause: DurableRefusalCause,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 struct Instance<I: IdTypes, B: Backend, C: Checkpoint> {
@@ -200,6 +219,16 @@ where
     commit: DurableCommit<I, E::Checkpoint>,
 }
 
+/// A restored engine and the stored instances it left out.
+#[must_use = "refused instances are gone from the engine and need their own retirement"]
+pub struct DurableRestore<E: CdcEvent, I: IdTypes, DB: DatabaseLike>
+where
+    E::Backend: SqlLiteralParse,
+{
+    pub engine: DurableEngine<E, I, DB>,
+    pub refused: Vec<DurableRefusal<I>>,
+}
+
 impl<E: CdcEvent, I: IdTypes, DB: DatabaseLike> core::fmt::Debug for PreparedDurable<'_, E, I, DB>
 where
     E::Backend: SqlLiteralParse,
@@ -266,10 +295,18 @@ where
         })
     }
 
-    /// Restores a checkpoint only after every declaration is freshly authorized.
+    /// Restores a checkpoint, asking a fresh authorization for every declaration.
+    ///
+    /// `authorize` receives each stored instance and its declaration. An instance
+    /// whose authorization is denied, or whose operator no longer verifies against
+    /// the configured compiler and catalog, is left out and reported in
+    /// [`DurableRestore::refused`]. The engine keeps the stored revision, so its
+    /// next receipt drops the refused instances, and a restore from the same bytes
+    /// refuses them again.
     ///
     /// # Errors
-    /// Rejects incompatible context, receipts, catalogs, plans or operator state.
+    /// Rejects an incompatible context or receipt, an undecodable or inconsistent
+    /// instance record, and an authorization service that cannot answer.
     pub fn restore(
         compiler: SubscriptionEngine<E, I, DB>,
         context: DurableContext,
@@ -277,9 +314,10 @@ where
         at: E::Checkpoint,
         bytes: &[u8],
         mut authorize: impl FnMut(
+            u64,
             &SubscriptionRequest<I, E::Backend>,
         ) -> Result<(), DurableAuthorizationError>,
-    ) -> Result<Self, DurableError> {
+    ) -> Result<DurableRestore<E, I, DB>, DurableError> {
         let mut engine = Self::new(compiler, context, at)?;
         let (mut state, remaining): (Snapshot<I, E::Backend, E::Checkpoint>, _) =
             postcard::take_from_bytes(bytes)?;
@@ -293,6 +331,7 @@ where
         {
             return Err(DurableError::State);
         }
+        let mut refused = Vec::new();
         let ids = state.instances.keys().copied().collect::<Vec<_>>();
         for id in ids {
             let instance = state.instances.get_mut(&id).ok_or(DurableError::State)?;
@@ -319,19 +358,33 @@ where
             {
                 return Err(DurableError::State);
             }
-            authorize(&request)?;
-            let request = Arc::new(request);
-            let detector = engine
-                .compiler
-                .restore_replay_detector(request.as_ref(), record.operator.as_slice())?;
-            if record.failure.is_none() && instance_bytes(record)? > record.quota {
-                return Err(DurableError::State);
-            }
-            record.detector = Some(Arc::new(detector));
-            record.request = Some(request);
+            let cause = match authorize(id, &request) {
+                Ok(()) => match engine
+                    .compiler
+                    .restore_replay_detector(&request, record.operator.as_slice())
+                {
+                    Ok(detector) => {
+                        if record.failure.is_none() && instance_bytes(record)? > record.quota {
+                            return Err(DurableError::State);
+                        }
+                        record.detector = Some(Arc::new(detector));
+                        record.request = Some(Arc::new(request));
+                        continue;
+                    }
+                    Err(error) => DurableRefusalCause::Operator(error),
+                },
+                Err(DurableAuthorizationError::Denied) => DurableRefusalCause::Denied,
+                Err(error @ DurableAuthorizationError::Unavailable) => return Err(error.into()),
+            };
+            refused.push(DurableRefusal {
+                instance: id,
+                consumer: request.consumer_id,
+                cause,
+            });
+            state.instances.remove_mut(&id);
         }
         engine.state = state;
-        Ok(engine)
+        Ok(DurableRestore { engine, refused })
     }
 
     /// Prepares admission from complete dependency inputs at the acknowledged boundary.

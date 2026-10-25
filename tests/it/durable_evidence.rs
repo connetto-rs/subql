@@ -4,7 +4,8 @@ use subql::backend::{Postgres, Value};
 use subql::testing::TestEvent;
 use subql::{
     catalog_helpers, DefaultIds, DurableAuthorizationError, DurableContext, DurableEngine,
-    DurablePersistError, PgLsn, ReplayTable, SubscriptionEngine, SubscriptionRequest,
+    DurableError, DurablePersistError, DurableRefusalCause, PgLsn, ReplayTable, SubscriptionEngine,
+    SubscriptionRequest,
 };
 
 type Event = TestEvent<Postgres, PgLsn>;
@@ -58,8 +59,11 @@ fn separate_compensating_commits_survive_checkpoint_restore() {
     let revision = engine.revision();
     drop(engine);
     let (compiler, _) = compiler();
-    let mut restored = Engine::restore(compiler, context(), revision, PgLsn(1), &bytes, |_| Ok(()))
-        .expect("restore");
+    let mut restored = Engine::restore(compiler, context(), revision, PgLsn(1), &bytes, |_, _| {
+        Ok(())
+    })
+    .expect("restore")
+    .engine;
     for (after, at, event) in [
         (
             1,
@@ -100,9 +104,13 @@ fn separate_compensating_commits_survive_checkpoint_restore() {
 }
 
 fn register(engine: &mut Engine, table: subql::TableId, quota: usize) {
+    register_instance(engine, table, 42, quota);
+}
+
+fn register_instance(engine: &mut Engine, table: subql::TableId, instance: u64, quota: usize) {
     engine
         .prepare_register(
-            42,
+            instance,
             SubscriptionRequest::new(7, "SELECT COUNT(*) FROM items"),
             PgLsn(1),
             vec![ReplayTable {
@@ -198,36 +206,133 @@ fn cancellation_inside_one_commit_and_unauthorized_acknowledgement_preserve_evid
 }
 
 #[test]
-fn recovery_requires_the_committed_receipt_source_and_fresh_authority() {
+fn recovery_requires_the_committed_receipt_source_and_available_authority() {
     let (mut engine, table) = engine();
     register(&mut engine, table, 1_000_000);
     let bytes = engine.checkpoint().expect("checkpoint");
     let revision = engine.revision();
-    let restore = |context, revision, at, bytes: &[u8], authorize: bool| {
+    let restore = |context, revision, at, bytes: &[u8]| {
         let (compiler, _) = compiler();
-        Engine::restore(compiler, context, revision, at, bytes, |_| {
-            if authorize {
-                Ok(())
-            } else {
-                Err(DurableAuthorizationError::Denied)
-            }
-        })
+        Engine::restore(compiler, context, revision, at, bytes, |_, _| Ok(()))
     };
-    assert!(restore(context(), revision, PgLsn(1), &[], true).is_err());
-    assert!(restore(context(), revision + 1, PgLsn(1), &bytes, true).is_err());
-    assert!(restore(context(), revision, PgLsn(2), &bytes, true).is_err());
-    assert!(restore(context(), revision, PgLsn(1), &bytes, false).is_err());
+    assert!(restore(context(), revision, PgLsn(1), &[]).is_err());
+    assert!(restore(context(), revision + 1, PgLsn(1), &bytes).is_err());
+    assert!(restore(context(), revision, PgLsn(2), &bytes).is_err());
     let mut wrong_source = context();
     wrong_source.source = b"other-generation".to_vec();
-    assert!(restore(wrong_source, revision, PgLsn(1), &bytes, true).is_err());
+    assert!(restore(wrong_source, revision, PgLsn(1), &bytes).is_err());
     let mut wrong_authority = context();
     wrong_authority.authority = b"other-policy".to_vec();
-    assert!(restore(wrong_authority, revision, PgLsn(1), &bytes, true).is_err());
-    let mut trailing = bytes;
+    assert!(restore(wrong_authority, revision, PgLsn(1), &bytes).is_err());
+    let mut trailing = bytes.clone();
     trailing.push(0);
-    assert!(restore(context(), revision, PgLsn(1), &trailing, true).is_err());
+    assert!(restore(context(), revision, PgLsn(1), &trailing).is_err());
+    // An authority that cannot answer refuses nothing for good.
+    let (compiler, _) = compiler();
+    assert!(matches!(
+        Engine::restore(compiler, context(), revision, PgLsn(1), &bytes, |_, _| {
+            Err(DurableAuthorizationError::Unavailable)
+        }),
+        Err(DurableError::Authorization(
+            DurableAuthorizationError::Unavailable
+        ))
+    ));
     assert_eq!(engine.unread(42), None);
     assert_eq!(engine.checkpoint_position(), &PgLsn(1));
+}
+
+#[test]
+fn restore_refuses_only_the_instances_that_no_longer_authorize_or_fit() {
+    let (mut engine, table) = engine();
+    register_instance(&mut engine, table, 42, 1_000_000);
+    register_instance(&mut engine, table, 43, 1_000_000);
+    let bytes = engine.checkpoint().expect("checkpoint");
+    let revision = engine.revision();
+    drop(engine);
+
+    // A denied owner loses only its own instance, and the revision holds.
+    let deny_43 = |instance: u64, _: &SubscriptionRequest<DefaultIds, Postgres>| {
+        if instance == 43 {
+            Err(DurableAuthorizationError::Denied)
+        } else {
+            Ok(())
+        }
+    };
+    let restored = Engine::restore(compiler().0, context(), revision, PgLsn(1), &bytes, deny_43)
+        .expect("a denial refuses one instance, not the receipt");
+    assert_eq!(restored.refused.len(), 1);
+    assert_eq!(restored.refused[0].instance, 43);
+    assert_eq!(restored.refused[0].consumer, 7);
+    assert!(matches!(
+        restored.refused[0].cause,
+        DurableRefusalCause::Denied
+    ));
+    let mut survivor = restored.engine;
+    assert!(survivor.answer(42).is_some());
+    assert!(survivor.answer(43).is_none());
+    assert_eq!(survivor.revision(), revision);
+
+    // A catalog the stored operators no longer fit refuses each of them alone.
+    let drifted =
+        ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE items (id INT PRIMARY KEY, cost TEXT);")
+            .expect("drifted catalog");
+    let restored = Engine::restore(
+        SubscriptionEngine::new(drifted, PostgreSqlDialect {}),
+        context(),
+        revision,
+        PgLsn(1),
+        &bytes,
+        |_, _| Ok(()),
+    )
+    .expect("a drifted catalog refuses instances, not the receipt");
+    let mut refused: Vec<u64> = restored.refused.iter().map(|r| r.instance).collect();
+    refused.sort_unstable();
+    assert_eq!(refused, [42, 43]);
+    assert!(restored
+        .refused
+        .iter()
+        .all(|r| matches!(r.cause, DurableRefusalCause::Operator(_))));
+    assert_eq!(restored.engine.revision(), revision);
+
+    // Until a receipt persists, the stored bytes still hold the refused instance.
+    let again = Engine::restore(
+        compiler().0,
+        context(),
+        revision,
+        PgLsn(1),
+        &bytes,
+        |_, _| Ok(()),
+    )
+    .expect("restore from the same bytes");
+    assert!(again.refused.is_empty());
+    assert!(again.engine.answer(43).is_some());
+
+    // The next receipt drops it for good.
+    let events =
+        [Event::insert(table, vec![Value::Int(2), Value::Int(4)]).with_checkpoint(PgLsn(2))];
+    survivor
+        .prepare_transaction(b"source-generation-1", &PgLsn(1), PgLsn(2), &events)
+        .expect("prepare")
+        .expect("new commit")
+        .persist(|receipt| {
+            assert_eq!(receipt.expected_revision, revision);
+            assert!(receipt.changed.iter().all(|change| change.instance == 42));
+            Ok::<_, ()>(())
+        })
+        .expect("persist");
+    let bytes = survivor.checkpoint().expect("checkpoint");
+    let after = Engine::restore(
+        compiler().0,
+        context(),
+        survivor.revision(),
+        PgLsn(2),
+        &bytes,
+        |_, _| Ok(()),
+    )
+    .expect("restore after the receipt");
+    assert!(after.refused.is_empty());
+    assert!(after.engine.answer(42).is_some());
+    assert!(after.engine.answer(43).is_none());
 }
 
 #[test]

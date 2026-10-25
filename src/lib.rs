@@ -19,7 +19,8 @@ pub use runtime::aggregate::{
 };
 pub use runtime::engine::durable::{
     DurableAuthorizationError, DurableChange, DurableCommit, DurableContext, DurableEngine,
-    DurableError, DurableFailure, DurableOperation, DurablePersistError, PreparedDurable,
+    DurableError, DurableFailure, DurableOperation, DurablePersistError, DurableRefusal,
+    DurableRefusalCause, DurableRestore, PreparedDurable,
 };
 pub use runtime::engine::replay::{
     ReplayAnswer, ReplayDetector, ReplayError, ReplayTable, ReplayValue,

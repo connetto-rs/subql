@@ -6,6 +6,7 @@ All notable changes to subql are recorded here. The format follows [Keep a Chang
 
 ### Changed
 
+- `DurableEngine::restore` returns a `DurableRestore`, the engine and the stored instances it left out as `DurableRefusal`s, and its `authorize` callback receives each instance id beside the declaration. An instance whose authorization is denied, or whose operator no longer fits the catalog, is refused alone while the others restore. An unavailable authorization fails the whole restore.
 - Row-derived visibility records support literal membership guards over Boolean, integer, decimal, and text columns, with every literal checked against the catalog kind before evaluation.
 - Grouped aggregate `HAVING` follows backend numeric literal typing and coercion, preserving exact integer and decimal boundaries.
 - `AutoResolvingEngine::match_rows` matches without moving memberships or stamping activity, through the new `SubscriptionEngine::match_rows`, and its result carries no narrowings. It ran `consumers`, so replaying a membership insert after the later delete admitted the subject again, and every replay counted as activity for eviction. Per consumer it answers as `matches_consumer` does, in one evaluation of the event for every consumer it reaches.
