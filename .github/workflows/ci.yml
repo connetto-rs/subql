@@ -22,7 +22,7 @@ env:
 jobs:
   fmt-clippy:
     name: fmt + clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     env:
       RUSTFLAGS: "-Dwarnings"
@@ -50,7 +50,7 @@ jobs:
 
   check-feature-matrix:
     name: check (${{ matrix.profile.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -98,7 +98,7 @@ jobs:
 
   wasm-check:
     name: check (${{ matrix.target }}, no_std)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -130,7 +130,7 @@ jobs:
   # cache pays the whole compile.
   test-build:
     name: test build (all features)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -152,7 +152,7 @@ jobs:
   # optional feature switched on. It is also the cheap one.
   unit-tests-default:
     name: tests (default)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -164,7 +164,7 @@ jobs:
   unit-tests-all-features:
     name: tests (all-features)
     needs: test-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       # The differential sweeps read this: rows per predicate form. Shallow on
       # every pull request so the wall clock stays honest, deep on the weekly
@@ -191,7 +191,7 @@ jobs:
   integration:
     name: integration (${{ matrix.group.name }})
     needs: test-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       # The differential sweeps read this: rows per predicate form. Shallow on
       # every pull request so the wall clock stays honest, deep on the weekly
@@ -233,7 +233,7 @@ jobs:
 
   docs:
     name: docs + doctests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     env:
       RUSTDOCFLAGS: "-D warnings"
@@ -253,7 +253,7 @@ jobs:
 
   msrv:
     name: msrv (1.88)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -266,7 +266,7 @@ jobs:
 
   demo:
     name: demo (wasm)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -280,7 +280,7 @@ jobs:
 
   bench-check:
     name: bench compile check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -291,7 +291,7 @@ jobs:
 
   fuzz-check:
     name: fuzz target compile check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -303,7 +303,7 @@ jobs:
 
   coverage:
     name: Code Coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [unit-tests-default, unit-tests-all-features]
     timeout-minutes: 45
     steps:
@@ -351,7 +351,7 @@ jobs:
 
   deny:
     name: Cargo Deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -362,7 +362,7 @@ jobs:
 
   audit:
     name: security audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
