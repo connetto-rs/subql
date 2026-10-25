@@ -97,6 +97,24 @@ fn connect_against_real_pg() {
     common::drop_slot(&mut setup, &slot);
 }
 
+#[test]
+fn invalid_connection_parameters_are_reported_as_postgres_errors() {
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+    let config = PgStreamingConfig::new(
+        "subql_invalid_option=1",
+        "unused_slot",
+        "unused_publication",
+    );
+    let error = current_thread_rt().block_on(async move {
+        tokio::time::timeout(ARRIVAL, PgStreamingCdcSource::connect(config, catalog))
+            .await
+            .expect("invalid parameters are refused promptly")
+            .err()
+            .expect("an invalid connection option must fail")
+    });
+    assert!(matches!(error, PgStreamingError::Postgres(_)), "{error:?}");
+}
+
 /// Query the slot's `confirmed_flush_lsn` via a side connection and
 /// parse the `XXXX/YYYY` text form into a [`PgLsn`].
 fn confirmed_flush_lsn(conn: &mut diesel::PgConnection, slot: &str) -> Option<PgLsn> {
@@ -233,6 +251,58 @@ fn acknowledging_a_commit_moves_the_slot_to_the_end_it_named() {
         .await;
         assert_eq!(flushed, commit.end_lsn());
         assert_eq!(source.acknowledged_position(), Some(commit.end_lsn()));
+    });
+
+    common::drop_slot(&mut setup, &slot);
+}
+
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn an_early_commit_acknowledgement_waits_for_commit_delivery() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
+    let mut setup = db.connect();
+    let mut dml = db.connect();
+    let mut probe = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    let slot = db.slot("subql_pg_streaming_early_ack");
+    let publication = "subql_pg_streaming_early_ack_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+    let config = PgStreamingConfig::new(db.url(), &slot, publication)
+        .status_interval(Duration::from_millis(100));
+    let slot_inner = slot.clone();
+
+    current_thread_rt().block_on(async move {
+        let base = confirmed_flush_lsn(&mut probe, &slot_inner).expect("the slot exists");
+        let mut source = connect_when_free(&config).await;
+        insert(&mut dml, &[1, 2]);
+        let first = next_row(&mut source).await;
+        let position =
+            PgCommitPosition::at_commit(first.position().commit_lsn(), first.position().xid());
+        tokio::time::timeout(ARRIVAL, source.ack(position))
+            .await
+            .expect("the acknowledgement responds")
+            .expect("queue the early acknowledgement");
+        assert_eq!(source.acknowledged_position(), Some(base));
+        assert_eq!(confirmed_flush_lsn(&mut probe, &slot_inner), Some(base));
+
+        let second = next_row(&mut source).await;
+        assert!(first.position() < second.position());
+        assert_eq!(second.position().commit_lsn(), position.commit_lsn());
+        assert_eq!(source.acknowledged_position(), Some(base));
+        let commit = next_commit(&mut source).await;
+        assert_eq!(commit.position(), position);
+        assert_eq!(source.acknowledged_position(), Some(commit.end_lsn()));
+        let flushed = flushed_after_ack(
+            &mut source,
+            |lsn| lsn >= commit.end_lsn(),
+            &mut probe,
+            &slot_inner,
+        )
+        .await;
+        assert_eq!(flushed, commit.end_lsn());
     });
 
     common::drop_slot(&mut setup, &slot);
@@ -1018,6 +1088,9 @@ fn a_killed_backend_makes_the_source_terminal() {
         let mut source = PgStreamingCdcSource::connect(config, catalog)
             .await
             .expect("connect");
+        insert(&mut setup, &[1]);
+        next_row(&mut source).await;
+        let commit = next_commit(&mut source).await;
 
         // Only this slot's backend, named by the slot rather than by a
         // sweep, so no other test's connection is touched.
@@ -1032,12 +1105,16 @@ fn a_killed_backend_makes_the_source_terminal() {
             .await
             .expect("the reader reports the death promptly")
             .expect_err("next_item must report the dead connection");
-        for _ in 0..3 {
-            tokio::time::timeout(ARRIVAL, source.next_item())
-                .await
-                .expect("the terminal source keeps responding")
-                .expect_err("no automatic reconnect");
-        }
+        let error = tokio::time::timeout(ARRIVAL, source.next_item())
+            .await
+            .expect("the terminal source keeps responding")
+            .expect_err("no automatic reconnect");
+        assert!(matches!(error, PgStreamingError::SourceClosed), "{error:?}");
+        let error = tokio::time::timeout(ARRIVAL, source.ack(commit.position()))
+            .await
+            .expect("the terminal source refuses acknowledgements promptly")
+            .expect_err("a dead source must not accept an acknowledgement");
+        assert!(matches!(error, PgStreamingError::SourceClosed), "{error:?}");
         assert!(
             !slot_is_active(&mut probe, &slot_inner),
             "the server never saw a replacement connection"
