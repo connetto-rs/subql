@@ -1,1 +1,0 @@
-SELECT * FROM orders WHERE nt_se('app[.r_id')[2] @ounnt_c OR oluexistent_cddisten11

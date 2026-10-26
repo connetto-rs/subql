@@ -1,1 +1,0 @@
-SELECT rei HAVING COUJT(*) 1
