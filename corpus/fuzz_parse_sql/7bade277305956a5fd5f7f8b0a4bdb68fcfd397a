@@ -1,0 +1,1 @@
+SELECT * FROM orders WHERE ntg(c00.5'app.<er_k'd)[2] @o FROM orders WHERE ten11

@@ -1,0 +1,1 @@
+SELECT counE_LObK(CONCAT(D$R$BAE(), NULL'_park_seed_', id), @2) +1
