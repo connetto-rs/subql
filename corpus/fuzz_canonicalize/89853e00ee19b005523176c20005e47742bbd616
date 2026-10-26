@@ -1,0 +1,1 @@
+status LIKE '\CCCCCCCCCCCCCCCC%2' AND NOT (1= 3)
