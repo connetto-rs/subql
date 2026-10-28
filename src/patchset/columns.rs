@@ -88,6 +88,31 @@ pub const fn shape_of<S, B>(value: &WireValue<S, B>) -> &'static str {
     }
 }
 
+/// The decimal a replica's integer count of minor units stands for at
+/// `scale`, or `None` for NULL, refusing every other wire shape.
+///
+/// A pg2sqlite replica stores a `NUMERIC(p,s)` column as `value × 10^s`, so
+/// `1250` at scale 2 is `12.50`.
+#[cfg(any(feature = "apply-patchset-postgres", feature = "apply-patchset-mysql"))]
+pub fn minor_units<S, B>(
+    column: &str,
+    value: &WireValue<S, B>,
+    scale: u32,
+) -> Result<Option<bigdecimal::BigDecimal>, DieselError> {
+    match value {
+        WireValue::Integer(count) => Ok(Some(bigdecimal::BigDecimal::new(
+            (*count).into(),
+            i64::from(scale),
+        ))),
+        WireValue::Null => Ok(None),
+        other => Err(bind_error(
+            column,
+            "minor-units INTEGER or NULL",
+            shape_of(other),
+        )),
+    }
+}
+
 fn refusal(message: String) -> DieselError {
     DieselError::QueryBuilderError(Box::new(BindRefusal::Refused(message)))
 }

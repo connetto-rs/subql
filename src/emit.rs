@@ -16,7 +16,10 @@
 //! [`WireType`] per column, a source-independent semantic type that
 //! selects the decoder. subql's catalog is [`ScalarFamily`]-based, and
 //! [`scalar_kind_to_wire_type`] maps one to the other, so a single
-//! [`WireCatalog`] over any [`DatabaseLike`] drives every wire source.
+//! [`WireCatalog`] over any [`DatabaseLike`] drives every wire source. A
+//! decimal column with a declared scale is the one exception: it travels as
+//! [`WireType::ScaledDecimal`], an integer count of minor units, which is how
+//! a pg2sqlite replica stores a `NUMERIC(p,s)` column.
 //!
 //! # Scope
 //!
@@ -48,7 +51,7 @@ use sqlite_diff_rs::{
     ChangeSet, ChangesetFormat, ColumnNames, DiffFormat, DiffOps, DiffSetBuilder, Digestable,
     DynTable, IndexableValues, Insert, NamedColumns, PatchSet, PatchsetFormat, PgBinary,
     PgBinaryColumn, SchemaWithPK, SimpleTable, TypeMap, UuidBlob16Decoder, Value as WireValue,
-    WireAdapter, WireColumnTypes, WireSchema, WireType,
+    WireAdapter, WireColumnTypes, WireKind, WireSchema, WireType,
 };
 
 use crate::backend::ScalarFamily;
@@ -235,6 +238,26 @@ impl WireSchema for WireCatalog {
     }
 }
 
+/// The [`WireType`] the column at `column_id` travels as, or `None` when its
+/// declared type has no [`ScalarFamily`].
+///
+/// The family's own type, except for a decimal with a declared scale, which
+/// travels as [`WireType::ScaledDecimal`] at that scale.
+fn column_wire_type<DB: DatabaseLike>(
+    database: &DB,
+    table_id: TableId,
+    column_id: ColumnId,
+) -> Option<WireType> {
+    let family = catalog_helpers::column_scalar_family(database, table_id, column_id)?;
+    if family == ScalarFamily::Decimal {
+        if let Some(scale) = catalog_helpers::column_minor_unit_scale(database, table_id, column_id)
+        {
+            return Some(WireType::ScaledDecimal { scale });
+        }
+    }
+    Some(scalar_kind_to_wire_type(family))
+}
+
 /// Build one [`WireTable`] for `table_id`.
 fn build_wire_table<DB: DatabaseLike>(
     database: &DB,
@@ -246,8 +269,7 @@ fn build_wire_table<DB: DatabaseLike>(
     for ordinal in 0..arity {
         let column_id = ColumnId::try_from(ordinal)
             .map_err(|_| crate::CatalogError::UnknownColumn { table_id, ordinal })?;
-        let wire_type = catalog_helpers::column_scalar_family(database, table_id, column_id)
-            .map_or(WireType::Text, scalar_kind_to_wire_type);
+        let wire_type = column_wire_type(database, table_id, column_id).unwrap_or(WireType::Text);
         wire_types.push(wire_type);
     }
     Ok(WireTable { inner, wire_types })
@@ -291,7 +313,7 @@ where
 /// back.
 #[must_use]
 pub fn wal2json_adapter() -> TypeMap<Wal2Json, String, Vec<u8>> {
-    TypeMap::defaults().with(WireType::Uuid, UuidBlob16Decoder)
+    TypeMap::defaults().with(WireKind::Uuid, UuidBlob16Decoder)
 }
 
 /// Fold a batch of wal2json CDC events into one [`PatchsetFormat`]
@@ -419,7 +441,7 @@ where
 #[cfg(feature = "pgoutput-emit")]
 #[must_use]
 pub fn pgoutput_adapter() -> TypeMap<PgWalstream, String, Vec<u8>> {
-    TypeMap::defaults().with(WireType::Uuid, UuidBlob16Decoder)
+    TypeMap::defaults().with(WireKind::Uuid, UuidBlob16Decoder)
 }
 
 /// Fold a batch of pgoutput `ChangeEvent`s into one [`PatchsetFormat`]
@@ -590,10 +612,11 @@ pub fn pgbinary_adapter() -> TypeMap<PgBinary, String, Vec<u8>> {
 /// carries one `Option<&[u8]>` per result column, the raw Postgres binary
 /// bytes (or `None` for SQL NULL), aligned to `column_names`. Column order
 /// and primary key come from the catalog, and each column's [`WireType`] is
-/// the catalog's (via [`scalar_kind_to_wire_type`]), the same source the
-/// pgoutput CDC path folds through, so the patchset is byte-identical to
-/// that path for the same rows (a `uuid` lands as a 16-byte blob). A
-/// catalog column absent from `column_names` is stored as NULL.
+/// the catalog's (a scaled decimal as [`WireType::ScaledDecimal`]), the
+/// same source the pgoutput CDC path folds through, so the patchset is
+/// byte-identical to that path for the same rows (a `uuid` lands as a
+/// 16-byte blob). A catalog column absent from `column_names` is stored as
+/// NULL.
 ///
 /// A snapshot is a set of rows to insert with no old images, so this
 /// assembles [`Insert`]s directly rather than using the `Digestable` fold
@@ -631,8 +654,7 @@ pub fn pgbinary_patchset_builder<B: crate::backend::Backend, DB: DatabaseLike>(
             .column_name(ordinal)
             .ok_or_else(|| ConversionError::TableNotFound(table.to_string()))?
             .to_string();
-        let wire_type = catalog_helpers::column_scalar_family(database, table_id, column_id)
-            .map(scalar_kind_to_wire_type)
+        let wire_type = column_wire_type(database, table_id, column_id)
             .ok_or_else(|| ConversionError::UnsupportedType(name.clone()))?;
         columns.push((name, wire_type));
     }
@@ -1179,6 +1201,131 @@ mod tests {
         assert_eq!(
             only_insert_values(&binary_bytes)[1],
             WireValue::Text("2026-09-23 13:42:07.957522+00:00".into())
+        );
+    }
+
+    /// A decimal with a declared scale travels as minor units at that
+    /// scale, `NUMERIC(10)` at scale 0, and a bare `NUMERIC`, which holds
+    /// any scale, keeps its decimal text.
+    #[test]
+    fn only_a_declared_scale_makes_a_decimal_travel_as_minor_units() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE amounts (id INT PRIMARY KEY, amount NUMERIC(10,2), \
+             whole NUMERIC(10), bare NUMERIC);",
+        )
+        .unwrap();
+        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let table = catalog.get(None, "amounts").expect("amounts resolves");
+        assert_eq!(table.column_type(1), WireType::ScaledDecimal { scale: 2 });
+        assert_eq!(table.column_type(2), WireType::ScaledDecimal { scale: 0 });
+        assert_eq!(table.column_type(3), WireType::Decimal);
+    }
+
+    /// The replica pg2sqlite generates holds a `NUMERIC(10,2)` column as an
+    /// `INTEGER` of minor units, so the snapshot and both CDC sources write
+    /// `12.50` as `1250`, and write it identically.
+    #[cfg(feature = "pgoutput-emit")]
+    #[test]
+    fn a_scaled_numeric_travels_as_minor_units_on_every_path() {
+        use sqlite_diff_rs::pg_walstream::{ColumnValue, EventType, Lsn, RowData};
+
+        // An amount as PostgreSQL binary `numeric` (ndigits, weight, sign,
+        // dscale, then base-10000 digits) and as its text output, `None` for
+        // NULL.
+        type Amount = Option<(&'static [u8], &'static str)>;
+
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE amounts (id INT PRIMARY KEY, amount NUMERIC(10,2));",
+        )
+        .unwrap();
+        let amounts: [(i32, Amount); 5] = [
+            (
+                1,
+                Some((&[0, 1, 0xff, 0xff, 0, 0, 0, 2, 0x05, 0x78], "0.14")),
+            ),
+            (
+                2,
+                Some((&[0, 2, 0, 0, 0, 0, 0, 2, 0, 12, 0x13, 0x88], "12.50")),
+            ),
+            (3, Some((&[0, 1, 0, 0, 0, 0, 0, 2, 0, 7], "7.00"))),
+            (
+                4,
+                Some((&[0, 2, 0, 0, 0x40, 0, 0, 2, 0, 3, 0x13, 0x88], "-3.50")),
+            ),
+            (5, None),
+        ];
+
+        let ids: Vec<[u8; 4]> = amounts.iter().map(|(id, _)| id.to_be_bytes()).collect();
+        let rows: Vec<Vec<Option<&[u8]>>> = amounts
+            .iter()
+            .zip(&ids)
+            .map(|((_, amount), id)| vec![Some(id.as_slice()), amount.map(|(raw, _)| raw)])
+            .collect();
+        let snapshot = pgbinary_patchset::<crate::backend::Postgres, _>(
+            &db,
+            "amounts",
+            &["id", "amount"],
+            &rows,
+        )
+        .unwrap();
+
+        let events: Vec<ChangeEvent> = amounts
+            .iter()
+            .map(|(id, amount)| ChangeEvent {
+                event_type: EventType::Insert {
+                    schema: "public".into(),
+                    table: "amounts".into(),
+                    relation_oid: 1,
+                    data: RowData::from_pairs(vec![
+                        ("id", ColumnValue::text(&id.to_string())),
+                        (
+                            "amount",
+                            amount.map_or(ColumnValue::Null, |(_, text)| ColumnValue::text(text)),
+                        ),
+                    ]),
+                },
+                lsn: Lsn::new(1),
+                metadata: None,
+            })
+            .collect();
+        let pgoutput = pgoutput_patchset(&db, &events).unwrap();
+
+        let messages: Vec<_> = amounts
+            .iter()
+            .map(|(id, amount)| {
+                let value = amount.map_or("null", |(_, text)| text);
+                parse_v2(&alloc::format!(
+                    r#"{{"action":"I","schema":"public","table":"amounts","columns":[{{"name":"id","type":"integer","value":{id}}},{{"name":"amount","type":"numeric(10,2)","value":{value}}}]}}"#
+                ))
+                .unwrap()
+            })
+            .collect();
+        let wal2json = wal2json_patchset(&db, &messages).unwrap();
+
+        assert_eq!(snapshot, pgoutput, "the snapshot and pgoutput agree");
+        assert_eq!(snapshot, wal2json, "the snapshot and wal2json agree");
+        let parsed = PatchsetOps {
+            parsed: parse_patchset(&snapshot),
+        };
+        let stored: Vec<WireValue<String, Vec<u8>>> = parsed
+            .ops()
+            .iter()
+            .map(|op| {
+                let PatchsetOp::Insert { values, .. } = op else {
+                    panic!("expected an insert op, got {op:?}");
+                };
+                values[1].clone()
+            })
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                WireValue::Integer(14),
+                WireValue::Integer(1250),
+                WireValue::Integer(700),
+                WireValue::Integer(-350),
+                WireValue::Null,
+            ]
         );
     }
 

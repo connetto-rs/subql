@@ -1295,9 +1295,9 @@ dependencies = [
 
 [[package]]
 name = "sqlite-diff-rs"
-version = "0.16.1"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4a8b5a943c0d72e94795ef8d10977f9ad611eb6efd0a65ce2ffa9cc59416b0d"
+checksum = "61123d20ec4d539aef6fcfe690fa4eaed2fa2ebe80dc07154e1468576821c5c6"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap",

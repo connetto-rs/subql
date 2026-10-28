@@ -1,26 +1,29 @@
 //! MySQL adapter for [`sqlite_diff_rs`] patchset application.
 //!
 //! Dispatches MySQL `TINYINT(1)` / `BOOLEAN` columns to native `bool`
-//! binds when the wire carries an SQLite `Value::Integer`. All other
-//! columns fall through to [`sqlite_diff_rs::DefaultBinder`].
+//! binds when the wire carries an SQLite `Value::Integer`, and
+//! `DECIMAL(p,s)` columns to native `DECIMAL` binds from the integer count
+//! of minor units a replica stores. All other columns fall through to
+//! [`sqlite_diff_rs::DefaultBinder`].
 
 use alloc::boxed::Box;
 
 use diesel::mysql::Mysql;
 use diesel::query_builder::AstPass;
 use diesel::result::QueryResult;
-use diesel::sql_types::Bool;
+use diesel::sql_types::{Bool, Numeric};
 use sql_traits::prelude::{ColumnLike, DatabaseLike, DialectLike, TypeMatchLike};
 use sqlite_diff_rs::{Adapter, Binder, DefaultBinder, Value};
 
-use super::columns::{bind_error, shape_of, unknown_column_error, ColumnIndex};
+use super::columns::{bind_error, minor_units, shape_of, unknown_column_error, ColumnIndex};
 
 /// Adapter that resolves column names and native diesel binders for a
 /// MySQL target from a subql catalog.
 ///
 /// Dispatches MySQL `TINYINT(1)` / `BOOLEAN` columns to native `bool`
-/// binds when the wire carries an SQLite `Value::Integer`. All other
-/// columns fall through to [`DefaultBinder`].
+/// binds when the wire carries an SQLite `Value::Integer`, and
+/// `DECIMAL(p,s)` columns to native `DECIMAL` binds from minor units. All
+/// other columns fall through to [`DefaultBinder`].
 #[derive(Debug)]
 pub struct MysqlAdapter<'db, DB: DatabaseLike> {
     catalog: &'db DB,
@@ -80,6 +83,14 @@ where
                 )),
             };
         }
+        // `DECIMAL(p,s)` arrives as the replica's integer count of minor
+        // units, `value × 10^s`.
+        if let Some(scale) = crate::catalog_helpers::minor_unit_scale(self.catalog, col) {
+            return Ok(match minor_units(col.column_name(), value, scale)? {
+                Some(decimal) => Box::new(DecimalBinder(decimal)),
+                None => Box::new(DefaultBinder::from(value)),
+            });
+        }
         Ok(Box::new(DefaultBinder::from(value)))
     }
 }
@@ -93,6 +104,17 @@ struct BoolBinder(bool);
 impl Binder<Mysql> for BoolBinder {
     fn walk<'b>(&'b self, out: &mut AstPass<'_, 'b, Mysql>) -> QueryResult<()> {
         out.push_bind_param::<Bool, bool>(&self.0)
+    }
+}
+
+/// Binder that pushes a decimal onto the AST as a native [`Numeric`] bind.
+/// Constructed by [`MysqlAdapter`] when a `DECIMAL(p,s)` column receives
+/// the replica's integer count of minor units.
+struct DecimalBinder(bigdecimal::BigDecimal);
+
+impl Binder<Mysql> for DecimalBinder {
+    fn walk<'b>(&'b self, out: &mut AstPass<'_, 'b, Mysql>) -> QueryResult<()> {
+        out.push_bind_param::<Numeric, bigdecimal::BigDecimal>(&self.0)
     }
 }
 
@@ -181,5 +203,29 @@ mod tests {
                 "the refusal names the column, the expectation and the wire shape"
             );
         }
+    }
+
+    /// A `DECIMAL(p,s)` column arrives as the replica's integer count of
+    /// minor units, so it binds an integer and refuses decimal text, naming
+    /// the column, rather than storing a value off by `10^s`.
+    #[test]
+    fn a_scaled_decimal_binds_minor_units_and_refuses_text() {
+        let db = ParserDB::parse::<MySqlDialect>(
+            "CREATE TABLE ledger (id BIGINT PRIMARY KEY, price DECIMAL(10,2));",
+        )
+        .unwrap();
+        let adapter = MysqlAdapter::new(&db).expect("the catalog indexes");
+        let bind = |value: &Value<String, Vec<u8>>| {
+            Adapter::<Mysql, String, Vec<u8>>::bind(&adapter, "ledger", 1, value)
+                .map(drop)
+                .map_err(|err| err.to_string())
+        };
+
+        assert_eq!(bind(&Value::Integer(1250)), Ok(()));
+        assert_eq!(bind(&Value::Null), Ok(()));
+        assert_eq!(
+            bind(&Value::Text("12.50".to_string())),
+            Err("column `price` expects minor-units INTEGER or NULL, got TEXT".to_string())
+        );
     }
 }
