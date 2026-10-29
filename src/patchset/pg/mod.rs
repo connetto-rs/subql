@@ -361,5 +361,10 @@ mod tests {
             bind(2, &Value::Integer(1250)).is_err(),
             "a bare NUMERIC still takes only decimal text"
         );
+        assert_eq!(
+            bind(2, &Value::Text("twelve".to_string())),
+            Err("column `bare` expects decimal TEXT or NULL, got unparseable TEXT".to_string()),
+            "a bare NUMERIC refuses text that is not a decimal"
+        );
     }
 }

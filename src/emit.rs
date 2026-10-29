@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 use maxwell_cdc::Message as MaxwellMessage;
-use sql_traits::prelude::{DatabaseLike, TableLike};
+use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
 use sqlite_diff_rs::maxwell::{ConversionError as MaxwellConversionError, Maxwell};
 #[cfg(feature = "pgoutput-emit")]
 use sqlite_diff_rs::pg_walstream::{
@@ -238,8 +238,8 @@ impl WireSchema for WireCatalog {
     }
 }
 
-/// The [`WireType`] the column at `column_id` travels as, or `None` when its
-/// declared type has no [`ScalarFamily`].
+/// The [`WireType`] the column at `column_id` travels as, or `None` when the
+/// column is unknown or its declared type has no [`ScalarFamily`].
 ///
 /// The family's own type, except for a decimal with a declared scale, which
 /// travels as [`WireType::ScaledDecimal`] at that scale.
@@ -248,14 +248,13 @@ fn column_wire_type<DB: DatabaseLike>(
     table_id: TableId,
     column_id: ColumnId,
 ) -> Option<WireType> {
-    let family = catalog_helpers::column_scalar_family(database, table_id, column_id)?;
-    if family == ScalarFamily::Decimal {
-        if let Some(scale) = catalog_helpers::column_minor_unit_scale(database, table_id, column_id)
-        {
-            return Some(WireType::ScaledDecimal { scale });
-        }
-    }
-    Some(scalar_kind_to_wire_type(family))
+    catalog_helpers::column(database, table_id, column_id).and_then(|column| {
+        column.scalar_family(database).map(|family| match family {
+            ScalarFamily::Decimal => catalog_helpers::minor_unit_scale(database, column)
+                .map_or(WireType::Decimal, |scale| WireType::ScaledDecimal { scale }),
+            other => scalar_kind_to_wire_type(other),
+        })
+    })
 }
 
 /// Build one [`WireTable`] for `table_id`.
@@ -1206,12 +1205,13 @@ mod tests {
 
     /// A decimal with a declared scale travels as minor units at that
     /// scale, `NUMERIC(10)` at scale 0, and a bare `NUMERIC`, which holds
-    /// any scale, keeps its decimal text.
+    /// any scale, keeps its decimal text. So does a negative scale, which no
+    /// count of minor units can express.
     #[test]
     fn only_a_declared_scale_makes_a_decimal_travel_as_minor_units() {
         let db = ParserDB::parse::<PostgreSqlDialect>(
             "CREATE TABLE amounts (id INT PRIMARY KEY, amount NUMERIC(10,2), \
-             whole NUMERIC(10), bare NUMERIC);",
+             whole NUMERIC(10), bare NUMERIC, hundreds NUMERIC(5,-2));",
         )
         .unwrap();
         let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
@@ -1219,6 +1219,7 @@ mod tests {
         assert_eq!(table.column_type(1), WireType::ScaledDecimal { scale: 2 });
         assert_eq!(table.column_type(2), WireType::ScaledDecimal { scale: 0 });
         assert_eq!(table.column_type(3), WireType::Decimal);
+        assert_eq!(table.column_type(4), WireType::Decimal);
     }
 
     /// The replica pg2sqlite generates holds a `NUMERIC(10,2)` column as an
@@ -1304,29 +1305,32 @@ mod tests {
 
         assert_eq!(snapshot, pgoutput, "the snapshot and pgoutput agree");
         assert_eq!(snapshot, wal2json, "the snapshot and wal2json agree");
-        let parsed = PatchsetOps {
-            parsed: parse_patchset(&snapshot),
-        };
-        let stored: Vec<WireValue<String, Vec<u8>>> = parsed
-            .ops()
-            .iter()
-            .map(|op| {
-                let PatchsetOp::Insert { values, .. } = op else {
-                    panic!("expected an insert op, got {op:?}");
-                };
-                values[1].clone()
-            })
-            .collect();
-        assert_eq!(
-            stored,
-            vec![
-                WireValue::Integer(14),
-                WireValue::Integer(1250),
-                WireValue::Integer(700),
-                WireValue::Integer(-350),
-                WireValue::Null,
-            ]
+        let table = catalog_helpers::simple_table(
+            &db,
+            catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "amounts").unwrap(),
+        )
+        .unwrap();
+        let expected = [
+            (1, WireValue::Integer(14)),
+            (2, WireValue::Integer(1250)),
+            (3, WireValue::Integer(700)),
+            (4, WireValue::Integer(-350)),
+            (5, WireValue::Null),
+        ]
+        .into_iter()
+        .fold(
+            PatchSet::<SimpleTable, String, Vec<u8>>::new(),
+            |builder, (id, amount)| {
+                builder.insert(
+                    Insert::from(table.clone())
+                        .set(0, id)
+                        .unwrap()
+                        .set(1, amount)
+                        .unwrap(),
+                )
+            },
         );
+        assert_eq!(snapshot, expected.build());
     }
 
     #[test]

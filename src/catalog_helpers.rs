@@ -635,18 +635,19 @@ pub fn minor_unit_scale<DB: DatabaseLike>(database: &DB, column: &DB::Column) ->
     u32::try_from(column.numeric_scale(database)?).ok()
 }
 
-/// [`minor_unit_scale`] of the column at `column_id` in `table_id`.
+/// The catalog column at `column_id` in `table_id`, or `None` when the
+/// catalog holds no such table or column.
 #[must_use]
-pub fn column_minor_unit_scale<DB: DatabaseLike>(
+pub fn column<DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
     column_id: ColumnId,
-) -> Option<u32> {
-    let table = database.table_by_id(usize::try_from(table_id).ok()?)?;
-    let column = table
-        .column_by_id(usize::from(column_id), database)
-        .ok()??;
-    minor_unit_scale(database, column)
+) -> Option<&DB::Column> {
+    usize::try_from(table_id)
+        .ok()
+        .and_then(|index| database.table_by_id(index))
+        .and_then(|table| table.column_by_id(usize::from(column_id), database).ok())
+        .flatten()
 }
 
 /// Whether the table has row-level security enabled (per
@@ -685,6 +686,20 @@ mod tests {
             "CREATE TABLE orders (id INT PRIMARY KEY, amount INT, status TEXT);",
         )
         .expect("DDL parses")
+    }
+
+    /// A column resolves by its table and ordinal, and an id past either
+    /// answers `None` rather than another table's or column's entry.
+    #[test]
+    fn a_column_resolves_only_inside_its_table() {
+        let db = make_db();
+        let orders = table_id::<Postgres, _>(&db, "orders").unwrap();
+        assert_eq!(
+            column(&db, orders, 2).map(ColumnLike::column_name),
+            Some("status")
+        );
+        assert!(column(&db, orders, 3).is_none(), "past the last column");
+        assert!(column(&db, orders + 1, 0).is_none(), "past the last table");
     }
 
     /// What a quoted table name matches is the engine's rule, not one rule.
