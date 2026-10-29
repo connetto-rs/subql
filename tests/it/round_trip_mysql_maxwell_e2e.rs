@@ -13,9 +13,11 @@
 //!
 //! Dispatched columns exercise the MySQL type surface: `active BOOLEAN`
 //! (native bool), `id`/`token BINARY(16)` (UUID as a compact 16-byte
-//! blob, no `Uuid` wire type and no SQL cast), and `feeling ENUM(...)`
+//! blob, no `Uuid` wire type and no SQL cast), `feeling ENUM(...)`
 //! (an inline enum that flows as text, the MySQL analog of the Postgres
-//! domain and enum). No SQL casts anywhere: native diesel binds only.
+//! domain and enum), and `price DECIMAL(12,4)` (an `INTEGER` of minor
+//! units in the replica, `1234.5678` as `12345678`, bound back as a native
+//! `DECIMAL`). No SQL casts anywhere: native diesel binds only.
 //!
 //! Docker-backed. Run with:
 //!
@@ -32,7 +34,7 @@ use crate::common;
 
 use core::str::FromStr;
 
-use bigdecimal::BigDecimal;
+use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use diesel::sql_types::{
     BigInt, Binary, Bool, Date, Datetime, Double, Integer, Json, Nullable, Numeric, Text, Time,
@@ -59,7 +61,7 @@ const MYSQL_DDL: &str = "CREATE TABLE orders (id BINARY(16) PRIMARY KEY, amount 
 // The subql catalog only needs the table shape. `feeling` is an unknown
 // scalar (the enum), so subql treats it as text on the wire.
 const SUBQL_MYSQL_DDL: &str = "CREATE TABLE orders (id BINARY(16) PRIMARY KEY, amount INT, status VARCHAR(255), active BOOLEAN, token BINARY(16), feeling ENUM('happy','sad','neutral'), note VARCHAR(255), price DECIMAL(12,4), dt DATETIME(6), ts TIMESTAMP(6), d DATE, t TIME(6), js JSON, dp DOUBLE, bin VARBINARY(16), big BIGINT UNSIGNED);";
-const SQLITE_DDL: &str = "CREATE TABLE orders (id BLOB PRIMARY KEY, amount INTEGER, status TEXT, active INTEGER, token BLOB, feeling TEXT, note TEXT, price TEXT, dt TEXT, ts TEXT, d TEXT, t TEXT, js TEXT, dp REAL, bin BLOB, big TEXT);";
+const SQLITE_DDL: &str = "CREATE TABLE orders (id BLOB PRIMARY KEY, amount INTEGER, status TEXT, active INTEGER, token BLOB, feeling TEXT, note TEXT, price INTEGER, dt TEXT, ts TEXT, d TEXT, t TEXT, js TEXT, dp REAL, bin BLOB, big TEXT);";
 
 const ID_A: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const ID_B: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -120,8 +122,8 @@ struct SqliteOrder {
     feeling: String,
     #[diesel(sql_type = Nullable<Text>)]
     note: Option<String>,
-    #[diesel(sql_type = Nullable<Text>)]
-    price: Option<String>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    price: Option<i64>,
     #[diesel(sql_type = Text)]
     dt: String,
     #[diesel(sql_type = Text)]
@@ -394,7 +396,10 @@ fn sqlite_view(row: &MyOrder) -> SqliteOrder {
         token: row.token.clone(),
         feeling: row.feeling.clone(),
         note: row.note.clone(),
-        price: row.price.as_ref().map(ToString::to_string),
+        price: row
+            .price
+            .as_ref()
+            .map(|price| (price * BigDecimal::from(10_000)).to_i64().unwrap()),
         dt: row.dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
         ts: row.ts.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
         d: row.d.format("%Y-%m-%d").to_string(),

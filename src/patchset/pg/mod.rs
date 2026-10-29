@@ -16,12 +16,15 @@
 //!   BLOB storage and clients that prefer TEXT storage to coexist against
 //!   the same server without changing the adapter. Any other wire shape
 //!   on a `UUID` column is rejected.
-//! * `NUMERIC` / `DECIMAL` gets a native `Numeric` bind when the wire
-//!   carries a `Value::Text` holding the verbatim decimal digits, parsed
-//!   through [`bigdecimal::BigDecimal`]. The target column is classified
-//!   through the catalog's [`crate::backend::ScalarKind`], since Postgres has no implicit
-//!   assignment cast from text to `numeric`. Any other wire shape on a
-//!   decimal column is rejected.
+//! * `NUMERIC(p,s)` / `DECIMAL(p,s)` gets a native `Numeric` bind when the
+//!   wire carries a `Value::Integer` of minor units, which is how a
+//!   pg2sqlite replica stores the column: `1250` binds as `12.50` at scale
+//!   2. A `NUMERIC` without a declared scale binds from a `Value::Text`
+//!   holding the verbatim decimal digits, parsed through
+//!   [`bigdecimal::BigDecimal`]. The target column is classified through
+//!   the catalog's [`crate::backend::ScalarKind`], since Postgres has no
+//!   implicit assignment cast from text to `numeric`. Any other wire shape
+//!   on a decimal column is rejected.
 //! * `TIMESTAMP`, `TIMESTAMPTZ`, `DATE`, and `TIME` get native temporal
 //!   binds when the wire carries a `Value::Text` holding the replica's
 //!   temporal text (`YYYY-MM-DD HH:MM:SS.ffffff+00:00` for a
@@ -63,7 +66,9 @@ use sql_traits::prelude::{ColumnLike, DatabaseLike, DialectLike, TypeMatchLike};
 use sqlite_diff_rs::{Adapter, Binder, DefaultBinder, Value};
 
 use crate::backend::{ScalarFamily, ScalarKindOf};
-use crate::patchset::columns::{bind_error, shape_of, unknown_column_error, ColumnIndex};
+use crate::patchset::columns::{
+    bind_error, minor_units, shape_of, unknown_column_error, ColumnIndex,
+};
 
 pub(crate) mod custom_type;
 
@@ -205,11 +210,17 @@ where
             .and_then(|kind| kind.family())
         {
             Some(ScalarFamily::Decimal) => {
-                text_scalar_bind(col_name, value, "decimal TEXT or NULL", |s| {
-                    Some(bind_as::<Numeric, BigDecimal>(
-                        sql_scalar_text::parse_decimal(s)?,
-                    ))
-                })
+                match crate::catalog_helpers::minor_unit_scale(self.catalog, col) {
+                    Some(scale) => Ok(match minor_units(col_name, value, scale)? {
+                        Some(decimal) => bind_as::<Numeric, BigDecimal>(decimal),
+                        None => Box::new(DefaultBinder::from(value)),
+                    }),
+                    None => text_scalar_bind(col_name, value, "decimal TEXT or NULL", |s| {
+                        Some(bind_as::<Numeric, BigDecimal>(
+                            sql_scalar_text::parse_decimal(s)?,
+                        ))
+                    }),
+                }
             }
             Some(ScalarFamily::Timestamp) => {
                 text_scalar_bind(col_name, value, "timestamp TEXT or NULL", |s| {
@@ -319,6 +330,41 @@ mod tests {
         assert!(
             err.contains("ghosts"),
             "the refusal names the unknown table, got {err:?}"
+        );
+    }
+
+    /// A `NUMERIC(p,s)` column arrives as the replica's integer count of
+    /// minor units, so it refuses the decimal text a bare `NUMERIC` takes,
+    /// naming the column, rather than binding a value off by `10^s`.
+    #[test]
+    fn a_scaled_numeric_binds_minor_units_and_refuses_text() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE ledger (id BIGINT PRIMARY KEY, price NUMERIC(10,2), bare NUMERIC);",
+        )
+        .unwrap();
+        let adapter = PgAdapter::new(&db).expect("the catalog indexes");
+        let bind = |column: usize, value: &Value<String, Vec<u8>>| {
+            Adapter::<Pg, String, Vec<u8>>::bind(&adapter, "ledger", column, value)
+                .map(drop)
+                .map_err(|err| err.to_string())
+        };
+
+        assert_eq!(bind(1, &Value::Integer(1250)), Ok(()));
+        assert_eq!(bind(1, &Value::Null), Ok(()));
+        let err = bind(1, &Value::Text("12.50".to_string())).unwrap_err();
+        assert!(
+            err.contains("price"),
+            "the refusal names the column, got {err:?}"
+        );
+        assert_eq!(bind(2, &Value::Text("12.50".to_string())), Ok(()));
+        assert!(
+            bind(2, &Value::Integer(1250)).is_err(),
+            "a bare NUMERIC still takes only decimal text"
+        );
+        assert_eq!(
+            bind(2, &Value::Text("twelve".to_string())),
+            Err("column `bare` expects decimal TEXT or NULL, got unparseable TEXT".to_string()),
+            "a bare NUMERIC refuses text that is not a decimal"
         );
     }
 }
