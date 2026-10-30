@@ -1519,6 +1519,7 @@ mod tests {
             },
             lsn: Lsn::new(1),
             metadata: None,
+            xid: None,
         };
         let pgoutput = pgoutput_patchset(&db, core::slice::from_ref(&event)).unwrap();
         let line = r#"{"action":"I","schema":"public","table":"things","columns":[{"name":"id","type":"integer","value":1},{"name":"tags","type":"integer[]","value":"{1,2}"},{"name":"emb","type":"vector","value":"[1,2,3]"},{"name":"span","type":"interval","value":"00:15:00"}]}"#;
