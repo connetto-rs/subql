@@ -137,10 +137,8 @@ fn a_bound_interval_matches_by_span() {
 
 /// What the engine does not model over an interval is read from the database.
 #[test]
-fn interval_aggregates_arithmetic_and_grouping_are_reread() {
+fn interval_arithmetic_and_grouping_are_reread() {
     for statement in [
-        "SELECT SUM(span) FROM shifts",
-        "SELECT AVG(span) FROM shifts",
         "SELECT * FROM shifts WHERE span + interval '1 hour' > '2 hours'",
         "SELECT * FROM shifts WHERE span * 2 > '2 hours'",
         "SELECT span, COUNT(*) FROM shifts GROUP BY span",

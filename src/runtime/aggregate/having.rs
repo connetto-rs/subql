@@ -37,8 +37,10 @@ impl GroupHaving {
                 }
                 SumRule::Decimal { .. } => ScalarFamily::Decimal,
                 SumRule::Single | SumRule::Double => ScalarFamily::Float,
+                SumRule::Interval => ScalarFamily::Interval,
             },
             HavingSubject::Aggregate(HavingFunction::Avg) => match (rule.total, rule.mean) {
+                (SumRule::Interval, _) => ScalarFamily::Interval,
                 (SumRule::Single | SumRule::Double, _) | (_, MeanRule::Double) => {
                     ScalarFamily::Float
                 }
@@ -78,6 +80,9 @@ impl GroupHaving {
                     Total::Single(parts, _) | Total::Double(parts, _) => {
                         self.threshold.float::<B>(parts.value())
                     }
+                    // A numeric threshold never compares with an interval,
+                    // and registration reads any such condition instead.
+                    Total::Interval(_) => Ok(None),
                 }
             }
             HavingSubject::Aggregate(function) => match accumulator.value_as(function) {
@@ -221,6 +226,7 @@ impl NumericThreshold {
             NumericValue::Integer(value) => self.integer::<B>(*value),
             NumericValue::Decimal(value) => self.decimal::<B>(value),
             NumericValue::Double(value) => self.float::<B>(*value),
+            NumericValue::Interval(_) => Ok(None),
         }
     }
 }

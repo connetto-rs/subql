@@ -153,6 +153,7 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> Backend for Postgres<V> {
             // two engines, so the width the column declares is the width
             // the total accumulates in.
             DeclaredType::Float(super::scalar_value::FloatWidth::Single) => SumRule::Single,
+            DeclaredType::Interval => SumRule::Interval,
             _ => SumRule::Double,
         }
     }

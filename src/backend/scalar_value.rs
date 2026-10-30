@@ -902,6 +902,10 @@ pub enum SumRule {
     /// answers `16777218`, so it widens each cell first. SQLite has no
     /// single-precision storage to widen.
     Double,
+    /// PostgreSQL's `sum(interval)`, months, days and microseconds summed
+    /// apart, which raises `interval out of range` when one leaves its
+    /// field. Its mean is `interval_div` of that total by the count.
+    Interval,
 }
 
 /// What a backend can do with one text comparison.

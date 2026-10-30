@@ -68,6 +68,7 @@ pub(super) fn probe_column_for_agg<E: CdcEvent, DB: DatabaseLike>(
             .map_or(AggCellRead::NonNumeric, |decimal| {
                 AggCellRead::Decimal(decimal.clone())
             }),
+        Value::Interval(interval) => AggCellRead::Interval(*interval),
         _ => AggCellRead::NonNumeric,
     })
 }
