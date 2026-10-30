@@ -56,7 +56,10 @@ use sqlite_diff_rs::ApplyOpsAsync;
 #[cfg(feature = "apply-patchset-postgres")]
 pub mod pg;
 #[cfg(feature = "apply-patchset-postgres")]
-pub use pg::{bind_as, CustomTypePgAdapter, PgAdapter, PgCustomBinder};
+pub use pg::{
+    bind_array_as, bind_as, CustomTypePgAdapter, PgAdapter, PgArray, PgCustomBinder, PgVector,
+    VectorType,
+};
 
 #[cfg(feature = "apply-patchset-mysql")]
 pub mod mysql;
