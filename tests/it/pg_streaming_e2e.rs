@@ -1491,6 +1491,17 @@ impl PitrCluster {
             "find /var/lib/postgresql/data/pg_wal -name 00000002.history -exec cat {} +",
         ])
     }
+
+    /// Delete the clone's `00000002.history` from its disk.
+    fn remove_history(&self) {
+        docker_ok(&[
+            "exec",
+            &self.container,
+            "sh",
+            "-c",
+            "find /var/lib/postgresql/data/pg_wal -name 00000002.history -delete",
+        ]);
+    }
 }
 
 impl Drop for PitrCluster {
@@ -1533,7 +1544,8 @@ fn cluster_identity_of_the_running_cluster() {
     common::drop_slot(&mut setup, &slot);
 }
 
-/// A promoted point-in-time clone reports timeline 2 and its own history file's switch point.
+/// A promoted point-in-time clone reports timeline 2 and its own history file's switch point,
+/// and refuses to start once that history is gone.
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
 fn cluster_identity_of_a_promoted_point_in_time_clone() {
@@ -1554,18 +1566,62 @@ fn cluster_identity_of_a_promoted_point_in_time_clone() {
     let expected = raw_history_switches(&clone.raw_history());
     assert!(!expected.is_empty(), "history file names the branch");
 
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+    let connect = |config: PgStreamingConfig| {
+        let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+        current_thread_rt().block_on(PgStreamingCdcSource::connect(config, catalog))
+    };
     let config = PgStreamingConfig::new(clone.url(db.name()), &slot, publication);
-    current_thread_rt().block_on(async move {
-        let source = PgStreamingCdcSource::connect(config, catalog)
-            .await
-            .expect("connect to promoted clone");
-        let identity = source.cluster_identity();
-        assert_eq!(identity.timeline, 2);
-        assert_eq!(identity.history, expected);
-        // Promotion keeps the system id, which is why the timeline is needed.
-        assert_eq!(identity.system_id, system_id);
-    });
+    let source = connect(config.clone()).expect("connect to promoted clone");
+    let identity = source.cluster_identity();
+    assert_eq!(identity.timeline, 2);
+    assert_eq!(identity.history, expected);
+    // Promotion keeps the system id, which is why the timeline is needed.
+    assert_eq!(identity.system_id, system_id);
+    drop(source);
+
+    clone.remove_history();
+    let deadline = Instant::now() + ARRIVAL;
+    let error = loop {
+        match connect(config.clone()) {
+            Err(error) if error.to_string().contains("is active") && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => break error,
+            Ok(_) => panic!("a clone without its timeline history must not report an identity"),
+        }
+    };
+    assert!(
+        !matches!(error, PgStreamingError::SourceClosed),
+        "{error:?}"
+    );
+}
+
+/// A physical slot that bears the configured name is refused rather than streamed.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_physical_slot_of_the_configured_name_is_refused() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    let slot = db.slot("subql_pg_streaming_physical");
+    let publication = "subql_pg_streaming_physical_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    // Replication administration, which the query DSL does not express.
+    sql_query(format!(
+        "SELECT pg_create_physical_replication_slot('{slot}')"
+    ))
+    .execute(&mut setup)
+    .expect("create physical slot");
+
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+    let config = PgStreamingConfig::new(db.url(), &slot, publication);
+    let result = current_thread_rt().block_on(PgStreamingCdcSource::connect(config, catalog));
+    assert!(
+        result.is_err(),
+        "a physical slot cannot feed logical decoding"
+    );
+    common::drop_slot(&mut setup, &slot);
 }
 
 struct RouterState {

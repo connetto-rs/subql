@@ -372,9 +372,9 @@ impl Delivery {
     /// Place `change` in the transaction frame and stage its fanout, the
     /// rows first and a commit ending a transaction after them.
     fn stage(&mut self, change: pg_walstream::ChangeEvent) -> Result<(), TransactionOrderError> {
-        let committed = self.order.apply(change, &mut self.rows)?;
-        self.commit = committed;
-        Ok(())
+        self.order
+            .apply(change, &mut self.rows)
+            .map(|committed| self.commit = committed)
     }
 
     /// The next staged row past the resume filter, if any.
