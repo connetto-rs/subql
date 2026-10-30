@@ -15,7 +15,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use sql_traits::{
-    prelude::{ColumnLike, DatabaseLike, TableLike},
+    prelude::{ColumnLike, DataTypeLike, DatabaseLike, TableLike},
     structs::{FingerprintError, SchemaFingerprint, TargetName},
     utils::scalar_family::scalar_family,
 };
@@ -441,7 +441,7 @@ pub fn column_scalar_kind<B: crate::backend::Backend, DB: DatabaseLike>(
     let column = table
         .column_by_id(usize::from(column_id), database)
         .ok()??;
-    classify_scalar_kind::<B>(&column.data_type(database))
+    classify_scalar_kind::<B>(&column.data_type(database).name(database))
 }
 
 /// The width a fixed-length binary column pads its values to with zero
@@ -456,7 +456,7 @@ pub fn fixed_binary_length<DB: DatabaseLike>(
     let column = table
         .column_by_id(usize::from(column_id), database)
         .ok()??;
-    usize::try_from(column.fixed_binary_length(database)?).ok()
+    usize::try_from(column.data_type(database).fixed_binary_length(database)?).ok()
 }
 
 /// Returns the scalar and comparison facts for one group-key column.
@@ -471,7 +471,7 @@ pub fn column_comparison<B: crate::backend::Backend, DB: DatabaseLike>(
     let column = table
         .column_by_id(usize::from(column_id), database)
         .ok()??;
-    let declared_type = column.data_type(database).into_owned();
+    let declared_type = column.data_type(database).name(database).into_owned();
     let kind = classify_scalar_kind::<B>(&declared_type)?;
     let collation = column.collation(database).ok()?.into_owned();
     Some(ColumnComparison {
@@ -487,7 +487,11 @@ pub fn column_comparison<B: crate::backend::Backend, DB: DatabaseLike>(
 pub(crate) fn classify_scalar_kind<B: crate::backend::Backend>(
     declared_type: &str,
 ) -> Option<ScalarKindOf<B>> {
-    if let Some(family) = scalar_family(declared_type) {
+    // subql holds no interval value, so an interval column has no builtin kind
+    // and a predicate on one is re-executed against the database.
+    if let Some(family) = scalar_family(declared_type)
+        .filter(|family| *family != crate::backend::ScalarFamily::Interval)
+    {
         // The family is upstream's coarse answer; the refinements the
         // declaration fixes are the backend's, because the spellings differ
         // per engine.
@@ -620,19 +624,19 @@ pub fn column_scalar_family<DB: DatabaseLike>(
     let column = table
         .column_by_id(usize::from(column_id), database)
         .ok()??;
-    scalar_family(&column.data_type(database))
+    column.data_type(database).scalar_family(database)
 }
 
-/// The scale at which a column's values travel the SQLite wire as an integer
-/// count of minor units, or `None` for a column that travels as itself.
+/// The scale at which a value of `data_type` travels the SQLite wire as an
+/// integer count of minor units, or `None` for a type that travels as itself.
 ///
 /// A pg2sqlite replica stores a `NUMERIC(p,s)` column as an `INTEGER` of
 /// `value × 10^s`, so `12.50` at scale 2 is `1250`. A decimal declared
 /// without a scale has no such column, and neither has a negative scale, so
 /// both answer `None` and keep the decimal text.
 #[must_use]
-pub fn minor_unit_scale<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Option<u32> {
-    u32::try_from(column.numeric_scale(database)?).ok()
+pub fn minor_unit_scale<DB: DatabaseLike>(database: &DB, data_type: &DB::DataType) -> Option<u32> {
+    u32::try_from(data_type.numeric_scale(database)?).ok()
 }
 
 /// The catalog column at `column_id` in `table_id`, or `None` when the

@@ -732,7 +732,8 @@ pub fn cell_strategy(
         | ScalarFamily::Timestamp
         | ScalarFamily::TimestampTz
         | ScalarFamily::Json
-        | ScalarFamily::Jsonb => None,
+        | ScalarFamily::Jsonb
+        | ScalarFamily::Interval => None,
     }
 }
 
@@ -925,7 +926,9 @@ mod tests {
                 | ScalarFamily::Timestamp
                 | ScalarFamily::TimestampTz
                 | ScalarFamily::Json
-                | ScalarFamily::Jsonb => {}
+                | ScalarFamily::Jsonb
+                // subql holds no interval value, so no column generates one.
+                | ScalarFamily::Interval => {}
             }
         }
         assert!(

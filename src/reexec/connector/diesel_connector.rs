@@ -168,7 +168,8 @@ where
         | ScalarFamily::Time
         | ScalarFamily::Decimal
         | ScalarFamily::Json
-        | ScalarFamily::Jsonb => boxed_read_query::<C::Backend, B>(query)?
+        | ScalarFamily::Jsonb
+        | ScalarFamily::Interval => boxed_read_query::<C::Backend, B>(query)?
             .get_result::<TextRow>(conn)?
             .v
             .map_or(Value::Null, B::value_from_string),

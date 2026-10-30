@@ -62,7 +62,7 @@ use diesel::sql_types::{
     Bool, Date, Json, Jsonb, Numeric, Time, Timestamp, Timestamptz, Uuid as UuidSqlType,
 };
 use sql_scalar_text::{parse_date, parse_time, parse_timestamp, parse_timestamp_tz};
-use sql_traits::prelude::{ColumnLike, DatabaseLike, DialectLike, TypeMatchLike};
+use sql_traits::prelude::{ColumnLike, DataTypeLike, DatabaseLike, DialectLike, TypeMatchLike};
 use sqlite_diff_rs::{Adapter, Binder, DefaultBinder, Value};
 
 use crate::backend::{ScalarFamily, ScalarKindOf};
@@ -114,7 +114,7 @@ impl<'db, DB: DatabaseLike> PgAdapter<'db, DB> {
     ) -> Option<ScalarKindOf<crate::backend::Postgres>> {
         let column = self.column_at(table_name, column_index)?;
         crate::catalog_helpers::classify_scalar_kind::<crate::backend::Postgres>(
-            &column.data_type(self.catalog),
+            &column.data_type(self.catalog).name(self.catalog),
         )
     }
 
@@ -127,7 +127,7 @@ impl<'db, DB: DatabaseLike> PgAdapter<'db, DB> {
     #[must_use]
     pub fn column_type_name(&self, table_name: &str, column_index: usize) -> Option<Cow<'_, str>> {
         self.column_at(table_name, column_index)
-            .map(|col| col.data_type(self.catalog))
+            .map(|col| col.data_type(self.catalog).name(self.catalog))
     }
 }
 
@@ -209,19 +209,11 @@ where
             .scalar_kind_at(table_name, column_index)
             .and_then(|kind| kind.family())
         {
-            Some(ScalarFamily::Decimal) => {
-                match crate::catalog_helpers::minor_unit_scale(self.catalog, col) {
-                    Some(scale) => Ok(match minor_units(col_name, value, scale)? {
-                        Some(decimal) => bind_as::<Numeric, BigDecimal>(decimal),
-                        None => Box::new(DefaultBinder::from(value)),
-                    }),
-                    None => text_scalar_bind(col_name, value, "decimal TEXT or NULL", |s| {
-                        Some(bind_as::<Numeric, BigDecimal>(
-                            sql_scalar_text::parse_decimal(s)?,
-                        ))
-                    }),
-                }
-            }
+            Some(ScalarFamily::Decimal) => decimal_bind(
+                col_name,
+                crate::catalog_helpers::minor_unit_scale(self.catalog, col.data_type(self.catalog)),
+                value,
+            ),
             Some(ScalarFamily::Timestamp) => {
                 text_scalar_bind(col_name, value, "timestamp TEXT or NULL", |s| {
                     Some(bind_as::<Timestamp, NaiveDateTime>(parse_timestamp(s)?))
@@ -260,6 +252,31 @@ where
             }
             _ => Ok(Box::new(DefaultBinder::from(value))),
         }
+    }
+}
+
+/// Bind a decimal column. With a declared `scale` the wire carries the
+/// replica's integer count of minor units, and without one the verbatim
+/// decimal text. `Value::Null` passes through as a literal NULL.
+fn decimal_bind<'a, S, B>(
+    col_name: &str,
+    scale: Option<u32>,
+    value: &'a Value<S, B>,
+) -> Result<Box<dyn Binder<Pg> + Send + 'a>, DieselError>
+where
+    S: AsRef<str> + Sync,
+    B: AsRef<[u8]> + Sync,
+{
+    match scale {
+        Some(scale) => Ok(match minor_units(col_name, value, scale)? {
+            Some(decimal) => bind_as::<Numeric, BigDecimal>(decimal),
+            None => Box::new(DefaultBinder::from(value)),
+        }),
+        None => text_scalar_bind(col_name, value, "decimal TEXT or NULL", |s| {
+            Some(bind_as::<Numeric, BigDecimal>(
+                sql_scalar_text::parse_decimal(s)?,
+            ))
+        }),
     }
 }
 

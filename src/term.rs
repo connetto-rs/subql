@@ -637,7 +637,10 @@ pub fn kind_can_key<B: Backend>(kind: ScalarKindOf<B>) -> bool {
             | ScalarFamily::Date
             | ScalarFamily::Time
             | ScalarFamily::Decimal => true,
-            ScalarFamily::Float | ScalarFamily::Json | ScalarFamily::Jsonb => false,
+            ScalarFamily::Float
+            | ScalarFamily::Json
+            | ScalarFamily::Jsonb
+            | ScalarFamily::Interval => false,
         },
     }
 }

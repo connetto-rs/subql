@@ -290,7 +290,7 @@ pub(super) fn column_kind_from_scalar<B: crate::backend::Backend>(
     Some(match kind.family()? {
         ScalarFamily::Bool => ColumnKind::Bool,
         ScalarFamily::Int => ColumnKind::Integer,
-        ScalarFamily::Float => ColumnKind::Unsupported,
+        ScalarFamily::Float | ScalarFamily::Interval => ColumnKind::Unsupported,
         ScalarFamily::String => ColumnKind::Text,
         ScalarFamily::Bytes => ColumnKind::Bytea,
         ScalarFamily::Uuid => ColumnKind::Uuid,

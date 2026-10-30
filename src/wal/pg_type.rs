@@ -67,6 +67,8 @@ pub(super) fn text_to_pg_value_by_kind(text: &str, kind: DeclaredType) -> Value<
         ScalarFamily::Jsonb => serde_json::from_str(text).map_or(Value::Missing, Value::Jsonb),
         // Answered above, where the width decides.
         ScalarFamily::Float => Value::Missing,
+        // subql holds no interval value.
+        ScalarFamily::Interval => Value::Missing,
     }
 }
 
@@ -195,6 +197,8 @@ fn json_value_by_kind<B: JsonWireScalars>(
         ScalarFamily::Jsonb => B::document(value).map_or(Value::Missing, Value::Jsonb),
         // Answered above, where the width decides.
         ScalarFamily::Float => Value::Missing,
+        // subql holds no interval value.
+        ScalarFamily::Interval => Value::Missing,
     }
 }
 

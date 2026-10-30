@@ -111,6 +111,6 @@ const fn pg_type_oid_for_kind(kind: Option<ScalarFamily>) -> Oid {
         Some(ScalarFamily::Decimal) => 1700,
         Some(ScalarFamily::Json) => 114,
         Some(ScalarFamily::Jsonb) => 3802,
-        Some(ScalarFamily::String) | None => 25,
+        Some(ScalarFamily::String | ScalarFamily::Interval) | None => 25,
     }
 }
