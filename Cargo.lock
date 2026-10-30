@@ -1326,7 +1326,7 @@ dependencies = [
 [[package]]
 name = "diesel-sqlite-session"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/diesel-sqlite-session#eb602e20d405fbe30afb89429580ebc92038b44b"
+source = "git+https://github.com/connetto-rs/diesel-sqlite-session#7cd5f437619ba2b1c6942696607d518e32f4271b"
 dependencies = [
  "diesel",
  "libsqlite3-sys",
@@ -3843,7 +3843,7 @@ dependencies = [
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#69b0e5c27a94947cac61033340ebcf7350264161"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#761bee3aae934d835a9cf6928c4fc52768e40869"
 dependencies = [
  "sql-traits",
  "sqlparser",
@@ -4599,7 +4599,7 @@ dependencies = [
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#4f74d3c29e223e39782b2abc18e7fcea25ddfae9"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#94b94ef8c065dffe50e2c4fb431e60d014147d16"
 dependencies = [
  "openfga-client",
  "prost",
@@ -4614,7 +4614,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#4f74d3c29e223e39782b2abc18e7fcea25ddfae9"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#94b94ef8c065dffe50e2c4fb431e60d014147d16"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -5194,7 +5194,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#a1691749fc2072bc47223514dde731fa0d3165ba"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#241112ad77525b4254bc3c058ce010081c0fa2e9"
 dependencies = [
  "geometric-traits",
  "serde",
@@ -5206,9 +5206,9 @@ dependencies = [
 
 [[package]]
 name = "sqlite-diff-rs"
-version = "0.16.1"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4a8b5a943c0d72e94795ef8d10977f9ad611eb6efd0a65ce2ffa9cc59416b0d"
+checksum = "61123d20ec4d539aef6fcfe690fa4eaed2fa2ebe80dc07154e1468576821c5c6"
 dependencies = [
  "diesel",
  "diesel-async",
@@ -5236,7 +5236,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.63.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#594bb046b03ccf9463b00a5906b4ed8e2f2978a6"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#a1b99f26e8638557ab1b4ea008bf4e6e5d9e15de"
 dependencies = [
  "log",
  "recursive",
@@ -5247,7 +5247,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-canonicalize"
 version = "0.2.1"
-source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#4e8ea6b2214f3d2471453af47281e93b8d16bd20"
+source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#34b89281df2b822243fb5981a1e55d1aad428170"
 dependencies = [
  "seahash",
  "sqlparser",
@@ -5257,7 +5257,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#2ed76b30d3d805a96e0b7f3b67210c26b604bd9a"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#5b149a9de47f531e0875271980d9932a4da95398"
 dependencies = [
  "sqlparser",
  "thiserror 2.0.21",
@@ -5266,7 +5266,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.6.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#594bb046b03ccf9463b00a5906b4ed8e2f2978a6"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#a1b99f26e8638557ab1b4ea008bf4e6e5d9e15de"
 dependencies = [
  "proc-macro2",
  "quote",
