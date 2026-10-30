@@ -210,6 +210,7 @@ where
                 .collect(),
             transitions: Vec::new(),
             evaluation_failures: Vec::new(),
+            stopped: Vec::new(),
         })
     }
 }
@@ -293,6 +294,7 @@ where
                 .collect(),
             transitions: Vec::new(),
             evaluation_failures: Vec::new(),
+            stopped: Vec::new(),
         })
     }
 }
@@ -461,6 +463,7 @@ where
                 triggers: Vec::new(),
                 transitions: Vec::new(),
                 evaluation_failures: Vec::new(),
+                stopped: Vec::new(),
             });
         }
         if input.rows.len() != 1 {
@@ -490,6 +493,7 @@ where
             triggers: Vec::new(),
             transitions: Vec::new(),
             evaluation_failures: Vec::new(),
+            stopped: Vec::new(),
         })
     }
 }

@@ -384,6 +384,8 @@ mod round_trip_pg_wal2json_e2e;
 
 mod served_statement_shape;
 
+mod stopped_subscription_reads;
+
 mod quoted_parentheses;
 
 mod semantics_nan;

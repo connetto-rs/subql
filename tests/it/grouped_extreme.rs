@@ -1,15 +1,17 @@
 //! Grouped extrema fold cheap changes and re-read only a displaced group.
 #![allow(clippy::unwrap_used)]
 
+use sql_traits::prelude::DatabaseLike;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect};
-use subql::backend::{MySql, Postgres, SQLite, ScalarFamily, Value};
+use subql::backend::{CdcEvent, MySql, Postgres, RowKind, SQLite, ScalarFamily, Value};
 use subql::reexec::ReExecutionRead;
 use subql::testing::TestEvent;
 use subql::{
-    catalog_helpers, AggregateResultValue, AggregateValueChange, DefaultIds, GroupedScalarInstall,
-    GroupedScalarSeedInstall, Install, MaintenanceStopReason, PgLsn, SubscriptionEngine,
-    SubscriptionRequest, TableId, Tier, TierKind,
+    catalog_helpers, AggregateResultValue, AggregateValueChange, ColumnId, DefaultIds,
+    DispatchError, EventKind, GroupedScalarInstall, GroupedScalarSeedInstall, Install,
+    MaintenanceStopReason, PgLsn, ScalarInstall, SubscriptionEngine, SubscriptionRequest, TableId,
+    Tier, TierKind, ValueError,
 };
 
 const DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, region TEXT, amount INT, status TEXT);";
@@ -1282,4 +1284,292 @@ mod having_on_grouped_extreme {
         );
         assert!(output.triggers().is_empty());
     }
+}
+
+/// An event whose new image carries a `region` cell that no longer decodes
+/// into the column's declared text type, as the stream does after the
+/// column's type changed. Every other cell decodes.
+struct AlteredRegion<E> {
+    inner: E,
+    /// Whether the new image's `region` cell refuses to decode.
+    altered: bool,
+}
+
+impl<E: CdcEvent> AlteredRegion<E> {
+    const fn new(inner: E, altered: bool) -> Self {
+        Self { inner, altered }
+    }
+}
+
+impl<E: CdcEvent> CdcEvent for AlteredRegion<E> {
+    type Backend = E::Backend;
+    type Checkpoint = E::Checkpoint;
+
+    fn kind(&self) -> EventKind {
+        self.inner.kind()
+    }
+
+    fn table_id<DB: DatabaseLike>(&self, db: &DB) -> TableId {
+        self.inner.table_id(db)
+    }
+
+    fn checkpoint(&self) -> Option<E::Checkpoint> {
+        self.inner.checkpoint()
+    }
+
+    fn pk_columns<DB: DatabaseLike>(&self, db: &DB) -> Vec<ColumnId> {
+        self.inner.pk_columns(db)
+    }
+
+    fn changed_columns<DB: DatabaseLike>(&self, db: &DB) -> Vec<ColumnId> {
+        self.inner.changed_columns(db)
+    }
+
+    fn value_at<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        row: RowKind,
+        col: ColumnId,
+    ) -> Result<Value<E::Backend>, ValueError> {
+        if self.altered && row == RowKind::New && col == 1 {
+            return Err(ValueError::Builtin {
+                column: col,
+                kind: ScalarFamily::String,
+            });
+        }
+        self.inner.value_at(db, row, col)
+    }
+}
+
+type AlteredEngine = SubscriptionEngine<AlteredRegion<Event>, DefaultIds, ParserDB>;
+
+fn altered_engine() -> (AlteredEngine, TableId) {
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+    let table =
+        catalog_helpers::table_id::<Postgres, _>(&catalog, "orders").expect("orders resolves");
+    (
+        SubscriptionEngine::new(catalog, PostgreSqlDialect {}),
+        table,
+    )
+}
+
+#[test]
+fn an_undecodable_group_column_stops_only_its_subscription() {
+    let (mut engine, orders) = altered_engine();
+    // A grouped extreme seeded over its regions.
+    let sql = "SELECT region, MIN(amount) FROM orders WHERE status = 'paid' GROUP BY region";
+    let registered = engine
+        .register(SubscriptionRequest::new(7u64, sql))
+        .expect("the grouped extreme registers");
+    assert!(
+        matches!(registered.tier, Tier::GroupedScalar { .. }),
+        "expected the grouped scalar tier, got {:?}",
+        registered.tier
+    );
+    let grouped = registered.subscription_id;
+    Install::install(
+        &mut engine,
+        grouped,
+        GroupedScalarSeedInstall {
+            rows: vec![vec![
+                Value::String("north".into()),
+                Value::Int(5),
+                Value::Int(2),
+            ]],
+            fence: Some(PgLsn(5)),
+        },
+    )
+    .expect("the group seed installs");
+    // A sibling extreme on the same table that never reads the group column.
+    let sibling = engine
+        .register(SubscriptionRequest::new(
+            8u64,
+            "SELECT MIN(amount) FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sibling registers")
+        .subscription_id;
+    Install::install(
+        &mut engine,
+        sibling,
+        ScalarInstall {
+            value: Value::Int(4),
+            checkpoint: None,
+            fence: None,
+        },
+    )
+    .expect("the sibling seeds");
+
+    // One event whose new region cell no longer decodes as the declared text.
+    let event = AlteredRegion::new(
+        Event::insert(orders, row(9, Value::String("south".into()), Value::Int(3)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(11)),
+        true,
+    );
+    let output = engine
+        .dispatch(&event)
+        .expect("the dispatch isolates the failing subscription");
+
+    // The sibling folded the event.
+    assert_eq!(output.scalar_updates().len(), 1);
+    assert_eq!(output.scalar_updates()[0].subscription_id, sibling);
+    assert_eq!(output.scalar_updates()[0].consumer_id, 8);
+    assert_eq!(output.scalar_updates()[0].value, Value::Int(3));
+    // The grouped one is reported with its id, its consumer and the decode
+    // failure, and nothing else of it moved or read.
+    assert_eq!(output.stopped().len(), 1);
+    assert_eq!(output.stopped()[0].subscription_id, grouped);
+    assert_eq!(output.stopped()[0].consumer_id, 7);
+    assert!(matches!(
+        output.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    assert!(output.aggregate_updates().is_empty());
+    assert!(output.triggers().is_empty());
+    assert_eq!(output.transitions(), []);
+    // The engine ended the subscription, so a second unregistration finds
+    // nothing.
+    assert!(!engine.unregister_subscription(grouped));
+
+    // A second event carries the changed column too and reaches only the
+    // sibling.
+    let second = AlteredRegion::new(
+        Event::insert(orders, row(10, Value::String("east".into()), Value::Int(2)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(12)),
+        true,
+    );
+    let second_output = engine
+        .dispatch(&second)
+        .expect("the second event dispatches");
+    assert!(second_output.stopped().is_empty());
+    assert_eq!(second_output.scalar_updates().len(), 1);
+    assert_eq!(second_output.scalar_updates()[0].subscription_id, sibling);
+    assert_eq!(second_output.scalar_updates()[0].value, Value::Int(2));
+}
+
+#[test]
+fn an_undecodable_group_column_stops_only_its_count_subscription() {
+    let (mut engine, orders) = altered_engine();
+    // A grouped count rides the fold tier, where the group key is decoded per event.
+    let registered = engine
+        .register(SubscriptionRequest::new(
+            7u64,
+            "SELECT region, COUNT(*) FROM orders WHERE status = 'paid' GROUP BY region",
+        ))
+        .expect("the grouped count registers");
+    assert!(
+        matches!(registered.tier, Tier::InProcess(_)),
+        "expected the in-process fold tier, got {:?}",
+        registered.tier
+    );
+    let count = registered.subscription_id;
+    let sibling = engine
+        .register(SubscriptionRequest::new(
+            8u64,
+            "SELECT MIN(amount) FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sibling registers")
+        .subscription_id;
+    Install::install(
+        &mut engine,
+        sibling,
+        ScalarInstall {
+            value: Value::Int(4),
+            checkpoint: None,
+            fence: None,
+        },
+    )
+    .expect("the sibling seeds");
+
+    // The event folds cleanly. Nothing reads the region cell but the group key.
+    let event = AlteredRegion::new(
+        Event::insert(orders, row(9, Value::String("south".into()), Value::Int(3)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(11)),
+        false,
+    );
+    let output = engine.dispatch(&event).expect("the event dispatches");
+    assert!(output.stopped().is_empty());
+    assert_eq!(output.scalar_updates().len(), 1);
+    assert_eq!(output.scalar_updates()[0].subscription_id, sibling);
+    assert_eq!(output.scalar_updates()[0].consumer_id, 8);
+    assert_eq!(output.scalar_updates()[0].value, Value::Int(3));
+
+    // The column's type changes under the stream, so the group key no longer decodes.
+    let altered = AlteredRegion::new(
+        Event::insert(orders, row(10, Value::String("east".into()), Value::Int(2)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(12)),
+        true,
+    );
+    let second = engine
+        .dispatch(&altered)
+        .expect("the altered event dispatches");
+    assert_eq!(second.stopped().len(), 1);
+    assert_eq!(second.stopped()[0].subscription_id, count);
+    assert_eq!(second.stopped()[0].consumer_id, 7);
+    assert!(matches!(
+        second.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    assert_eq!(second.scalar_updates().len(), 1);
+    assert_eq!(second.scalar_updates()[0].subscription_id, sibling);
+    assert_eq!(second.scalar_updates()[0].value, Value::Int(2));
+    assert!(!engine.unregister_subscription(count));
+}
+
+#[test]
+fn an_undecodable_filter_column_stops_only_its_row_subscription() {
+    let (mut engine, orders) = altered_engine();
+    // A row filter that reads the region column, and one that does not.
+    let region = engine
+        .register(SubscriptionRequest::new(
+            9u64,
+            "SELECT * FROM orders WHERE region = 'north'",
+        ))
+        .expect("the region filter registers")
+        .subscription_id;
+    engine
+        .register(SubscriptionRequest::new(
+            10u64,
+            "SELECT * FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sibling registers");
+
+    // The event's region cell no longer decodes as the declared text.
+    let event = AlteredRegion::new(
+        Event::insert(orders, row(9, Value::String("south".into()), Value::Int(3)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(11)),
+        true,
+    );
+    let output = engine
+        .dispatch(&event)
+        .expect("the dispatch isolates the failing subscription");
+
+    // The sibling matched and is the only one notified.
+    assert_eq!(output.notifications().inserted(), [10u64]);
+    // The region filter is reported with its decode failure and stopped.
+    assert_eq!(output.stopped().len(), 1);
+    assert_eq!(output.stopped()[0].subscription_id, region);
+    assert_eq!(output.stopped()[0].consumer_id, 9);
+    assert!(matches!(
+        output.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    assert!(!engine.unregister_subscription(region));
+
+    // A second event reaches only the sibling.
+    let second = AlteredRegion::new(
+        Event::insert(orders, row(10, Value::String("east".into()), Value::Int(2)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(12)),
+        false,
+    );
+    let second_output = engine
+        .dispatch(&second)
+        .expect("the second event dispatches");
+    assert!(second_output.stopped().is_empty());
+    assert_eq!(second_output.notifications().inserted(), [10u64]);
 }
