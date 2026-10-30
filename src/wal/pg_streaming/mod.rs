@@ -12,7 +12,6 @@
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -241,11 +240,8 @@ impl PgStreamingCdcSource {
             .await?;
 
         // A row-ordinal resume does not acknowledge its transaction.
-        let tracker = Arc::get_mut(&mut reader.shared_lsn_feedback).ok_or_else(|| {
-            PgStreamingError::Protocol("reader feedback is shared before streaming".into())
-        })?;
-        *tracker = SharedLsnFeedback::default();
-        tracker.update_applied_lsn(base_lsn);
+        reader.shared_lsn_feedback = SharedLsnFeedback::new_shared();
+        reader.shared_lsn_feedback.update_applied_lsn(base_lsn);
         Ok(Self {
             config,
             reader,
@@ -324,16 +320,13 @@ impl crate::CdcSource for PgStreamingCdcSource {
             if self.terminal {
                 return Err(PgStreamingError::SourceClosed);
             }
-            let change = match self.reader.next_event(&self.cancel).await {
-                Ok(change) => change,
-                Err(e) => {
-                    self.terminal = true;
-                    return Err(PgStreamingError::from(e));
-                }
+            let staged = match self.reader.next_event(&self.cancel).await {
+                Ok(change) => self.delivery.stage(change).map_err(PgStreamingError::from),
+                Err(error) => Err(PgStreamingError::from(error)),
             };
-            if let Err(e) = self.delivery.stage(change) {
+            if let Err(error) = staged {
                 self.terminal = true;
-                return Err(PgStreamingError::from(e));
+                return Err(error);
             }
         }
     }

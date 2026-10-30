@@ -1133,6 +1133,87 @@ fn a_killed_backend_makes_the_source_terminal() {
     common::drop_slot(&mut setup, &slot);
 }
 
+/// An acknowledgement whose feedback the dead connection refuses makes the
+/// source terminal.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn an_acknowledgement_the_connection_cannot_send_makes_the_source_terminal() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    let mut probe = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    let slot = db.slot("subql_pg_streaming_dead_ack");
+    let publication = "subql_pg_streaming_dead_ack_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+
+    // Closing the router's sockets resets the client side, which the
+    // server's own proxy would only half-close.
+    let router = EndpointRouter::start(
+        loopback_port(&db.url()),
+        loopback_port(&db.url()),
+        Duration::ZERO,
+        Instant::now() + Duration::from_secs(120),
+        None,
+    );
+    let config = PgStreamingConfig::new(router.url(db.name()), &slot, publication)
+        .status_interval(Duration::from_secs(3600));
+    let slot_inner = slot.clone();
+
+    let mut setup = current_thread_rt().block_on(async move {
+        let mut source = connect_when_free(&config).await;
+        let mut commits = Vec::new();
+        for id in 1..=3 {
+            insert(&mut setup, &[id]);
+            next_row(&mut source).await;
+            commits.push(next_commit(&mut source).await);
+        }
+
+        router.finish();
+
+        // The first write to the closed socket can still be buffered, and
+        // the reset it provokes refuses the next one.
+        let mut refused = None;
+        for commit in &commits {
+            match tokio::time::timeout(ARRIVAL, source.ack(commit.position()))
+                .await
+                .expect("the acknowledgement responds")
+            {
+                Ok(()) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error) => {
+                    refused = Some(error);
+                    break;
+                }
+            }
+        }
+        let error = refused.expect("feedback to a closed connection fails");
+        assert!(
+            !matches!(error, PgStreamingError::SourceClosed),
+            "{error:?}"
+        );
+        let last = commits.last().expect("three commits").position();
+        let error = tokio::time::timeout(ARRIVAL, source.ack(last))
+            .await
+            .expect("the terminal source refuses acknowledgements promptly")
+            .expect_err("a source whose feedback failed accepts no acknowledgement");
+        assert!(matches!(error, PgStreamingError::SourceClosed), "{error:?}");
+        let error = tokio::time::timeout(ARRIVAL, source.next_item())
+            .await
+            .expect("the terminal source keeps responding")
+            .expect_err("no automatic reconnect");
+        assert!(matches!(error, PgStreamingError::SourceClosed), "{error:?}");
+        let deadline = Instant::now() + ARRIVAL;
+        while slot_is_active(&mut probe, &slot_inner) {
+            assert!(Instant::now() < deadline, "the walsender never exited");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        setup
+    });
+
+    common::drop_slot(&mut setup, &slot);
+}
+
 /// Reconnecting at a saved resume position after the slot was dropped must
 /// fail with a typed slot error rather than create a replacement slot.
 #[test]
