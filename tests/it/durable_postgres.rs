@@ -27,9 +27,9 @@ use subql::testing::TestEvent;
 use subql::{
     catalog_helpers, AggValue, Checkpoint, DefaultIds, DurableAuthorizationError, DurableCommit,
     DurableContext, DurableEngine, DurableError, DurableFailure, DurableOperation,
-    DurablePersistError, GroupedScalarSeedInstall, Install, NumericValue, OpaqueCheckpoint,
-    PgCommitPosition, PgLsn, ReplayAnswer, ReplayTable, ReplayValue, ScalarInstall,
-    SubscriptionEngine, SubscriptionRequest, TableId, Tier, Wal2JsonV2Event,
+    DurablePersistError, DurableRefusalCause, GroupedScalarSeedInstall, Install, NumericValue,
+    OpaqueCheckpoint, PgCommitPosition, PgLsn, ReplayAnswer, ReplayTable, ReplayValue,
+    ScalarInstall, SubscriptionEngine, SubscriptionRequest, TableId, Tier, Wal2JsonV2Event,
 };
 
 type Event = Wal2JsonV2Event;
@@ -379,6 +379,15 @@ fn authorize(
     }
 }
 
+/// The same decision, as a restore asks it of each stored instance.
+fn restore_authorize(
+    outcome: RestoreAuth,
+) -> impl FnMut(u64, &SubscriptionRequest<DefaultIds, Postgres>) -> Result<(), DurableAuthorizationError>
+{
+    let mut decide = authorize(outcome);
+    move |_instance, request| decide(request)
+}
+
 fn context() -> DurableContext {
     DurableContext {
         source: SOURCE.to_vec(),
@@ -412,7 +421,7 @@ fn durable_engine(bootstrap: C) -> Engine {
         .expect("a durable engine at the bootstrap boundary")
 }
 
-/// Restore from the store's committed bytes under the given adoption outcome.
+/// Restore from the store's committed bytes under the given adoption outcome, refusing nothing.
 fn restore(store: &mut Store, id: i64, outcome: RestoreAuth) -> Engine {
     restore_with_compiler(store, id, outcome, compiler())
 }
@@ -425,15 +434,17 @@ fn restore_with_compiler(
 ) -> Engine {
     let (revision, boundary, checkpoint) = store.state(id);
     let at = C::from_opaque(&OpaqueCheckpoint(boundary)).expect("the stored boundary decodes");
-    DurableEngine::restore(
+    let restored = DurableEngine::restore(
         compiler,
         context(),
         u64::try_from(revision).expect("the revision fits"),
         at,
         &checkpoint,
-        authorize(outcome),
+        restore_authorize(outcome),
     )
-    .expect("the checkpoint restores")
+    .expect("the checkpoint restores");
+    assert!(restored.refused.is_empty(), "no stored instance is refused");
+    restored.engine
 }
 
 /// The boundary a bootstrap read at this moment of the stream acknowledges.
@@ -2464,7 +2475,7 @@ fn quota_admission_and_isolated_overflow_with_failed_failure_persistence() {
 
 #[test]
 #[ignore = "requires Docker and --ignored"]
-fn restore_refuses_drifted_catalog_and_unauthorized_adoption() {
+fn restore_refuses_mismatched_receipts_and_retires_unfit_instances() {
     common::assert_docker_available();
     let db = common::pg_database();
     let mut pg = db.connect();
@@ -2512,20 +2523,28 @@ fn restore_refuses_drifted_catalog_and_unauthorized_adoption() {
     let revision = u64::try_from(revision).expect("the revision fits");
     assert_eq!(engine.unread(71), Some(&at1));
 
-    // A drifted catalog refuses the operator's state
+    // A drifted catalog retires the operator it no longer fits, not the receipt
     let drifted = ParserDB::parse::<PostgreSqlDialect>(
         "CREATE TABLE items (id INTEGER PRIMARY KEY, cost TEXT, qty INTEGER, status TEXT);",
     )
     .expect("the drifted catalog parses");
-    assert!(DurableEngine::restore(
+    let restored = DurableEngine::restore(
         Compiler::new(drifted, PostgreSqlDialect {}),
         context(),
         revision,
         at1,
         &bytes,
-        authorize(RestoreAuth::Ok),
+        restore_authorize(RestoreAuth::Ok),
     )
-    .is_err());
+    .expect("the receipt restores without the unfit operator");
+    assert_eq!(restored.refused.len(), 1);
+    assert_eq!(restored.refused[0].instance, 71);
+    assert!(matches!(
+        restored.refused[0].cause,
+        DurableRefusalCause::Operator(_)
+    ));
+    assert_eq!(restored.engine.answer(71), None);
+    assert_eq!(restored.engine.revision(), revision);
     // A wrong source generation
     let mut wrong_source = context();
     wrong_source.source = b"other-generation".to_vec();
@@ -2535,7 +2554,7 @@ fn restore_refuses_drifted_catalog_and_unauthorized_adoption() {
         revision,
         at1,
         &bytes,
-        authorize(RestoreAuth::Ok),
+        restore_authorize(RestoreAuth::Ok),
     )
     .is_err());
     // A wrong authority revision
@@ -2547,7 +2566,7 @@ fn restore_refuses_drifted_catalog_and_unauthorized_adoption() {
         revision,
         at1,
         &bytes,
-        authorize(RestoreAuth::Ok),
+        restore_authorize(RestoreAuth::Ok),
     )
     .is_err());
     // A wrong receipt
@@ -2557,7 +2576,7 @@ fn restore_refuses_drifted_catalog_and_unauthorized_adoption() {
         revision + 1,
         at1,
         &bytes,
-        authorize(RestoreAuth::Ok),
+        restore_authorize(RestoreAuth::Ok),
     )
     .is_err());
     assert!(DurableEngine::restore(
@@ -2566,7 +2585,7 @@ fn restore_refuses_drifted_catalog_and_unauthorized_adoption() {
         revision,
         bootstrap,
         &bytes,
-        authorize(RestoreAuth::Ok),
+        restore_authorize(RestoreAuth::Ok),
     )
     .is_err());
     // Trailing bytes
@@ -2578,26 +2597,32 @@ fn restore_refuses_drifted_catalog_and_unauthorized_adoption() {
         revision,
         at1,
         &trailing,
-        authorize(RestoreAuth::Ok),
+        restore_authorize(RestoreAuth::Ok),
     )
     .is_err());
-    // A refused or an unavailable authority
+    // A denied owner retires its instance, an unavailable authority refuses the receipt
+    let denied = DurableEngine::restore(
+        compiler(),
+        context(),
+        revision,
+        at1,
+        &bytes,
+        restore_authorize(RestoreAuth::Denied),
+    )
+    .expect("a denial retires the instance, not the receipt");
+    assert_eq!(denied.refused.len(), 1);
+    assert_eq!(denied.refused[0].instance, 71);
+    assert!(matches!(
+        denied.refused[0].cause,
+        DurableRefusalCause::Denied
+    ));
     assert!(DurableEngine::restore(
         compiler(),
         context(),
         revision,
         at1,
         &bytes,
-        authorize(RestoreAuth::Denied),
-    )
-    .is_err());
-    assert!(DurableEngine::restore(
-        compiler(),
-        context(),
-        revision,
-        at1,
-        &bytes,
-        authorize(RestoreAuth::Unavailable),
+        restore_authorize(RestoreAuth::Unavailable),
     )
     .is_err());
     // The store never moved
