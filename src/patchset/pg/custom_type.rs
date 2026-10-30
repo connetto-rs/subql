@@ -13,7 +13,8 @@ use diesel::sql_types::HasSqlType;
 use sql_traits::prelude::DatabaseLike;
 use sqlite_diff_rs::{Adapter, Binder, DefaultBinder, Value};
 
-use super::PgAdapter;
+use super::{PgAdapter, PgArray};
+use crate::patchset::columns::{bind_error, shape_of};
 
 /// A caller-supplied native bind for one Postgres user-defined type,
 /// such as an `ENUM` or a `DOMAIN`, that [`PgAdapter`] cannot bind on its
@@ -39,6 +40,23 @@ pub trait PgCustomBinder<S, B>: Send + Sync {
     /// type, for example an unknown enum label or a non-text wire shape.
     /// The error rolls the apply transaction back.
     fn bind<'a>(&self, value: &'a Value<S, B>) -> QueryResult<Box<dyn Binder<Pg> + Send + 'a>>;
+
+    /// Bind an array of this type, read from the replica's JSON array text.
+    ///
+    /// Build the binder with [`bind_array_as`](super::bind_array_as) and the
+    /// type's binary send encoding. The default refuses, so a type
+    /// registered for its scalar columns alone refuses its arrays.
+    ///
+    /// # Errors
+    ///
+    /// Return an error when an element cannot represent the target type.
+    /// The error rolls the apply transaction back.
+    fn bind_array(&self, array: &PgArray) -> QueryResult<Box<dyn Binder<Pg> + Send>> {
+        let _ = array;
+        Err(diesel::result::Error::QueryBuilderError(
+            "no array bind is registered for this type".into(),
+        ))
+    }
 }
 
 /// Box a native diesel bind of `value` as the Postgres `SqlType` `ST`,
@@ -198,21 +216,45 @@ where
         column_index: usize,
         value: &'a Value<S, B>,
     ) -> QueryResult<Box<dyn Binder<Pg> + Send + 'a>> {
-        let custom = self
+        let column = <PgAdapter<'_, DB> as Adapter<Pg, S, B>>::column_name(
+            &self.inner,
+            table_name,
+            column_index,
+        );
+        let find = |type_name: &str| {
+            self.binders
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(type_name))
+                .map(|(_, binder)| binder)
+        };
+        if let Some(binder) = self
             .inner
-            .column_type_name(table_name, column_index)
-            .and_then(|type_name| {
-                self.binders
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(type_name.as_ref()))
-            });
-        match custom {
-            Some((_, binder)) => match value {
+            .element_type_name(table_name, column_index)
+            .and_then(|element| find(element.as_ref()))
+        {
+            return match value {
                 Value::Null => Ok(Box::new(DefaultBinder::from(value))),
-                other => binder.bind(other),
-            },
-            None => self.inner.bind(table_name, column_index, value),
+                Value::Text(text) => PgArray::parse(text.as_ref()).map_or_else(
+                    || Err(bind_error(column, "a JSON array", "TEXT that is not")),
+                    |array| binder.bind_array(&array),
+                ),
+                other => Err(bind_error(
+                    column,
+                    "JSON array TEXT or NULL",
+                    shape_of(other),
+                )),
+            };
         }
+        self.inner
+            .column_type_name(table_name, column_index)
+            .and_then(|type_name| find(type_name.as_ref()))
+            .map_or_else(
+                || self.inner.bind(table_name, column_index, value),
+                |binder| match value {
+                    Value::Null => Ok(Box::new(DefaultBinder::from(value))),
+                    other => binder.bind(other),
+                },
+            )
     }
 }
 

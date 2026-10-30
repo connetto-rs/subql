@@ -68,6 +68,9 @@ mod apply_patchset_pg_e2e;
 mod apply_patchset_pg_rich_scalars_e2e;
 
 #[cfg(feature = "apply-patchset-postgres")]
+mod apply_patchset_pg_arrays_e2e;
+
+#[cfg(feature = "apply-patchset-postgres")]
 mod apply_patchset_pg_uuid_e2e;
 
 #[cfg(feature = "apply-patchset-sqlite")]

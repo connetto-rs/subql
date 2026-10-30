@@ -39,6 +39,14 @@
 //!   round trip preserves the value, not the exact input bytes. Each is
 //!   classified through the catalog's [`crate::backend::ScalarKind`]. Any other wire
 //!   shape on such a column is rejected.
+//! * An array column gets a native array bind when the wire carries a
+//!   `Value::Text` holding the replica's JSON array text, of any number of
+//!   dimensions. It binds as the widest type of its element family, such as
+//!   `int8[]` for any integer element, which PostgreSQL's assignment cast
+//!   narrows to the column's own type. An array of an enum or domain needs
+//!   [`CustomTypePgAdapter`].
+//! * A pgvector `vector(n)` column gets a native `vector` bind when the wire
+//!   carries sqlite-vec's float32 `Value::Blob` of `n` elements.
 //!
 //! Every other column falls through to [`sqlite_diff_rs::DefaultBinder`]
 //! which handles the trivial SQLite-to-diesel type mappings (`Integer ->
@@ -49,7 +57,8 @@
 //! built-in arm here, since a native bind needs a diesel `SqlType` and a
 //! [`ToSql`](diesel::serialize::ToSql) the caller owns. Wrap [`PgAdapter`] in a
 //! [`CustomTypePgAdapter`] and register a [`PgCustomBinder`] per such
-//! type to bind those columns natively, still with no SQL cast.
+//! type to bind those columns, and arrays of them, natively, still with no
+//! SQL cast.
 
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
@@ -62,7 +71,9 @@ use diesel::sql_types::{
     Bool, Date, Json, Jsonb, Numeric, Time, Timestamp, Timestamptz, Uuid as UuidSqlType,
 };
 use sql_scalar_text::{parse_date, parse_time, parse_timestamp, parse_timestamp_tz};
-use sql_traits::prelude::{ColumnLike, DataTypeLike, DatabaseLike, DialectLike, TypeMatchLike};
+use sql_traits::prelude::{
+    ColumnLike, DataTypeLike, DatabaseLike, DialectLike, TypeMatchLike, VectorKind,
+};
 use sqlite_diff_rs::{Adapter, Binder, DefaultBinder, Value};
 
 use crate::backend::{ScalarFamily, ScalarKindOf};
@@ -70,8 +81,10 @@ use crate::patchset::columns::{
     bind_error, minor_units, shape_of, unknown_column_error, ColumnIndex,
 };
 
+pub(crate) mod array;
 pub(crate) mod custom_type;
 
+pub use array::{bind_array_as, PgArray, PgVector, VectorType};
 pub use custom_type::{bind_as, CustomTypePgAdapter, PgCustomBinder};
 
 /// Adapter that resolves column names and native diesel binders for a
@@ -129,6 +142,70 @@ impl<'db, DB: DatabaseLike> PgAdapter<'db, DB> {
         self.column_at(table_name, column_index)
             .map(|col| col.data_type(self.catalog).name(self.catalog))
     }
+
+    /// The declared type name of the target array column's element, such as
+    /// `mood` for a `mood[]` column, or `None` for a column that is not an
+    /// array.
+    #[must_use]
+    pub fn element_type_name(&self, table_name: &str, column_index: usize) -> Option<Cow<'_, str>> {
+        let data_type = self
+            .column_at(table_name, column_index)?
+            .data_type(self.catalog);
+        Some(data_type.array_element(self.catalog)?.name(self.catalog))
+    }
+
+    /// The bind of an array or pgvector column, or `None` for a column that is
+    /// neither.
+    fn collection_bind<'a, S, B>(
+        &self,
+        col: &DB::Column,
+        value: &'a Value<S, B>,
+    ) -> Option<Result<Box<dyn Binder<Pg> + Send + 'a>, DieselError>>
+    where
+        S: AsRef<str> + Sync,
+        B: AsRef<[u8]> + Sync,
+    {
+        let data_type = col.data_type(self.catalog);
+        let col_name = col.column_name();
+        if let Some(element) = data_type.array_element(self.catalog) {
+            let family = element.scalar_family(self.catalog);
+            return Some(match value {
+                Value::Null => Ok(Box::new(DefaultBinder::from(value))),
+                Value::Text(text) => PgArray::parse(text.as_ref())
+                    .and_then(|array| array::bind_builtin_array(family?, &array))
+                    .ok_or_else(|| {
+                        bind_error(
+                            col_name,
+                            "a JSON array of its element type",
+                            "TEXT that is not",
+                        )
+                    }),
+                other => Err(bind_error(
+                    col_name,
+                    "JSON array TEXT or NULL",
+                    shape_of(other),
+                )),
+            });
+        }
+        let vector = data_type.vector(self.catalog)?;
+        Some(match value {
+            Value::Null => Ok(Box::new(DefaultBinder::from(value))),
+            Value::Blob(blob) if vector.kind() == VectorKind::Vector => {
+                array::bind_vector(blob.as_ref(), vector.dimensions()).ok_or_else(|| {
+                    bind_error(
+                        col_name,
+                        "a float32 BLOB of its dimensions",
+                        "a BLOB that is not",
+                    )
+                })
+            }
+            other => Err(bind_error(
+                col_name,
+                "a float32 BLOB or NULL",
+                shape_of(other),
+            )),
+        })
+    }
 }
 
 impl<DB, S, B> Adapter<Pg, S, B> for PgAdapter<'_, DB>
@@ -153,6 +230,9 @@ where
         };
         let dialect = self.catalog.dialect();
         let col_name = col.column_name();
+        if let Some(binder) = self.collection_bind(col, value) {
+            return binder;
+        }
 
         // BOOLEAN: strict Integer -> Bool. Null is legitimate NULL.
         // Other wire shapes are refused with a rollback-inducing error
