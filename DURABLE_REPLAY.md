@@ -6,7 +6,9 @@
 
 `DurableEngine::new(compiler, context, at)` opens an empty registry. `compiler` must hold no registered subscriptions or re-reads, `context` is a `DurableContext` with non-empty `source` and `authority` byte identities, and `at` is a transaction boundary, one whose `transaction_boundary()` is itself.
 
-`DurableEngine::restore(compiler, context, revision, at, bytes, authorize)` rebuilds an engine from a stored receipt. The envelope version, backend, checkpoint type, context, revision, and boundary must match the arguments. Every declaration requires fresh authorization and operator verification against the configured compiler and catalog. Healthy instances must fit their quotas, and failed instances must carry consistent failure and last-valid boundaries. Envelope or receipt mismatches are `DurableError::State`, while declaration and operator errors retain their typed causes.
+`DurableEngine::restore(compiler, context, revision, at, bytes, authorize)` rebuilds an engine from a stored receipt and returns a `DurableRestore`, the `engine` and the instances it `refused`. The envelope version, backend, checkpoint type, context, revision, and boundary must match the arguments, healthy instances must fit their quotas, and failed instances must carry consistent failure and last-valid boundaries. Envelope or receipt mismatches are `DurableError::State`, and an undecodable declaration keeps its typed cause.
+
+`authorize` is asked once per stored instance with its id and declaration. An instance it denies, or whose operator no longer verifies against the configured compiler and catalog, is left out and reported as a `DurableRefusal` with its consumer and a `DurableRefusalCause`, while every other instance restores. `DurableAuthorizationError::Unavailable` refuses the whole restore, since an authority that cannot answer has not decided. The engine keeps the stored revision, so the next receipt it persists drops the refused instances, and until then a restore from the same bytes refuses them again.
 
 The `postcard` envelope carries the context, revision, boundary, and instance records. Each instance holds its declaration and operator state as opaque `CBOR` bytes beside its quota, `unread`, `last_valid`, and failure record.
 
@@ -99,6 +101,8 @@ let bytes = engine.checkpoint().unwrap();
 let revision = engine.revision();
 let compiler = SubscriptionEngine::new(catalog(), PostgreSqlDialect {});
 let restored: Engine =
-    DurableEngine::restore(compiler, context, revision, PgLsn(2), &bytes, |_| Ok(())).unwrap();
+    DurableEngine::restore(compiler, context, revision, PgLsn(2), &bytes, |_, _| Ok(()))
+        .unwrap()
+        .engine;
 assert_eq!(restored.unread(42), Some(&PgLsn(2)));
 ```
