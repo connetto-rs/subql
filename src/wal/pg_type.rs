@@ -1019,4 +1019,21 @@ mod tests {
             Value::Missing
         );
     }
+
+    /// An interval cell is undecodable on both wire paths, so the event
+    /// escalates and a predicate on the column is re-executed rather than
+    /// answered from a value subql cannot hold.
+    #[test]
+    fn an_interval_cell_is_undecodable_on_both_wire_paths() {
+        let interval = declared(ScalarFamily::Interval);
+        assert_eq!(interval.family(), ScalarFamily::Interval);
+        assert_eq!(
+            text_to_pg_value_by_kind("00:15:00", interval),
+            Value::Missing
+        );
+        assert_eq!(
+            json_value_to_pg_value_by_kind(&serde_json::json!("00:15:00"), interval),
+            Value::Missing
+        );
+    }
 }

@@ -57,7 +57,7 @@ use sqlite_diff_rs::{
 
 use crate::backend::ScalarFamily;
 use crate::catalog_helpers;
-use crate::types::{ColumnId, TableId};
+use crate::types::TableId;
 
 /// Map a subql catalog [`ScalarFamily`] to the source-independent
 /// [`WireType`] that selects a decoder in `sqlite-diff-rs`'s `digest`.
@@ -239,26 +239,15 @@ impl WireSchema for WireCatalog {
     }
 }
 
-/// The [`WireType`] the column at `column_id` travels as, or `None` when the
-/// column is unknown or has no form a pg2sqlite replica stores.
-///
-/// The family's own type, except where the replica stores the column some
-/// other way. A decimal with a declared scale travels as
-/// [`WireType::ScaledDecimal`] at that scale, an array as
-/// [`WireType::Array`] of its innermost element, and pgvector's `vector(n)`
-/// as [`WireType::Vector`].
-fn column_wire_type<DB: DatabaseLike>(
-    database: &DB,
-    table_id: TableId,
-    column_id: ColumnId,
-) -> Option<WireType> {
-    let data_type = catalog_helpers::column(database, table_id, column_id)?.data_type(database);
+/// The [`WireType`] `column` travels as, the form a pg2sqlite replica
+/// stores it in, or `None` when no replica can hold it.
+fn column_wire_type<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Option<WireType> {
+    let data_type = column.data_type(database);
     if let Some(element) = data_type.array_element(database) {
         return array_element(database, element).map(|element| WireType::Array { element });
     }
     if let Some(vector) = data_type.vector(database) {
-        // sqlite-vec stores single-precision vectors only, so a replica holds
-        // no `halfvec` or `sparsevec` column.
+        // sqlite-vec stores single-precision vectors only.
         return (vector.kind() == VectorKind::Vector).then(|| WireType::Vector {
             dimensions: vector.dimensions(),
         });
@@ -272,15 +261,8 @@ fn column_wire_type<DB: DatabaseLike>(
         })
 }
 
-/// The [`ArrayElement`] an array of `element` travels as, or `None` for an
-/// element no replica array holds.
-///
-/// An element of a type with no builtin family, such as an enum, is its text,
-/// as such a column is. The replica holds an array as JSON text, so an
-/// element stored as a BLOB has no form there, and pg2sqlite refuses that
-/// array. That covers `bytea`, a `uuid` (subql writes a `uuid` as its
-/// 16-byte BLOB) and a vector. A decimal element with a declared scale
-/// would be minor units, which pg2sqlite refuses too.
+/// The [`ArrayElement`] an array of `element` travels as, or `None` when the
+/// element is BLOB-stored or minor units, which a JSON array cannot hold.
 fn array_element<DB: DatabaseLike>(database: &DB, element: &DB::DataType) -> Option<ArrayElement> {
     if element.vector(database).is_some() {
         return None;
@@ -316,14 +298,9 @@ fn build_wire_table<DB: DatabaseLike>(
     table_id: TableId,
 ) -> Result<WireTable, crate::CatalogError> {
     let inner = catalog_helpers::simple_table(database, table_id)?;
-    let arity = inner.number_of_columns();
-    let mut wire_types: Vec<WireType> = Vec::with_capacity(arity);
-    for ordinal in 0..arity {
-        let column_id = ColumnId::try_from(ordinal)
-            .map_err(|_| crate::CatalogError::UnknownColumn { table_id, ordinal })?;
-        let wire_type = column_wire_type(database, table_id, column_id).unwrap_or(WireType::Text);
-        wire_types.push(wire_type);
-    }
+    let wire_types = catalog_helpers::table_columns(database, table_id)?
+        .map(|column| column_wire_type(database, column).unwrap_or(WireType::Text))
+        .collect();
     Ok(WireTable { inner, wire_types })
 }
 
@@ -697,20 +674,13 @@ pub fn pgbinary_patchset_builder<B: crate::backend::Backend, DB: DatabaseLike>(
     let simple = catalog_helpers::simple_table(database, table_id)
         .map_err(|e| ConversionError::TableNotFound(e.to_string()))?;
 
-    // Catalog column list once: name plus wire type per ordinal, both read
-    // from the already-resolved `simple` (as `build_wire_table` does)
-    // rather than re-resolving the table per column. Same source the CDC
-    // path folds through, so the two encoders agree.
-    let arity = simple.number_of_columns();
-    let mut columns: Vec<(String, WireType)> = Vec::with_capacity(arity);
-    for ordinal in 0..arity {
-        let column_id = ColumnId::try_from(ordinal)
-            .map_err(|_| ConversionError::TableNotFound(table.to_string()))?;
-        let name = simple
-            .column_name(ordinal)
-            .ok_or_else(|| ConversionError::TableNotFound(table.to_string()))?
-            .to_string();
-        let wire_type = column_wire_type(database, table_id, column_id)
+    // The same catalog columns the CDC path folds through, so the two encoders agree.
+    let mut columns: Vec<(String, WireType)> = Vec::with_capacity(simple.number_of_columns());
+    for column in catalog_helpers::table_columns(database, table_id)
+        .map_err(|e| ConversionError::TableNotFound(e.to_string()))?
+    {
+        let name = column.column_name().to_string();
+        let wire_type = column_wire_type(database, column)
             .ok_or_else(|| ConversionError::UnsupportedType(name.clone()))?;
         columns.push((name, wire_type));
     }
@@ -1436,6 +1406,38 @@ mod tests {
                 WireType::Text,
             ]
         );
+    }
+
+    /// Every element family a replica array holds travels as the element
+    /// the matching scalar column would, so an element decodes exactly as
+    /// that column does.
+    #[test]
+    fn every_scalar_element_family_has_its_array_element() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE things (id INT PRIMARY KEY, a BOOLEAN[], b DOUBLE PRECISION[], \
+             c NUMERIC[], d DATE[], e TIME[], f TIMESTAMP[], g TIMESTAMPTZ[], h JSON[], \
+             i JSONB[], j INTERVAL[]);",
+        )
+        .unwrap();
+        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let table = catalog.get(None, "things").expect("things resolves");
+        let elements: Vec<WireType> = (1..11).map(|column| table.column_type(column)).collect();
+        let expected: Vec<WireType> = [
+            ArrayElement::Bool,
+            ArrayElement::Real,
+            ArrayElement::Decimal,
+            ArrayElement::Date,
+            ArrayElement::Time,
+            ArrayElement::Timestamp,
+            ArrayElement::TimestampTz,
+            ArrayElement::Json,
+            ArrayElement::Jsonb,
+            ArrayElement::Interval,
+        ]
+        .into_iter()
+        .map(|element| WireType::Array { element })
+        .collect();
+        assert_eq!(elements, expected);
     }
 
     /// Without `CREATE EXTENSION vector` a type named `vector` is the

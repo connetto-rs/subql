@@ -880,6 +880,19 @@ mod canonical_group_key_tests {
         );
     }
 
+    /// No engine groups an interval column in process, since subql holds no
+    /// interval value to key it by.
+    #[test]
+    fn no_backend_groups_an_interval_column() {
+        assert!(
+            Postgres::<Pg18>::group_key_encoder(vec![column(ScalarFamily::Interval)]).is_none()
+        );
+        assert!(
+            <MySql as Backend>::group_key_encoder(vec![column(ScalarFamily::Interval)]).is_none()
+        );
+        assert!(SQLite::group_key_encoder(vec![column(ScalarFamily::Interval)]).is_none());
+    }
+
     #[test]
     fn postgres_jsonb_keys_follow_structural_equality() {
         let encoder =

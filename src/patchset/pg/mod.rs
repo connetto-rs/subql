@@ -255,9 +255,8 @@ where
     }
 }
 
-/// Bind a decimal column. With a declared `scale` the wire carries the
-/// replica's integer count of minor units, and without one the verbatim
-/// decimal text. `Value::Null` passes through as a literal NULL.
+/// Bind a decimal column from minor units at a declared `scale`, or from its
+/// verbatim decimal text without one.
 fn decimal_bind<'a, S, B>(
     col_name: &str,
     scale: Option<u32>,

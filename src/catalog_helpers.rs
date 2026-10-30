@@ -487,8 +487,7 @@ pub fn column_comparison<B: crate::backend::Backend, DB: DatabaseLike>(
 pub(crate) fn classify_scalar_kind<B: crate::backend::Backend>(
     declared_type: &str,
 ) -> Option<ScalarKindOf<B>> {
-    // subql holds no interval value, so an interval column has no builtin kind
-    // and a predicate on one is re-executed against the database.
+    // subql holds no interval value, so an interval predicate is re-executed.
     if let Some(family) = scalar_family(declared_type)
         .filter(|family| *family != crate::backend::ScalarFamily::Interval)
     {
@@ -639,19 +638,20 @@ pub fn minor_unit_scale<DB: DatabaseLike>(database: &DB, data_type: &DB::DataTyp
     u32::try_from(data_type.numeric_scale(database)?).ok()
 }
 
-/// The catalog column at `column_id` in `table_id`, or `None` when the
-/// catalog holds no such table or column.
-#[must_use]
-pub fn column<DB: DatabaseLike>(
+/// The catalog columns of `table_id`, in the ordinal order its [`ColumnId`]s
+/// count.
+///
+/// # Errors
+/// [`CatalogError::UnknownTable`](crate::CatalogError::UnknownTable) for an id
+/// the catalog does not know, [`CatalogError::Lookup`](crate::CatalogError::Lookup)
+/// when the catalog itself fails to answer.
+pub fn table_columns<DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
-    column_id: ColumnId,
-) -> Option<&DB::Column> {
-    usize::try_from(table_id)
-        .ok()
-        .and_then(|index| database.table_by_id(index))
-        .and_then(|table| table.column_by_id(usize::from(column_id), database).ok())
-        .flatten()
+) -> Result<impl Iterator<Item = &DB::Column>, crate::CatalogError> {
+    lookup_table(database, table_id)?
+        .columns(database)
+        .map_err(|error| crate::CatalogError::Lookup { table_id, error })
 }
 
 /// Whether the table has row-level security enabled (per
@@ -692,18 +692,21 @@ mod tests {
         .expect("DDL parses")
     }
 
-    /// A column resolves by its table and ordinal, and an id past either
-    /// answers `None` rather than another table's or column's entry.
+    /// A table's columns come in declaration order, and an id past the last
+    /// table is refused rather than answering another table's columns.
     #[test]
-    fn a_column_resolves_only_inside_its_table() {
+    fn table_columns_answer_in_declaration_order() {
         let db = make_db();
         let orders = table_id::<Postgres, _>(&db, "orders").unwrap();
-        assert_eq!(
-            column(&db, orders, 2).map(ColumnLike::column_name),
-            Some("status")
-        );
-        assert!(column(&db, orders, 3).is_none(), "past the last column");
-        assert!(column(&db, orders + 1, 0).is_none(), "past the last table");
+        let names: Vec<&str> = table_columns(&db, orders)
+            .unwrap()
+            .map(ColumnLike::column_name)
+            .collect();
+        assert_eq!(names, ["id", "amount", "status"]);
+        assert!(matches!(
+            table_columns(&db, orders + 1).map(Iterator::count),
+            Err(crate::CatalogError::UnknownTable(id)) if id == orders + 1
+        ));
     }
 
     /// What a quoted table name matches is the engine's rule, not one rule.

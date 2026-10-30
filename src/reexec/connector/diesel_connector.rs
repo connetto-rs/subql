@@ -168,11 +168,12 @@ where
         | ScalarFamily::Time
         | ScalarFamily::Decimal
         | ScalarFamily::Json
-        | ScalarFamily::Jsonb
-        | ScalarFamily::Interval => boxed_read_query::<C::Backend, B>(query)?
+        | ScalarFamily::Jsonb => boxed_read_query::<C::Backend, B>(query)?
             .get_result::<TextRow>(conn)?
             .v
             .map_or(Value::Null, B::value_from_string),
+        // subql holds no interval value, so the read escalates.
+        ScalarFamily::Interval => Value::Missing,
     };
     Ok(
         B::decode_group_value(crate::backend::ValueKind::from(kind), value)
