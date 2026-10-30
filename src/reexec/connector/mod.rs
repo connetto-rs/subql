@@ -69,7 +69,10 @@ pub use diesel_backend::decoded_group_values;
 pub use diesel_backend::{DieselBackend, ScalarSqlBackend};
 #[cfg(feature = "executor-diesel")]
 pub use diesel_connector::DieselConnector;
-#[cfg(feature = "executor-diesel")]
+#[cfg(any(
+    feature = "executor-diesel-async-postgres",
+    feature = "executor-diesel-async-mysql"
+))]
 pub use diesel_connector::ReadShapeError;
 // The scalar row shapes travel to the async connectors only, so the
 // re-export follows their backend features rather than `executor-diesel`.
