@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 use maxwell_cdc::Message as MaxwellMessage;
-use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
+use sql_traits::prelude::{ColumnLike, DataTypeLike, DatabaseLike, TableLike, VectorKind};
 use sqlite_diff_rs::maxwell::{ConversionError as MaxwellConversionError, Maxwell};
 #[cfg(feature = "pgoutput-emit")]
 use sqlite_diff_rs::pg_walstream::{
@@ -48,21 +48,21 @@ use sqlite_diff_rs::pg_walstream::{
 };
 use sqlite_diff_rs::wal2json::{ConversionError, Wal2Json};
 use sqlite_diff_rs::{
-    ChangeSet, ChangesetFormat, ColumnNames, DiffFormat, DiffOps, DiffSetBuilder, Digestable,
-    DynTable, IndexableValues, Insert, NamedColumns, PatchSet, PatchsetFormat, PgBinary,
-    PgBinaryColumn, SchemaWithPK, SimpleTable, TypeMap, UuidBlob16Decoder, Value as WireValue,
-    WireAdapter, WireColumnTypes, WireKind, WireSchema, WireType,
+    ArrayElement, ChangeSet, ChangesetFormat, ColumnNames, DiffFormat, DiffOps, DiffSetBuilder,
+    Digestable, DynTable, IndexableValues, Insert, IntervalPostgresDecoder, NamedColumns, PatchSet,
+    PatchsetFormat, PgBinary, PgBinaryColumn, SchemaWithPK, SimpleTable, TypeMap,
+    UuidBlob16Decoder, Value as WireValue, WireAdapter, WireColumnTypes, WireKind, WireSchema,
+    WireType,
 };
 
 use crate::backend::ScalarFamily;
 use crate::catalog_helpers;
-use crate::types::{ColumnId, TableId};
+use crate::types::TableId;
 
 /// Map a subql catalog [`ScalarFamily`] to the source-independent
 /// [`WireType`] that selects a decoder in `sqlite-diff-rs`'s `digest`.
 ///
-/// The mapping is total: every `ScalarFamily` has a `WireType`. subql has
-/// no interval scalar, so [`WireType::Interval`] is never produced here.
+/// The mapping is total: every `ScalarFamily` has a `WireType`.
 #[must_use]
 pub const fn scalar_kind_to_wire_type(kind: ScalarFamily) -> WireType {
     match kind {
@@ -79,6 +79,7 @@ pub const fn scalar_kind_to_wire_type(kind: ScalarFamily) -> WireType {
         ScalarFamily::Decimal => WireType::Decimal,
         ScalarFamily::Json => WireType::Json,
         ScalarFamily::Jsonb => WireType::Jsonb,
+        ScalarFamily::Interval => WireType::Interval,
     }
 }
 
@@ -238,22 +239,56 @@ impl WireSchema for WireCatalog {
     }
 }
 
-/// The [`WireType`] the column at `column_id` travels as, or `None` when the
-/// column is unknown or its declared type has no [`ScalarFamily`].
-///
-/// The family's own type, except for a decimal with a declared scale, which
-/// travels as [`WireType::ScaledDecimal`] at that scale.
-fn column_wire_type<DB: DatabaseLike>(
-    database: &DB,
-    table_id: TableId,
-    column_id: ColumnId,
-) -> Option<WireType> {
-    catalog_helpers::column(database, table_id, column_id).and_then(|column| {
-        column.scalar_family(database).map(|family| match family {
-            ScalarFamily::Decimal => catalog_helpers::minor_unit_scale(database, column)
+/// The [`WireType`] `column` travels as, the form a pg2sqlite replica
+/// stores it in, or `None` when no replica can hold it.
+fn column_wire_type<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Option<WireType> {
+    let data_type = column.data_type(database);
+    if let Some(element) = data_type.array_element(database) {
+        return array_element(database, element).map(|element| WireType::Array { element });
+    }
+    if let Some(vector) = data_type.vector(database) {
+        // sqlite-vec stores single-precision vectors only.
+        return (vector.kind() == VectorKind::Vector).then(|| WireType::Vector {
+            dimensions: vector.dimensions(),
+        });
+    }
+    data_type
+        .scalar_family(database)
+        .map(|family| match family {
+            ScalarFamily::Decimal => catalog_helpers::minor_unit_scale(database, data_type)
                 .map_or(WireType::Decimal, |scale| WireType::ScaledDecimal { scale }),
             other => scalar_kind_to_wire_type(other),
         })
+}
+
+/// The [`ArrayElement`] an array of `element` travels as, or `None` when the
+/// element is BLOB-stored or minor units, which a JSON array cannot hold.
+fn array_element<DB: DatabaseLike>(database: &DB, element: &DB::DataType) -> Option<ArrayElement> {
+    if element.vector(database).is_some() {
+        return None;
+    }
+    let Some(family) = element.scalar_family(database) else {
+        return Some(ArrayElement::Text);
+    };
+    Some(match family {
+        ScalarFamily::Bool => ArrayElement::Bool,
+        ScalarFamily::Int => ArrayElement::Int,
+        ScalarFamily::Float => ArrayElement::Real,
+        ScalarFamily::Decimal => {
+            if catalog_helpers::minor_unit_scale(database, element).is_some() {
+                return None;
+            }
+            ArrayElement::Decimal
+        }
+        ScalarFamily::String => ArrayElement::Text,
+        ScalarFamily::Bytes | ScalarFamily::Uuid => return None,
+        ScalarFamily::Date => ArrayElement::Date,
+        ScalarFamily::Time => ArrayElement::Time,
+        ScalarFamily::Timestamp => ArrayElement::Timestamp,
+        ScalarFamily::TimestampTz => ArrayElement::TimestampTz,
+        ScalarFamily::Json => ArrayElement::Json,
+        ScalarFamily::Jsonb => ArrayElement::Jsonb,
+        ScalarFamily::Interval => ArrayElement::Interval,
     })
 }
 
@@ -263,14 +298,9 @@ fn build_wire_table<DB: DatabaseLike>(
     table_id: TableId,
 ) -> Result<WireTable, crate::CatalogError> {
     let inner = catalog_helpers::simple_table(database, table_id)?;
-    let arity = inner.number_of_columns();
-    let mut wire_types: Vec<WireType> = Vec::with_capacity(arity);
-    for ordinal in 0..arity {
-        let column_id = ColumnId::try_from(ordinal)
-            .map_err(|_| crate::CatalogError::UnknownColumn { table_id, ordinal })?;
-        let wire_type = column_wire_type(database, table_id, column_id).unwrap_or(WireType::Text);
-        wire_types.push(wire_type);
-    }
+    let wire_types = catalog_helpers::table_columns(database, table_id)?
+        .map(|column| column_wire_type(database, column).unwrap_or(WireType::Text))
+        .collect();
     Ok(WireTable { inner, wire_types })
 }
 
@@ -303,16 +333,20 @@ where
 
 /// The wal2json decoder registry subql feeds to `digest`.
 ///
-/// `sqlite-diff-rs` keys the registry on [`WireType`], so one
+/// `sqlite-diff-rs` keys the registry on [`WireKind`], so one
 /// `defaults()` table decodes every wal2json column subql models. subql
-/// overrides the UUID decoder to [`UuidBlob16Decoder`] so a `UUID`
-/// column lowers to a compact 16-byte `Value::Blob` rather than the
-/// 36-char text form. The SQLite client stores UUIDs as BLOBs, and
-/// `PgAdapter` re-binds the blob to a native Postgres `UUID` on the way
-/// back.
+/// overrides two decoders. A `UUID` column lowers to a compact 16-byte
+/// `Value::Blob` through [`UuidBlob16Decoder`] rather than the 36-char text
+/// form, since the SQLite client stores UUIDs as BLOBs and `PgAdapter`
+/// re-binds the blob to a native Postgres `UUID` on the way back. An
+/// `interval` lowers through [`IntervalPostgresDecoder`] to the text
+/// PostgreSQL prints, such as `00:15:00`, which is what a pg2sqlite replica
+/// stores, where the default decoder would write ISO 8601.
 #[must_use]
 pub fn wal2json_adapter() -> TypeMap<Wal2Json, String, Vec<u8>> {
-    TypeMap::defaults().with(WireKind::Uuid, UuidBlob16Decoder)
+    TypeMap::defaults()
+        .with(WireKind::Uuid, UuidBlob16Decoder)
+        .with(WireKind::Interval, IntervalPostgresDecoder)
 }
 
 /// Fold a batch of wal2json CDC events into one [`PatchsetFormat`]
@@ -435,12 +469,14 @@ where
 /// The pgoutput decoder registry subql feeds to `digest`.
 ///
 /// Requires the `pgoutput-emit` feature. Overrides UUID to
-/// [`UuidBlob16Decoder`] so a `UUID` column lowers to a compact 16-byte
-/// blob, matching [`wal2json_adapter`] and the SQLite client's storage.
+/// [`UuidBlob16Decoder`] and `interval` to [`IntervalPostgresDecoder`],
+/// matching [`wal2json_adapter`] and the SQLite client's storage.
 #[cfg(feature = "pgoutput-emit")]
 #[must_use]
 pub fn pgoutput_adapter() -> TypeMap<PgWalstream, String, Vec<u8>> {
-    TypeMap::defaults().with(WireKind::Uuid, UuidBlob16Decoder)
+    TypeMap::defaults()
+        .with(WireKind::Uuid, UuidBlob16Decoder)
+        .with(WireKind::Interval, IntervalPostgresDecoder)
 }
 
 /// Fold a batch of pgoutput `ChangeEvent`s into one [`PatchsetFormat`]
@@ -593,15 +629,13 @@ pub fn maxwell_changeset<DB: DatabaseLike>(
 
 /// The `PgBinary` decoder registry for snapshot reads.
 ///
-/// The snapshot counterpart to [`pgoutput_adapter`]. Unlike that one it
-/// needs no override: the `PgBinary` `defaults()` already map
-/// [`WireType::Uuid`] to [`UuidBlob16Decoder`], so a `UUID` column lowers
-/// to a compact 16-byte blob, byte-identical to the pgoutput CDC path. The
-/// named seam still earns its place as the single point the two policies
-/// could ever diverge.
+/// The snapshot counterpart to [`pgoutput_adapter`]. The `PgBinary`
+/// `defaults()` already map [`WireKind::Uuid`] to [`UuidBlob16Decoder`], so
+/// only `interval` is overridden, to [`IntervalPostgresDecoder`]. Every
+/// column then lowers byte-identically to the pgoutput CDC path.
 #[must_use]
 pub fn pgbinary_adapter() -> TypeMap<PgBinary, String, Vec<u8>> {
-    TypeMap::defaults()
+    TypeMap::defaults().with(WireKind::Interval, IntervalPostgresDecoder)
 }
 
 /// Encode Postgres binary result rows for `table` into an insert-patchset
@@ -640,20 +674,13 @@ pub fn pgbinary_patchset_builder<B: crate::backend::Backend, DB: DatabaseLike>(
     let simple = catalog_helpers::simple_table(database, table_id)
         .map_err(|e| ConversionError::TableNotFound(e.to_string()))?;
 
-    // Catalog column list once: name plus wire type per ordinal, both read
-    // from the already-resolved `simple` (as `build_wire_table` does)
-    // rather than re-resolving the table per column. Same source the CDC
-    // path folds through, so the two encoders agree.
-    let arity = simple.number_of_columns();
-    let mut columns: Vec<(String, WireType)> = Vec::with_capacity(arity);
-    for ordinal in 0..arity {
-        let column_id = ColumnId::try_from(ordinal)
-            .map_err(|_| ConversionError::TableNotFound(table.to_string()))?;
-        let name = simple
-            .column_name(ordinal)
-            .ok_or_else(|| ConversionError::TableNotFound(table.to_string()))?
-            .to_string();
-        let wire_type = column_wire_type(database, table_id, column_id)
+    // The same catalog columns the CDC path folds through, so the two encoders agree.
+    let mut columns: Vec<(String, WireType)> = Vec::with_capacity(simple.number_of_columns());
+    for column in catalog_helpers::table_columns(database, table_id)
+        .map_err(|e| ConversionError::TableNotFound(e.to_string()))?
+    {
+        let name = column.column_name().to_string();
+        let wire_type = column_wire_type(database, column)
             .ok_or_else(|| ConversionError::UnsupportedType(name.clone()))?;
         columns.push((name, wire_type));
     }
@@ -1334,6 +1361,184 @@ mod tests {
             },
         );
         assert_eq!(snapshot, expected.build());
+    }
+
+    const ARRAY_VECTOR_INTERVAL_DDL: &str = "CREATE EXTENSION vector; \
+        CREATE TYPE mood AS ENUM ('happy', 'sad'); \
+        CREATE TABLE things (id INT PRIMARY KEY, tags INT[], grid INT[][], names TEXT[], \
+        moods mood[], prices NUMERIC(10,2)[], emb vector(3), loose vector, half halfvec(3), \
+        span INTERVAL, blobs BYTEA[], ids UUID[], embs vector(3)[]);";
+
+    /// Each column travels as what a pg2sqlite replica stores for it. An
+    /// array is JSON text of its innermost element, an enum element as its
+    /// label, so `INT[][]` is an `Int` array too. `vector(n)` is a float32
+    /// blob, and an interval is PostgreSQL's own text. An array of a scaled
+    /// `NUMERIC`, of a BLOB-stored `bytea` or `uuid` or of vectors, and a
+    /// `halfvec`, have no replica form, so none gets a wire type and each
+    /// keeps the text fallback.
+    #[test]
+    fn arrays_vectors_and_intervals_travel_as_their_replica_storage() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(ARRAY_VECTOR_INTERVAL_DDL).unwrap();
+        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let table = catalog.get(None, "things").expect("things resolves");
+        let types: Vec<WireType> = (1..13).map(|column| table.column_type(column)).collect();
+        assert_eq!(
+            types,
+            vec![
+                WireType::Array {
+                    element: ArrayElement::Int
+                },
+                WireType::Array {
+                    element: ArrayElement::Int
+                },
+                WireType::Array {
+                    element: ArrayElement::Text
+                },
+                WireType::Array {
+                    element: ArrayElement::Text
+                },
+                WireType::Text,
+                WireType::Vector {
+                    dimensions: Some(3)
+                },
+                WireType::Vector { dimensions: None },
+                WireType::Text,
+                WireType::Interval,
+                WireType::Text,
+                WireType::Text,
+                WireType::Text,
+            ]
+        );
+    }
+
+    /// Every element family a replica array holds travels as the element
+    /// the matching scalar column would, so an element decodes exactly as
+    /// that column does.
+    #[test]
+    fn every_scalar_element_family_has_its_array_element() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE things (id INT PRIMARY KEY, a BOOLEAN[], b DOUBLE PRECISION[], \
+             c NUMERIC[], d DATE[], e TIME[], f TIMESTAMP[], g TIMESTAMPTZ[], h JSON[], \
+             i JSONB[], j INTERVAL[]);",
+        )
+        .unwrap();
+        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let table = catalog.get(None, "things").expect("things resolves");
+        let elements: Vec<WireType> = (1..11).map(|column| table.column_type(column)).collect();
+        let expected: Vec<WireType> = [
+            ArrayElement::Bool,
+            ArrayElement::Real,
+            ArrayElement::Decimal,
+            ArrayElement::Date,
+            ArrayElement::Time,
+            ArrayElement::Timestamp,
+            ArrayElement::TimestampTz,
+            ArrayElement::Json,
+            ArrayElement::Jsonb,
+            ArrayElement::Interval,
+        ]
+        .into_iter()
+        .map(|element| WireType::Array { element })
+        .collect();
+        assert_eq!(elements, expected);
+    }
+
+    /// Without `CREATE EXTENSION vector` a type named `vector` is the
+    /// schema's own, unknown type, and keeps the text fallback.
+    #[test]
+    fn a_vector_needs_its_extension() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE things (id INT PRIMARY KEY, emb vector(3));",
+        )
+        .unwrap();
+        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let table = catalog.get(None, "things").expect("things resolves");
+        assert_eq!(table.column_type(1), WireType::Text);
+    }
+
+    /// The snapshot and both CDC sources write an array, a vector and an
+    /// interval identically, as JSON array text, a little-endian float32 blob
+    /// and PostgreSQL's `postgres`-style interval text.
+    #[cfg(feature = "pgoutput-emit")]
+    #[test]
+    fn arrays_vectors_and_intervals_agree_on_every_path() {
+        use sqlite_diff_rs::pg_walstream::{ColumnValue, EventType, Lsn, RowData};
+
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE EXTENSION vector; \
+             CREATE TABLE things (id INT PRIMARY KEY, tags INT[], emb vector(3), span INTERVAL);",
+        )
+        .unwrap();
+
+        let id = 1_i32.to_be_bytes();
+        // `array_send` of `{1,2}`: ndim, has-null flag, element OID 23,
+        // then the dimension's length and lower bound, then each element.
+        let tags: Vec<u8> = [1_i32, 0, 23, 2, 1, 4, 1, 4, 2]
+            .iter()
+            .flat_map(|word| word.to_be_bytes())
+            .collect();
+        // pgvector's `vector_send` of `[1,2,3]`: dimension and an unused
+        // word as `u16`, then each element as a big-endian `f32`.
+        let emb: Vec<u8> = [3_u16, 0]
+            .iter()
+            .flat_map(|word| word.to_be_bytes())
+            .chain([1.0_f32, 2.0, 3.0].iter().flat_map(|x| x.to_be_bytes()))
+            .collect();
+        // `interval_send` of 15 minutes: microseconds, days, months.
+        let span: Vec<u8> = 900_000_000_i64
+            .to_be_bytes()
+            .into_iter()
+            .chain(0_i32.to_be_bytes())
+            .chain(0_i32.to_be_bytes())
+            .collect();
+        let rows = vec![vec![
+            Some(id.as_slice()),
+            Some(tags.as_slice()),
+            Some(emb.as_slice()),
+            Some(span.as_slice()),
+        ]];
+        let snapshot = pgbinary_patchset::<crate::backend::Postgres, _>(
+            &db,
+            "things",
+            &["id", "tags", "emb", "span"],
+            &rows,
+        )
+        .unwrap();
+
+        let event = ChangeEvent {
+            event_type: EventType::Insert {
+                schema: "public".into(),
+                table: "things".into(),
+                relation_oid: 1,
+                data: RowData::from_pairs(vec![
+                    ("id", ColumnValue::text("1")),
+                    ("tags", ColumnValue::text("{1,2}")),
+                    ("emb", ColumnValue::text("[1,2,3]")),
+                    ("span", ColumnValue::text("00:15:00")),
+                ]),
+            },
+            lsn: Lsn::new(1),
+            metadata: None,
+        };
+        let pgoutput = pgoutput_patchset(&db, core::slice::from_ref(&event)).unwrap();
+        let line = r#"{"action":"I","schema":"public","table":"things","columns":[{"name":"id","type":"integer","value":1},{"name":"tags","type":"integer[]","value":"{1,2}"},{"name":"emb","type":"vector","value":"[1,2,3]"},{"name":"span","type":"interval","value":"00:15:00"}]}"#;
+        let wal2json = wal2json_patchset(&db, &[parse_v2(line).unwrap()]).unwrap();
+
+        assert_eq!(snapshot, pgoutput, "the snapshot and pgoutput agree");
+        assert_eq!(snapshot, wal2json, "the snapshot and wal2json agree");
+        let blob: Vec<u8> = [1.0_f32, 2.0, 3.0]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        assert_eq!(
+            only_insert_values(&snapshot),
+            vec![
+                WireValue::Integer(1),
+                WireValue::Text("[1,2]".into()),
+                WireValue::Blob(blob),
+                WireValue::Text("00:15:00".into()),
+            ]
+        );
     }
 
     #[test]

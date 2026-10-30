@@ -314,3 +314,19 @@ fn grouped_sqlite_json_seed_preserves_original_text() {
     };
     assert_eq!(value.storage(), &SqliteJsonStorage::Text(raw));
 }
+
+/// A scalar read of an interval kind answers `Missing`, so the caller
+/// escalates rather than taking the stored text as an interval value.
+#[test]
+fn an_interval_scalar_read_is_missing() {
+    let connector: DieselConnector<SqliteConnection, SQLite> =
+        DieselConnector::new(SqliteConnection::establish(":memory:").unwrap());
+    let (value, _) = connector
+        .execute_scalar(
+            &subql::reexec::ReadQuery::without_binds("SELECT '00:15:00' AS v"),
+            subql::backend::ScalarFamily::Interval,
+            &(),
+        )
+        .unwrap();
+    assert_eq!(value, Value::Missing);
+}

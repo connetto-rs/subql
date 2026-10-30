@@ -836,7 +836,8 @@ const fn key_kind_has_literal_spelling(kind: Option<crate::backend::ScalarFamily
             | ScalarFamily::Time
             | ScalarFamily::Decimal
             | ScalarFamily::Json
-            | ScalarFamily::Jsonb,
+            | ScalarFamily::Jsonb
+            | ScalarFamily::Interval,
         )
         | None => false,
     }

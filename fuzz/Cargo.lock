@@ -393,7 +393,7 @@ dependencies = [
 [[package]]
 name = "diesel-sqlite-session"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/diesel-sqlite-session#7cd5f437619ba2b1c6942696607d518e32f4271b"
+source = "git+https://github.com/connetto-rs/diesel-sqlite-session#7e08e927ce99bea2775b8deb9304d2f2f00245eb"
 dependencies = [
  "diesel",
  "libsqlite3-sys",
@@ -575,7 +575,7 @@ dependencies = [
 [[package]]
 name = "geometric-traits"
 version = "0.2.3"
-source = "git+https://github.com/earth-metabolome-initiative/geometric-traits?branch=main#18dbbe0862f478098f8728da43d7efa1e6e327bf"
+source = "git+https://github.com/earth-metabolome-initiative/geometric-traits?branch=main#72c9e5f6fcc40127549813725c1849c5ddf4cf86"
 dependencies = [
  "barnes-hut-tree",
  "hashbrown 0.17.1",
@@ -910,7 +910,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#761bee3aae934d835a9cf6928c4fc52768e40869"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#58792184e91eb07286f48907e2676fea26966519"
 dependencies = [
  "sql-traits",
  "sqlparser",
@@ -1093,7 +1093,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#94b94ef8c065dffe50e2c4fb431e60d014147d16"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#09c79f59df1e2fd902977f6c437db65ff0809e2b"
 dependencies = [
  "rls2fga-types",
  "serde",
@@ -1106,7 +1106,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#94b94ef8c065dffe50e2c4fb431e60d014147d16"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#09c79f59df1e2fd902977f6c437db65ff0809e2b"
 dependencies = [
  "serde",
  "thiserror",
@@ -1282,7 +1282,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#241112ad77525b4254bc3c058ce010081c0fa2e9"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#66f17acc2199c32b0190f7f4989cf06a3863a8ed"
 dependencies = [
  "geometric-traits",
  "serde",
@@ -1294,9 +1294,9 @@ dependencies = [
 
 [[package]]
 name = "sqlite-diff-rs"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61123d20ec4d539aef6fcfe690fa4eaed2fa2ebe80dc07154e1468576821c5c6"
+checksum = "c6eb7c6d4d29a4bf867545e4938c074f6d259e955c57ec6068d3bfa009251db6"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
@@ -1335,7 +1335,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.63.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#a1b99f26e8638557ab1b4ea008bf4e6e5d9e15de"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#50813ee84710b1914654205d2f178c533a61799a"
 dependencies = [
  "log",
  "recursive",
@@ -1346,7 +1346,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-canonicalize"
 version = "0.2.1"
-source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#34b89281df2b822243fb5981a1e55d1aad428170"
+source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#13344d4183b38f53326e6731dfe767247ee9b7df"
 dependencies = [
  "seahash",
  "sqlparser",
@@ -1356,7 +1356,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#5b149a9de47f531e0875271980d9932a4da95398"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#a467e8703c714595902a896c5e8b317eec848f78"
 dependencies = [
  "sqlparser",
  "thiserror",
@@ -1365,7 +1365,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.6.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#a1b99f26e8638557ab1b4ea008bf4e6e5d9e15de"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#50813ee84710b1914654205d2f178c533a61799a"
 dependencies = [
  "proc-macro2",
  "quote",

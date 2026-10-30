@@ -373,7 +373,9 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> Backend for Postgres<V> {
             ) => true,
             Some(ScalarFamily::String) => single_column_rule::<Self>(column).is_some(),
             // PostgreSQL numeric waits on Diesel #5168 for infinity support.
-            Some(ScalarFamily::Decimal | ScalarFamily::Json) | None => false,
+            Some(ScalarFamily::Decimal | ScalarFamily::Json | ScalarFamily::Interval) | None => {
+                false
+            }
         });
         supported.then(|| GroupKeyEncoder::new(columns, encode_postgres_component))
     }
@@ -740,7 +742,13 @@ impl<C: MySqlTableNameCase> Backend for MySql<C> {
                 single_column_rule::<Self>(column).is_some()
             }
             // MySQL 8.0 groups persisted signed zero into two groups.
-            Some(ScalarFamily::Float | ScalarFamily::Json | ScalarFamily::Jsonb) | None => false,
+            Some(
+                ScalarFamily::Float
+                | ScalarFamily::Json
+                | ScalarFamily::Jsonb
+                | ScalarFamily::Interval,
+            )
+            | None => false,
         });
         supported.then(|| GroupKeyEncoder::new(columns, encode_mysql_component))
     }
@@ -1058,7 +1066,7 @@ impl Backend for SQLite {
             Some(ScalarFamily::String | ScalarFamily::Uuid) => {
                 single_column_rule::<Self>(column).is_some()
             }
-            Some(ScalarFamily::Decimal) | None => false,
+            Some(ScalarFamily::Decimal | ScalarFamily::Interval) | None => false,
         });
         supported.then(|| GroupKeyEncoder::new(columns, encode_sqlite_component))
     }
