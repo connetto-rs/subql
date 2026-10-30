@@ -11,7 +11,6 @@
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 
 // diesel's `Output` is written through `std::io::Write`, which its PostgreSQL backend links.
 extern crate std;
@@ -107,59 +106,55 @@ where
     ST: Send + 'static,
     Pg: HasSqlType<ST>,
 {
-    let elements = array
-        .elements
-        .iter()
-        .map(|element| match element {
-            Json::Null => Some(None),
-            value => encode(value).map(Some),
-        })
-        .collect::<Option<Vec<_>>>()?;
-    Some(bind_as::<Array<ST>, EncodedArray<ST>>(EncodedArray {
-        dimensions: array.dimensions.clone(),
-        elements,
-        _element: PhantomData,
-    }))
+    Some(bind_as::<Array<ST>, EncodedArray>(EncodedArray::new(
+        array, encode,
+    )?))
 }
 
-/// An array whose elements are already in their binary send format.
-struct EncodedArray<ST> {
-    dimensions: Vec<i32>,
-    elements: Vec<Option<Vec<u8>>>,
-    _element: PhantomData<fn() -> ST>,
+/// An array in PostgreSQL's binary send format, less the element type's OID,
+/// which is resolved from the database at execute time.
+#[derive(Debug)]
+struct EncodedArray {
+    /// The dimension count and the has-null flag.
+    header: [u8; 8],
+    /// Each dimension's length and lower bound, then each element's length and bytes.
+    body: Vec<u8>,
 }
 
-impl<ST> core::fmt::Debug for EncodedArray<ST> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("EncodedArray")
-            .field("dimensions", &self.dimensions)
-            .field("elements", &self.elements.len())
-            .finish()
+impl EncodedArray {
+    fn new(array: &PgArray, encode: impl Fn(&Json) -> Option<Vec<u8>>) -> Option<Self> {
+        let mut body = Vec::new();
+        for &length in &array.dimensions {
+            body.extend_from_slice(&length.to_be_bytes());
+            body.extend_from_slice(&1_i32.to_be_bytes());
+        }
+        let mut has_null = false;
+        for element in &array.elements {
+            if element.is_null() {
+                has_null = true;
+                body.extend_from_slice(&(-1_i32).to_be_bytes());
+            } else {
+                let bytes = encode(element)?;
+                body.extend_from_slice(&i32::try_from(bytes.len()).ok()?.to_be_bytes());
+                body.extend_from_slice(&bytes);
+            }
+        }
+        let mut header = [0; 8];
+        header[..4].copy_from_slice(&i32::try_from(array.dimensions.len()).ok()?.to_be_bytes());
+        header[4..].copy_from_slice(&i32::from(has_null).to_be_bytes());
+        Some(Self { header, body })
     }
 }
 
-impl<ST> ToSql<Array<ST>, Pg> for EncodedArray<ST>
+impl<ST> ToSql<Array<ST>, Pg> for EncodedArray
 where
     Pg: HasSqlType<ST>,
 {
     fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Pg>) -> serialize::Result {
         let element_oid = Pg::metadata(out.metadata_lookup()).oid()?;
-        out.write_all(&i32::try_from(self.dimensions.len())?.to_be_bytes())?;
-        out.write_all(&i32::from(self.elements.iter().any(Option::is_none)).to_be_bytes())?;
+        out.write_all(&self.header)?;
         out.write_all(&element_oid.to_be_bytes())?;
-        for &length in &self.dimensions {
-            out.write_all(&length.to_be_bytes())?;
-            out.write_all(&1_i32.to_be_bytes())?;
-        }
-        for element in &self.elements {
-            match element {
-                Some(bytes) => {
-                    out.write_all(&i32::try_from(bytes.len())?.to_be_bytes())?;
-                    out.write_all(bytes)?;
-                }
-                None => out.write_all(&(-1_i32).to_be_bytes())?,
-            }
-        }
+        out.write_all(&self.body)?;
         Ok(IsNull::No)
     }
 }
@@ -259,18 +254,24 @@ fn encode_decimal(value: &Json) -> Option<Vec<u8>> {
         Json::Number(number) => sql_scalar_text::parse_decimal(&number.to_string())?,
         _ => return None,
     };
-    let (sign, weight, scale, digits) = match PgNumeric::from(decimal) {
-        PgNumeric::Positive {
-            weight,
-            scale,
-            digits,
-        } => (0_u16, weight, scale, digits),
-        PgNumeric::Negative {
-            weight,
-            scale,
-            digits,
-        } => (0x4000, weight, scale, digits),
-        PgNumeric::NaN => return None,
+    let numeric = PgNumeric::from(decimal);
+    let sign: u16 = if matches!(numeric, PgNumeric::Negative { .. }) {
+        0x4000
+    } else {
+        0
+    };
+    let (PgNumeric::Positive {
+        weight,
+        scale,
+        digits,
+    }
+    | PgNumeric::Negative {
+        weight,
+        scale,
+        digits,
+    }) = numeric
+    else {
+        return None;
     };
     let mut bytes = Vec::with_capacity(8 + 2 * digits.len());
     bytes.extend_from_slice(&u16::try_from(digits.len()).ok()?.to_be_bytes());
@@ -305,39 +306,43 @@ fn micros_since_pg_epoch(timestamp: NaiveDateTime) -> Option<Vec<u8>> {
 pub struct VectorType;
 
 /// A single-precision vector in pgvector's binary send format.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PgVector(Vec<f32>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgVector {
+    dimensions: u16,
+    /// The dimension count, an unused word, then each element as big-endian `f32`.
+    bytes: Vec<u8>,
+}
 
 impl PgVector {
     /// Read sqlite-vec's float32 BLOB, the elements as little-endian `f32`,
-    /// or `None` when its length is not a whole number of elements.
+    /// or `None` when its length is not a whole number of elements or it
+    /// holds more elements than pgvector's `u16` dimension count can name.
     #[must_use]
     pub fn from_float32_blob(blob: &[u8]) -> Option<Self> {
         let (elements, rest) = blob.as_chunks::<4>();
-        rest.is_empty().then(|| {
-            Self(
-                elements
-                    .iter()
-                    .map(|&bytes| f32::from_le_bytes(bytes))
-                    .collect(),
-            )
-        })
+        if !rest.is_empty() {
+            return None;
+        }
+        let dimensions = u16::try_from(elements.len()).ok()?;
+        let mut bytes = Vec::with_capacity(4 + blob.len());
+        bytes.extend_from_slice(&dimensions.to_be_bytes());
+        bytes.extend_from_slice(&0_u16.to_be_bytes());
+        for &element in elements {
+            bytes.extend_from_slice(&f32::from_le_bytes(element).to_be_bytes());
+        }
+        Some(Self { dimensions, bytes })
     }
 
     /// The number of elements.
     #[must_use]
-    pub const fn dimensions(&self) -> usize {
-        self.0.len()
+    pub const fn dimensions(&self) -> u16 {
+        self.dimensions
     }
 }
 
 impl ToSql<VectorType, Pg> for PgVector {
     fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Pg>) -> serialize::Result {
-        out.write_all(&u16::try_from(self.0.len())?.to_be_bytes())?;
-        out.write_all(&0_u16.to_be_bytes())?;
-        for &element in &self.0 {
-            out.write_all(&element.to_be_bytes())?;
-        }
+        out.write_all(&self.bytes)?;
         Ok(IsNull::No)
     }
 }
@@ -349,9 +354,7 @@ pub(super) fn bind_vector(
     dimensions: Option<u32>,
 ) -> Option<Box<dyn Binder<Pg> + Send>> {
     let vector = PgVector::from_float32_blob(blob)?;
-    if dimensions
-        .is_some_and(|expected| usize::try_from(expected).ok() != Some(vector.dimensions()))
-    {
+    if dimensions.is_some_and(|expected| expected != u32::from(vector.dimensions())) {
         return None;
     }
     Some(bind_as::<VectorType, PgVector>(vector))
@@ -409,8 +412,33 @@ mod tests {
         assert_eq!(encode_text(&json!("hé")), Some("hé".as_bytes().to_vec()));
         assert_eq!(encode_bool(&json!(true)), Some(alloc::vec![1]));
         assert_eq!(encode_bool(&json!(0)), Some(alloc::vec![0]));
-        assert_eq!(encode_bool(&json!(2)), None);
-        assert_eq!(encode_int(&json!("1")), None);
+        assert_eq!(encode_bool(&json!(2)), None, "only 0 and 1 are booleans");
+        assert_eq!(encode_bool(&json!(0.5)), None, "a fraction is no boolean");
+    }
+
+    /// An element of the wrong JSON type, or text its type cannot read,
+    /// does not encode, which refuses the whole array.
+    #[test]
+    fn an_element_that_does_not_read_as_its_type_does_not_encode() {
+        type Encode = fn(&Json) -> Option<Vec<u8>>;
+        let refusals: [(&str, Encode, [Json; 2]); 11] = [
+            ("int", encode_int, [json!(1.5), json!("1")]),
+            ("float", encode_float, [json!("1.5"), json!(true)]),
+            ("text", encode_text, [json!(1), json!(true)]),
+            ("bool", encode_bool, [json!("true"), json!(null)]),
+            ("decimal", encode_decimal, [json!("twelve"), json!(true)]),
+            ("date", encode_date, [json!(1), json!("yesterday")]),
+            ("time", encode_time, [json!(1), json!("noon")]),
+            ("timestamp", encode_timestamp, [json!(1), json!("noon")]),
+            ("timestamptz", encode_timestamptz, [json!(1), json!("noon")]),
+            ("json", encode_json, [json!(1), json!("{")]),
+            ("jsonb", encode_jsonb, [json!(1), json!("{")]),
+        ];
+        for (name, encode, values) in refusals {
+            for value in values {
+                assert_eq!(encode(&value), None, "{name} {value}");
+            }
+        }
     }
 
     /// Dates and times count from PostgreSQL's 2000-01-01 epoch.
@@ -430,7 +458,6 @@ mod tests {
             encode_timestamptz(&json!("2000-01-01 01:00:01+01:00")),
             Some(second)
         );
-        assert_eq!(encode_date(&json!("yesterday")), None);
     }
 
     /// `12.50` is base-10000 digits `12` and `5000` at weight 0 and scale 2.
@@ -445,7 +472,7 @@ mod tests {
             encode_decimal(&json!("-1")).unwrap()[4..6],
             0x4000_u16.to_be_bytes()
         );
-        assert_eq!(encode_decimal(&json!(true)), None);
+        assert_eq!(encode_decimal(&json!(12.5)), encode_decimal(&json!("12.5")));
     }
 
     #[test]
@@ -455,14 +482,49 @@ mod tests {
             Some(b"{\"a\":1}".to_vec())
         );
         assert_eq!(encode_jsonb(&json!("[1]")), Some(b"\x01[1]".to_vec()));
-        assert_eq!(encode_json(&json!("{")), None);
-        assert_eq!(encode_jsonb(&json!(1)), None);
+    }
+
+    /// `[[7],[null]]` is two dimensions of lengths 2 and 1, each from lower
+    /// bound 1, flagged as holding a NULL, its NULL element of length -1.
+    #[test]
+    fn an_array_encodes_its_dimensions_nulls_and_element_lengths() {
+        let words =
+            |words: &[i32]| -> Vec<u8> { words.iter().flat_map(|w| w.to_be_bytes()).collect() };
+        let encoded =
+            EncodedArray::new(&PgArray::parse("[[7],[null]]").unwrap(), encode_int).unwrap();
+        assert_eq!(encoded.header.to_vec(), words(&[2, 1]));
+        let mut body = words(&[2, 1, 1, 1, 8]);
+        body.extend_from_slice(&7_i64.to_be_bytes());
+        body.extend(words(&[-1]));
+        assert_eq!(encoded.body, body);
+        let without_null = EncodedArray::new(&PgArray::parse("[1]").unwrap(), encode_int).unwrap();
+        assert_eq!(without_null.header.to_vec(), words(&[1, 0]));
+    }
+
+    /// Every builtin family with a replica array form binds its own elements.
+    #[test]
+    fn every_builtin_family_binds_an_array_of_its_elements() {
+        for (family, text) in [
+            (ScalarFamily::Bool, "[true,0]"),
+            (ScalarFamily::Int, "[1,null,2]"),
+            (ScalarFamily::Float, "[1.5,2]"),
+            (ScalarFamily::Decimal, "[\"12.50\",3]"),
+            (ScalarFamily::String, "[\"a\"]"),
+            (ScalarFamily::Date, "[\"2024-03-04\"]"),
+            (ScalarFamily::Time, "[\"05:06:07\"]"),
+            (ScalarFamily::Timestamp, "[\"2024-03-04 05:06:07\"]"),
+            (ScalarFamily::TimestampTz, "[\"2024-03-04 05:06:07+00:00\"]"),
+            (ScalarFamily::Json, "[\"{}\"]"),
+            (ScalarFamily::Jsonb, "[\"[]\"]"),
+        ] {
+            let array = PgArray::parse(text).unwrap();
+            assert!(bind_builtin_array(family, &array).is_some(), "{family:?}");
+        }
     }
 
     #[test]
     fn an_array_binds_only_when_every_element_encodes() {
         let ints = PgArray::parse("[1,null,2]").unwrap();
-        assert!(bind_builtin_array(ScalarFamily::Int, &ints).is_some());
         assert!(bind_builtin_array(ScalarFamily::Date, &ints).is_none());
         for family in [
             ScalarFamily::Bytes,
@@ -479,13 +541,28 @@ mod tests {
             .iter()
             .flat_map(|x| x.to_le_bytes())
             .collect();
-        assert_eq!(
-            PgVector::from_float32_blob(&blob),
-            Some(PgVector(alloc::vec![1.0, -2.5]))
-        );
+        let vector = PgVector::from_float32_blob(&blob).unwrap();
+        assert_eq!(vector.dimensions(), 2);
+        let mut expected = alloc::vec![0, 2, 0, 0];
+        expected.extend_from_slice(&1.0_f32.to_be_bytes());
+        expected.extend_from_slice(&(-2.5_f32).to_be_bytes());
+        assert_eq!(vector.bytes, expected);
         assert_eq!(PgVector::from_float32_blob(&blob[..7]), None);
         assert!(bind_vector(&blob, Some(2)).is_some());
         assert!(bind_vector(&blob, None).is_some());
         assert!(bind_vector(&blob, Some(3)).is_none());
+        assert!(bind_vector(&blob[..7], None).is_none());
+    }
+
+    /// pgvector names its dimension count in a `u16`.
+    #[test]
+    fn a_vector_longer_than_a_u16_count_is_refused() {
+        let longest = alloc::vec![0_u8; 4 * usize::from(u16::MAX)];
+        assert_eq!(
+            PgVector::from_float32_blob(&longest).map(|v| v.dimensions()),
+            Some(u16::MAX)
+        );
+        let too_long = alloc::vec![0_u8; longest.len() + 4];
+        assert_eq!(PgVector::from_float32_blob(&too_long), None);
     }
 }

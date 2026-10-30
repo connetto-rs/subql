@@ -463,4 +463,58 @@ mod tests {
             "a bare NUMERIC refuses text that is not a decimal"
         );
     }
+
+    /// An array column takes only the replica's JSON array text of its
+    /// element type, and a `vector(n)` column only a float32 BLOB of `n`
+    /// elements, each refusal naming the column.
+    #[test]
+    fn array_and_vector_columns_take_only_their_replica_forms() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE EXTENSION vector; CREATE TYPE mood AS ENUM ('happy'); \
+             CREATE TABLE t (id INT PRIMARY KEY, nums INT[], moods mood[], emb vector(2), \
+             half halfvec(2));",
+        )
+        .unwrap();
+        let adapter = PgAdapter::new(&db).expect("the catalog indexes");
+        let bind = |column: usize, value: Value<String, Vec<u8>>| {
+            Adapter::<Pg, String, Vec<u8>>::bind(&adapter, "t", column, &value)
+                .map(drop)
+                .map_err(|err| err.to_string())
+        };
+        let text = |text: &str| Value::Text(text.to_string());
+        let floats = |count: usize| Value::Blob(1.0_f32.to_le_bytes().repeat(count));
+
+        assert_eq!(bind(1, text("[[1,2],[3,null]]")), Ok(()));
+        assert_eq!(bind(1, Value::Null), Ok(()));
+        assert_eq!(
+            bind(1, text("[\"one\"]")),
+            Err(
+                "column `nums` expects a JSON array of its element type, got TEXT that is not"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            bind(1, Value::Integer(1)),
+            Err("column `nums` expects JSON array TEXT or NULL, got INTEGER".to_string())
+        );
+        assert!(
+            bind(2, text("[\"happy\"]")).is_err(),
+            "an enum array needs a registered binder"
+        );
+
+        assert_eq!(bind(3, floats(2)), Ok(()));
+        assert_eq!(bind(3, Value::Null), Ok(()));
+        assert_eq!(
+            bind(3, floats(3)),
+            Err(
+                "column `emb` expects a float32 BLOB of its dimensions, got a BLOB that is not"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            bind(3, text("[1,2]")),
+            Err("column `emb` expects a float32 BLOB or NULL, got TEXT".to_string())
+        );
+        assert!(bind(4, floats(2)).is_err(), "a halfvec has no replica form");
+    }
 }

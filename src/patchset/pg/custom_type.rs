@@ -372,4 +372,40 @@ mod tests {
         assert!(a.bind("orders", 1, &Value::Integer(1)).is_ok());
         assert!(a.bind("orders", 1, &Value::Text("x".to_owned())).is_err());
     }
+
+    /// An array of a registered type routes to the binder's `bind_array`,
+    /// which refuses unless the binder implements it, and only the
+    /// replica's JSON array text or NULL reaches the binder.
+    #[test]
+    fn an_array_of_a_registered_type_routes_to_bind_array() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE orders (id INT PRIMARY KEY, feelings mood[]);",
+        )
+        .unwrap();
+        let a = adapter(&db);
+        let bind = |value: Value<String, Vec<u8>>| {
+            a.bind("orders", 1, &value)
+                .map(drop)
+                .map_err(|err| err.to_string())
+        };
+        assert_eq!(bind(Value::Null), Ok(()));
+        assert_eq!(
+            bind(Value::Text("[\"happy\"]".to_owned())),
+            Err("no array bind is registered for this type".to_owned())
+        );
+        assert_eq!(
+            bind(Value::Text("happy".to_owned())),
+            Err("column `feelings` expects a JSON array, got TEXT that is not".to_owned())
+        );
+        assert_eq!(
+            bind(Value::Integer(1)),
+            Err("column `feelings` expects JSON array TEXT or NULL, got INTEGER".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_unknown_column_is_refused() {
+        let db = catalog();
+        assert!(adapter(&db).bind("orders", 9, &Value::Integer(1)).is_err());
+    }
 }
