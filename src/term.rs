@@ -409,7 +409,7 @@ pub fn term_columns(terms: &[CompiledTerm]) -> Vec<Vec<ColumnId>> {
 
 /// A changed row's link value, in the form the subscriber lookup is keyed by.
 ///
-/// Eleven of [`Value`]'s sixteen variants. `Float`, `Json` and `Jsonb` are absent
+/// Twelve of [`Value`]'s seventeen variants. `Float`, `Json` and `Jsonb` are absent
 /// because their equality is not reflexive, and `Missing` and `Null` are absent
 /// because they are not values (see [`TermLookup`]).
 pub enum TermKey<B: Backend> {
@@ -438,6 +438,9 @@ pub enum TermKey<B: Backend> {
     /// Keyed on the value the type's own conversion produced, not on the
     /// carrier it arrived as, so two spellings meaning the same value match.
     Custom(<B::Custom as CustomScalars>::Value),
+    /// A PostgreSQL interval, equal and hashed by span, so `1 mon` finds a
+    /// subscriber keyed on `30 days` as PostgreSQL's `=` does.
+    Interval(crate::backend::Interval),
 }
 
 // `Clone`, `Debug`, `PartialEq`, `Eq` and `Hash` are hand-implemented for the
@@ -458,6 +461,7 @@ impl<B: Backend> Clone for TermKey<B> {
             Self::Date(v) => Self::Date(v.clone()),
             Self::Time(v) => Self::Time(v.clone()),
             Self::Decimal(v) => Self::Decimal(v.clone()),
+            Self::Interval(v) => Self::Interval(*v),
         }
     }
 }
@@ -476,6 +480,7 @@ impl<B: Backend> core::fmt::Debug for TermKey<B> {
             Self::Date(v) => f.debug_tuple("Date").field(v).finish(),
             Self::Time(v) => f.debug_tuple("Time").field(v).finish(),
             Self::Decimal(v) => f.debug_tuple("Decimal").field(v).finish(),
+            Self::Interval(v) => f.debug_tuple("Interval").field(v).finish(),
         }
     }
 }
@@ -500,6 +505,7 @@ impl<B: Backend> TermKey<B> {
             Self::Date(v) => Value::Date(v),
             Self::Time(v) => Value::Time(v),
             Self::Decimal(v) => Value::Decimal(v),
+            Self::Interval(v) => Value::Interval(v),
         }
     }
 
@@ -525,6 +531,7 @@ impl<B: Backend> TermKey<B> {
             Self::Date(_) => crate::backend::ValueKind::Builtin(ScalarFamily::Date),
             Self::Time(_) => crate::backend::ValueKind::Builtin(ScalarFamily::Time),
             Self::Decimal(_) => crate::backend::ValueKind::Builtin(ScalarFamily::Decimal),
+            Self::Interval(_) => crate::backend::ValueKind::Builtin(ScalarFamily::Interval),
         }
     }
 }
@@ -542,6 +549,7 @@ impl<B: Backend> PartialEq for TermKey<B> {
             (Self::Date(a), Self::Date(b)) => a == b,
             (Self::Time(a), Self::Time(b)) => a == b,
             (Self::Decimal(a), Self::Decimal(b)) => a == b,
+            (Self::Interval(a), Self::Interval(b)) => a.span() == b.span(),
             _ => false,
         }
     }
@@ -568,6 +576,7 @@ impl<B: Backend> Hash for TermKey<B> {
             Self::Date(v) => v.hash(state),
             Self::Time(v) => v.hash(state),
             Self::Decimal(v) => v.hash(state),
+            Self::Interval(v) => v.span().hash(state),
         }
     }
 }
@@ -609,6 +618,7 @@ impl<B: Backend> TermLookup<B> {
             Value::Date(v) => Self::Key(TermKey::Date(v)),
             Value::Time(v) => Self::Key(TermKey::Time(v)),
             Value::Decimal(v) => Self::Key(TermKey::Decimal(v)),
+            Value::Interval(v) => Self::Key(TermKey::Interval(v)),
             Value::Null => Self::Nobody,
             Value::Missing | Value::Float(_) | Value::Json(_) | Value::Jsonb(_) => Self::Unknown,
         }
@@ -636,11 +646,9 @@ pub fn kind_can_key<B: Backend>(kind: ScalarKindOf<B>) -> bool {
             | ScalarFamily::TimestampTz
             | ScalarFamily::Date
             | ScalarFamily::Time
-            | ScalarFamily::Decimal => true,
-            ScalarFamily::Float
-            | ScalarFamily::Json
-            | ScalarFamily::Jsonb
-            | ScalarFamily::Interval => false,
+            | ScalarFamily::Decimal
+            | ScalarFamily::Interval => true,
+            ScalarFamily::Float | ScalarFamily::Json | ScalarFamily::Jsonb => false,
         },
     }
 }
@@ -669,6 +677,30 @@ mod tests {
         assert_eq!(map.get(&TermKey::Int(7)), Some(&1));
         assert_eq!(map.get(&TermKey::String("proj-7".to_string())), Some(&2));
         assert_eq!(map.get(&TermKey::Int(8)), None);
+    }
+
+    /// A changed row's `30 days` finds the subscribers keyed on `1 mon`, as
+    /// PostgreSQL's `=` would, and reports back the value it arrived as.
+    #[test]
+    fn an_interval_term_key_is_found_by_span() {
+        let interval =
+            |text| crate::backend::Interval::parse(text).expect("PostgreSQL reads this interval");
+        let mut map: HashMap<TermKey<Postgres>, u32> = HashMap::new();
+        map.insert(TermKey::Interval(interval("1 mon")), 1);
+        let TermLookup::Key(key) = TermLookup::of(Value::Interval(interval("30 days"))) else {
+            panic!("an interval is a key");
+        };
+        assert_eq!(map.get(&key), Some(&1));
+        assert!(hashes_alike(
+            &key,
+            &TermKey::Interval(interval("720:00:00"))
+        ));
+        assert_eq!(
+            key.scalar_kind(),
+            crate::backend::ValueKind::Builtin(ScalarFamily::Interval)
+        );
+        assert_eq!(key.into_value(), Value::Interval(interval("30 days")));
+        assert_eq!(map.get(&TermKey::Interval(interval("31 days"))), None);
     }
 
     /// The same hasher gives the same answer twice, which is what makes the

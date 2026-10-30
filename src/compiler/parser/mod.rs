@@ -749,9 +749,10 @@ fn extract_table_and_where(
 ///
 /// Handles the scalars commonly bound through placeholders (Int, Float,
 /// String, Bool, Null) plus Bytes, whose canonical `X'...'` hex spelling round
-/// trips through [`SqlLiteralParse::parse_literal`]. Every other scalar
-/// returns [`RegisterError::BindResolution`] until a downstream test
-/// exercises it and pins a canonical round-trip format.
+/// trips through [`SqlLiteralParse::parse_literal`], and Interval, whose
+/// printed text reads back field for field. Every other scalar returns
+/// [`RegisterError::BindResolution`] until a downstream test exercises it and
+/// pins a canonical round-trip format.
 pub(crate) fn value_to_sql_value<B: Backend>(v: &Value<B>) -> Result<SqlValue, RegisterError> {
     match v {
         Value::Custom(_) => Err(RegisterError::BindResolution(
@@ -770,6 +771,7 @@ pub(crate) fn value_to_sql_value<B: Backend>(v: &Value<B>) -> Result<SqlValue, R
         // leg (`parse_literal` -> `parse_hex_bytes`) accepts either case,
         // so `parse_literal(value_to_sql_value(Bytes(v))) == Bytes(v)`.
         Value::Bytes(b) => Ok(SqlValue::HexStringLiteral(hex_upper(b.as_ref()))),
+        Value::Interval(interval) => Ok(SqlValue::SingleQuotedString(interval.to_string())),
         Value::Uuid(_)
         | Value::Timestamp(_)
         | Value::TimestampTz(_)

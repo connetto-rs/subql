@@ -155,6 +155,14 @@ pub(super) fn parse_time_literal(
     sql_scalar_text::parse_time(s).ok_or_else(|| err_parse(sql, ScalarFamily::Time, "not a time"))
 }
 
+pub(super) fn parse_interval_literal(
+    s: &str,
+    sql: &SqlValue,
+) -> Result<crate::backend::Interval, RegisterError> {
+    crate::backend::Interval::parse(s)
+        .ok_or_else(|| err_parse(sql, ScalarFamily::Interval, "not an interval"))
+}
+
 pub(super) fn parse_json(s: &str, sql: &SqlValue) -> Result<serde_json::Value, RegisterError> {
     serde_json::from_str(s).map_err(|e| err_parse(sql, ScalarFamily::Json, e))
 }

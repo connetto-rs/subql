@@ -92,6 +92,8 @@ pub fn structural_equality<B: Backend>(
         // Without this arm the wildcard answers `false` and a filter on a
         // custom column registers and then never fires.
         (Value::Custom(x), Value::Custom(y)) => x == y,
+        // PostgreSQL's `interval_eq`, so `1 mon` equals `30 days`.
+        (Value::Interval(x), Value::Interval(y)) => x.sql_cmp(y) == core::cmp::Ordering::Equal,
         // Missing/Null and cross-scalar pairs are never equal here.
         _ => false,
     })
@@ -139,6 +141,7 @@ pub fn structural_ordering<B: Backend>(
         (Value::Date(x), Value::Date(y)) => x.partial_cmp(y),
         (Value::Time(x), Value::Time(y)) => x.partial_cmp(y),
         (Value::Decimal(x), Value::Decimal(y)) => x.partial_cmp(y),
+        (Value::Interval(x), Value::Interval(y)) => Some(x.sql_cmp(y)),
         // Json / Jsonb have no order here; a cross-scalar mismatch also
         // lands on this arm.
         _ => None,

@@ -123,6 +123,8 @@ macro_rules! postgres_like_backend {
 
             const READS_IS_UNKNOWN: bool = true;
 
+            const HAS_INTERVAL: bool = true;
+
             const RANGE_WITH_NULL_BOUND_COMPARES_DOUBLES: bool = false;
 
             const NULL_ARITHMETIC_IS_AMBIGUOUS: bool = true;
@@ -227,6 +229,7 @@ macro_rules! postgres_like_backend {
                     Value::Json(v) => Value::Json(v),
                     Value::Jsonb(v) => Value::Jsonb(v),
                     Value::Custom(none) => match none {},
+                    Value::Interval(v) => Value::Interval(v),
                 }
             }
         }
