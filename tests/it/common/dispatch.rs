@@ -26,9 +26,11 @@
 //! over text), and `feeling mood` (an `ENUM`). The domain and enum bind
 //! through diesel's own `SqlType`/`ToSql` resolved by OID name.
 //!
-//! `price NUMERIC(12,4)` binds natively as `Numeric`, and `ts TIMESTAMP`,
-//! `tstz TIMESTAMPTZ`, `d DATE`, and `t TIME` bind natively as their
-//! matching diesel temporal types, all through [`PgAdapter`].
+//! `price NUMERIC(12,4)` travels as the integer count of minor units a
+//! pg2sqlite replica stores (`1234.5678` as `12345678`) and binds back
+//! natively as `Numeric`, and `ts TIMESTAMP`, `tstz TIMESTAMPTZ`, `d DATE`,
+//! and `t TIME` bind natively as their matching diesel temporal types, all
+//! through [`PgAdapter`].
 //!
 //! Only compiled for test crates that enable the full apply stack.
 
@@ -152,7 +154,7 @@ pub use schema_dml_fixtures::{create_schema, finish_loop, mutate_dml, seed_dml, 
 
 mod schema_dml_fixtures {
     use super::{Mood, MoodBinding, MoodType, Sku, SkuBinding, SkuType};
-    use bigdecimal::BigDecimal;
+    use bigdecimal::{BigDecimal, ToPrimitive};
     use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
     use core::str::FromStr;
     use diesel::{
@@ -175,7 +177,7 @@ mod schema_dml_fixtures {
     /// The subql catalog only needs the table shape. `sku` and `mood` are
     /// unknown scalars, so subql treats their columns as text on the wire.
     const SUBQL_PG_DDL: &str = "CREATE TABLE orders (id UUID PRIMARY KEY, amount INT, status TEXT, active BOOLEAN, token UUID, code sku, feeling mood, note TEXT, price NUMERIC(12,4), ts TIMESTAMP, tstz TIMESTAMPTZ, d DATE, t TIME, js JSON, jb JSONB, dp DOUBLE PRECISION, bin BYTEA);";
-    const SQLITE_DDL: &str = "CREATE TABLE orders (id BLOB PRIMARY KEY, amount INTEGER, status TEXT, active INTEGER, token BLOB, code TEXT, feeling TEXT, note TEXT, price TEXT, ts TEXT, tstz TEXT, d TEXT, t TEXT, js TEXT, jb TEXT, dp REAL, bin BLOB);";
+    const SQLITE_DDL: &str = "CREATE TABLE orders (id BLOB PRIMARY KEY, amount INTEGER, status TEXT, active INTEGER, token BLOB, code TEXT, feeling TEXT, note TEXT, price INTEGER, ts TEXT, tstz TEXT, d TEXT, t TEXT, js TEXT, jb TEXT, dp REAL, bin BLOB);";
 
     const ID_A: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -240,8 +242,8 @@ mod schema_dml_fixtures {
         feeling: String,
         #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
         note: Option<String>,
-        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
-        price: Option<String>,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+        price: Option<i64>,
         #[diesel(sql_type = diesel::sql_types::Text)]
         ts: String,
         #[diesel(sql_type = diesel::sql_types::Text)]
@@ -430,7 +432,9 @@ mod schema_dml_fixtures {
             code: row.code.0,
             feeling: row.feeling.label().to_owned(),
             note: row.note,
-            price: row.price.as_ref().map(ToString::to_string),
+            price: row
+                .price
+                .map(|price| (price * BigDecimal::from(10_000)).to_i64().unwrap()),
             ts: row.ts.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
             tstz: row.tstz.format("%Y-%m-%d %H:%M:%S%.6f+00:00").to_string(),
             d: row.d.format("%Y-%m-%d").to_string(),

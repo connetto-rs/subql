@@ -623,6 +623,33 @@ pub fn column_scalar_family<DB: DatabaseLike>(
     scalar_family(&column.data_type(database))
 }
 
+/// The scale at which a column's values travel the SQLite wire as an integer
+/// count of minor units, or `None` for a column that travels as itself.
+///
+/// A pg2sqlite replica stores a `NUMERIC(p,s)` column as an `INTEGER` of
+/// `value × 10^s`, so `12.50` at scale 2 is `1250`. A decimal declared
+/// without a scale has no such column, and neither has a negative scale, so
+/// both answer `None` and keep the decimal text.
+#[must_use]
+pub fn minor_unit_scale<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Option<u32> {
+    u32::try_from(column.numeric_scale(database)?).ok()
+}
+
+/// The catalog column at `column_id` in `table_id`, or `None` when the
+/// catalog holds no such table or column.
+#[must_use]
+pub fn column<DB: DatabaseLike>(
+    database: &DB,
+    table_id: TableId,
+    column_id: ColumnId,
+) -> Option<&DB::Column> {
+    usize::try_from(table_id)
+        .ok()
+        .and_then(|index| database.table_by_id(index))
+        .and_then(|table| table.column_by_id(usize::from(column_id), database).ok())
+        .flatten()
+}
+
 /// Whether the table has row-level security enabled (per
 /// [`TableLike::has_row_level_security`]).
 ///
@@ -659,6 +686,20 @@ mod tests {
             "CREATE TABLE orders (id INT PRIMARY KEY, amount INT, status TEXT);",
         )
         .expect("DDL parses")
+    }
+
+    /// A column resolves by its table and ordinal, and an id past either
+    /// answers `None` rather than another table's or column's entry.
+    #[test]
+    fn a_column_resolves_only_inside_its_table() {
+        let db = make_db();
+        let orders = table_id::<Postgres, _>(&db, "orders").unwrap();
+        assert_eq!(
+            column(&db, orders, 2).map(ColumnLike::column_name),
+            Some("status")
+        );
+        assert!(column(&db, orders, 3).is_none(), "past the last column");
+        assert!(column(&db, orders + 1, 0).is_none(), "past the last table");
     }
 
     /// What a quoted table name matches is the engine's rule, not one rule.

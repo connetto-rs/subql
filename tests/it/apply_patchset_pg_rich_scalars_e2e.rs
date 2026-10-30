@@ -1,9 +1,10 @@
 //! Docker-backed E2E test for the [`PgAdapter`](subql::patchset::PgAdapter)
-//! arms that bind a verbatim wire text as a native Postgres scalar.
+//! arms that bind a wire value as a native Postgres scalar.
 //!
-//! Every column here is one the adapter parses out of `Value::Text` and binds
-//! under its own diesel `SqlType`, so a wrong `SqlType` on any arm is a wire
-//! type the server refuses.
+//! Every column here is one the adapter binds under its own diesel
+//! `SqlType`, so a wrong `SqlType` on any arm is a wire type the server
+//! refuses. The `NUMERIC(12,3)` column arrives as the integer count of
+//! minor units a pg2sqlite replica stores, and every other column as text.
 
 #![allow(clippy::unwrap_used)]
 
@@ -76,7 +77,7 @@ fn apply_patchset_binds_every_rich_scalar_natively() {
         Insert::from(rich)
             .set(0, 1_i64)
             .unwrap()
-            .set(1, "12345.678")
+            .set(1, 12_345_678_i64)
             .unwrap()
             .set(2, "2024-03-04 05:06:07.891")
             .unwrap()

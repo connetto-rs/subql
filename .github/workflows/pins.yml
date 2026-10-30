@@ -19,7 +19,7 @@ concurrency:
 jobs:
   refresh:
     name: refresh the resolved pins
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Monday's cache is cold, because the pins the cache keys on just moved.
     timeout-minutes: 240
     steps:
