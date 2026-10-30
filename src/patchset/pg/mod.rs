@@ -39,6 +39,10 @@
 //!   round trip preserves the value, not the exact input bytes. Each is
 //!   classified through the catalog's [`crate::backend::ScalarKind`]. Any other wire
 //!   shape on such a column is rejected.
+//! * An `INTERVAL` column, restricted or not, gets a native bind when the
+//!   wire carries a `Value::Text` holding the text PostgreSQL prints for
+//!   it, parsed through `sql_scalar_text::parse_interval`. Any other wire
+//!   shape on such a column is rejected.
 //! * An array column gets a native array bind when the wire carries a
 //!   `Value::Text` holding the replica's JSON array text, of any number of
 //!   dimensions. It binds as the widest type of its element family, such as
@@ -65,18 +69,21 @@ use alloc::boxed::Box;
 
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use diesel::pg::data_types::PgInterval as DieselInterval;
 use diesel::pg::Pg;
 use diesel::result::Error as DieselError;
 use diesel::sql_types::{
-    Bool, Date, Json, Jsonb, Numeric, Time, Timestamp, Timestamptz, Uuid as UuidSqlType,
+    Bool, Date, Interval, Json, Jsonb, Numeric, Time, Timestamp, Timestamptz, Uuid as UuidSqlType,
 };
-use sql_scalar_text::{parse_date, parse_time, parse_timestamp, parse_timestamp_tz};
+use sql_scalar_text::{
+    parse_date, parse_interval, parse_time, parse_timestamp, parse_timestamp_tz,
+};
 use sql_traits::prelude::{
     ColumnLike, DataTypeLike, DatabaseLike, DialectLike, TypeMatchLike, VectorKind,
 };
 use sqlite_diff_rs::{Adapter, Binder, DefaultBinder, Value};
 
-use crate::backend::{ScalarFamily, ScalarKindOf};
+use crate::backend::ScalarFamily;
 use crate::patchset::columns::{
     bind_error, minor_units, shape_of, unknown_column_error, ColumnIndex,
 };
@@ -116,19 +123,23 @@ impl<'db, DB: DatabaseLike> PgAdapter<'db, DB> {
         self.columns.column_at(table_name, index)
     }
 
-    /// Classify the target column through the catalog's [`crate::backend::ScalarKind`],
-    /// the dispatch key for families Postgres will not assignment-cast
-    /// from a text bind. Returns `None` for an unknown table or column,
-    /// or a declared type that maps to no supported scalar.
-    fn scalar_kind_at(
-        &self,
-        table_name: &str,
-        column_index: usize,
-    ) -> Option<ScalarKindOf<crate::backend::Postgres>> {
-        let column = self.column_at(table_name, column_index)?;
+    /// The scalar family of the target column, the dispatch key for
+    /// families Postgres will not assignment-cast from a text bind, or
+    /// `None` for a declared type that maps to no supported scalar.
+    ///
+    /// The catalog's [`crate::backend::ScalarKind`] classifies every family
+    /// but the interval, which the declared type names alone.
+    fn scalar_family_of(&self, column: &DB::Column) -> Option<ScalarFamily> {
+        let data_type = column.data_type(self.catalog);
         crate::catalog_helpers::classify_scalar_kind::<crate::backend::Postgres>(
-            &column.data_type(self.catalog).name(self.catalog),
+            &data_type.name(self.catalog),
         )
+        .and_then(|kind| kind.family())
+        .or_else(|| {
+            data_type
+                .scalar_family(self.catalog)
+                .filter(|family| *family == ScalarFamily::Interval)
+        })
     }
 
     /// The declared SQL type name of the target column, verbatim from the
@@ -282,18 +293,22 @@ where
         }
 
         // Rich scalars Postgres will not assignment-cast from a text
-        // bind: decimal and the temporals. Each parses the verbatim wire
-        // text into its diesel type and binds it natively. Bool and UUID
-        // are handled above, and everything else falls to DefaultBinder.
-        match self
-            .scalar_kind_at(table_name, column_index)
-            .and_then(|kind| kind.family())
-        {
+        // bind: decimal, the temporals and json. Each parses the verbatim
+        // wire text into its diesel type and binds it natively. Bool and
+        // UUID are handled above, and everything else falls to DefaultBinder.
+        match self.scalar_family_of(col) {
             Some(ScalarFamily::Decimal) => decimal_bind(
                 col_name,
                 crate::catalog_helpers::minor_unit_scale(self.catalog, col.data_type(self.catalog)),
                 value,
             ),
+            Some(ScalarFamily::Interval) => {
+                text_scalar_bind(col_name, value, "interval TEXT or NULL", |s| {
+                    Some(bind_as::<Interval, DieselInterval>(diesel_interval(
+                        parse_interval(s)?,
+                    )))
+                })
+            }
             Some(ScalarFamily::Timestamp) => {
                 text_scalar_bind(col_name, value, "timestamp TEXT or NULL", |s| {
                     Some(bind_as::<Timestamp, NaiveDateTime>(parse_timestamp(s)?))
@@ -357,6 +372,11 @@ where
             ))
         }),
     }
+}
+
+/// diesel's form of a parsed interval, the same three fields.
+const fn diesel_interval(interval: sql_scalar_text::PgInterval) -> DieselInterval {
+    DieselInterval::new(interval.microseconds, interval.days, interval.months)
 }
 
 /// Bind a rich scalar carried as verbatim `Value::Text`. `parse` turns
@@ -516,5 +536,35 @@ mod tests {
             Err("column `emb` expects a float32 BLOB or NULL, got TEXT".to_string())
         );
         assert!(bind(4, floats(2)).is_err(), "a halfvec has no replica form");
+    }
+
+    /// An interval column takes the text PostgreSQL prints for it, including
+    /// a restricted interval type, and refuses text that is no interval.
+    #[test]
+    fn an_interval_column_binds_its_printed_text() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE t (id INT PRIMARY KEY, span INTERVAL, clock INTERVAL HOUR TO MINUTE);",
+        )
+        .unwrap();
+        let adapter = PgAdapter::new(&db).expect("the catalog indexes");
+        let bind = |column: usize, value: Value<String, Vec<u8>>| {
+            Adapter::<Pg, String, Vec<u8>>::bind(&adapter, "t", column, &value)
+                .map(drop)
+                .map_err(|err| err.to_string())
+        };
+        assert_eq!(
+            bind(1, Value::Text("1 year -3 days +04:05:06.789".to_string())),
+            Ok(())
+        );
+        assert_eq!(bind(2, Value::Text("01:30:00".to_string())), Ok(()));
+        assert_eq!(bind(1, Value::Null), Ok(()));
+        assert_eq!(
+            bind(1, Value::Text("1 fortnight".to_string())),
+            Err("column `span` expects interval TEXT or NULL, got unparseable TEXT".to_string())
+        );
+        assert_eq!(
+            bind(1, Value::Integer(60)),
+            Err("column `span` expects interval TEXT or NULL, got INTEGER".to_string())
+        );
     }
 }
