@@ -461,6 +461,98 @@ fn isolated_capacity_failure_preserves_unread_until_failure_persistence_succeeds
     assert_eq!(engine.unread(43), Some(&PgLsn(3)));
 }
 
+/// A failed instance may be stored past its quota, and restoring it keeps the failure.
+#[test]
+fn a_failed_instance_stored_past_its_quota_restores() {
+    let mut quota = 1_000_000;
+    for _ in 0..2 {
+        let (mut measured, table) = engine();
+        register(&mut measured, table, quota);
+        quota = measured
+            .state_bytes(42)
+            .expect("state size")
+            .expect("instance");
+    }
+    let (mut engine, table) = engine();
+    register(&mut engine, table, quota);
+    let events =
+        [Event::insert(table, vec![Value::Int(2), Value::Int(4)]).with_checkpoint(PgLsn(2))];
+    engine
+        .prepare_transaction(b"source-generation-1", &PgLsn(1), PgLsn(2), &events)
+        .expect("prepare")
+        .expect("new commit")
+        .persist(|_| Ok::<_, ()>(()))
+        .expect("persist failure");
+    assert_eq!(
+        engine.failure(42).expect("the changed result overflows").at,
+        PgLsn(2)
+    );
+    assert!(
+        engine
+            .state_bytes(42)
+            .expect("state size")
+            .expect("instance")
+            > quota
+    );
+    let bytes = engine.checkpoint().expect("checkpoint");
+    let restored = Engine::restore(
+        compiler().0,
+        context(),
+        engine.revision(),
+        PgLsn(2),
+        &bytes,
+        |_, _| Ok(()),
+    )
+    .expect("a failed instance restores past its quota")
+    .engine;
+    assert_eq!(
+        restored.failure(42).expect("failure survives restore").at,
+        PgLsn(2)
+    );
+    assert_eq!(restored.last_valid(42), Some(&PgLsn(1)));
+}
+
+/// A healthy stored instance larger than its quota is a corrupt receipt, not a refusal.
+#[test]
+fn restore_rejects_a_healthy_instance_stored_over_its_quota() {
+    const QUOTA: usize = 987_654_321;
+    let (mut engine, table) = engine();
+    register(&mut engine, table, QUOTA);
+    let bytes = engine.checkpoint().expect("checkpoint");
+    let revision = engine.revision();
+    let stored = postcard::to_allocvec(&QUOTA).expect("quota encoding");
+    let mut at = bytes
+        .windows(stored.len())
+        .enumerate()
+        .filter(|(_, window)| *window == stored.as_slice())
+        .map(|(at, _)| at);
+    let position = at.next().expect("the receipt stores the quota");
+    assert_eq!(
+        at.next(),
+        None,
+        "the quota encoding is unique in the receipt"
+    );
+    let shrunk = postcard::to_allocvec(&1_usize).expect("quota encoding");
+    let forged = [
+        &bytes[..position],
+        shrunk.as_slice(),
+        &bytes[position + stored.len()..],
+    ]
+    .concat();
+    let restore = |bytes: &[u8]| {
+        Engine::restore(
+            compiler().0,
+            context(),
+            revision,
+            PgLsn(1),
+            bytes,
+            |_, _| Ok(()),
+        )
+    };
+    assert!(restore(&bytes).is_ok());
+    assert!(matches!(restore(&forged), Err(DurableError::State)));
+}
+
 #[test]
 fn unchanged_results_can_fill_the_exact_record_quota() {
     let admit = |engine: &mut Engine, table, quota| {
