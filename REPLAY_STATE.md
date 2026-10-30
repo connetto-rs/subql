@@ -7,7 +7,7 @@
 `SubscriptionEngine::replay_detector(spec, tables)` admits the single-table forms below and answers them from retained state. Admission requires the backend to serve every numeric `HAVING` coercion, even on empty input.
 
 - Row subscriptions. `SELECT *` or a projection of the table's own columns, with the `WHERE` the in-process tier serves and typed binds.
-- Scalar folds. `COUNT(*)`, `COUNT(col)`, and `SUM(col)` over the table.
+- Scalar folds. `COUNT(*)`, `COUNT(col)`, and `SUM(col)` over the table, the sum over a numeric column or a PostgreSQL `interval` column.
 - Grouped folds. The same three with `GROUP BY` and the `HAVING` the compiler admits.
 - Extremes. `MIN(col)` and `MAX(col)`, scalar or grouped with the admitted `HAVING`.
 - Caller membership. The existing admitted membership terms, seeded from `SubscriptionRequest::subscriber` and `SubscriptionRequest::subjects`, whose membership tables are dependencies.

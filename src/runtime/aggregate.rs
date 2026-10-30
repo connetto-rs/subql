@@ -76,6 +76,9 @@ pub enum TotalDelta {
     /// arithmetic, and makes the delta and the total members of the same
     /// commutative group, added componentwise.
     Real(FloatParts),
+    /// An interval cell, as months, days and microseconds and the
+    /// infinities, so that merging and removing stay exact.
+    Interval(crate::backend::IntervalSum),
 }
 
 /// A floating quantity as its parts: what the finite contributions sum
@@ -187,6 +190,8 @@ impl TotalDelta {
                 <bigdecimal::BigDecimal as bigdecimal::ToPrimitive>::to_f64(value).unwrap_or(0.0)
             }
             Self::Real(parts) => parts.value(),
+            // No function folds an interval through a double.
+            Self::Interval(_) => 0.0,
         }
     }
 
@@ -213,6 +218,7 @@ impl TotalDelta {
             // Two floating changes merge as their parts, so a batch that
             // both adds and removes an infinity nets to neither.
             (Self::Real(a), Self::Real(b)) => a.add(*b),
+            (Self::Interval(a), Self::Interval(b)) => a.merge(*b),
             (left, right) => {
                 *left = Self::Real(FloatParts::finite(left.as_f64() + right.as_f64()));
             }
@@ -225,6 +231,7 @@ impl TotalDelta {
             Self::Integer(value) => *value == 0,
             Self::Decimal(value) => value == &bigdecimal::BigDecimal::from(0),
             Self::Real(parts) => parts.is_zero(),
+            Self::Interval(sum) => sum.is_zero(),
         }
     }
 }
@@ -543,6 +550,9 @@ enum Total {
     Single(FloatParts, FloatBoundary),
     /// A double.
     Double(FloatParts, FloatBoundary),
+    /// PostgreSQL's interval total, which raises once a field's net total
+    /// leaves its range or infinities of both signs are present.
+    Interval(crate::backend::IntervalSum),
 }
 
 /// What a floating accumulator does when its finite part leaves range.
@@ -606,6 +616,9 @@ impl Total {
             },
             crate::backend::SumRule::Single => Self::Single(FloatParts::EMPTY, boundary),
             crate::backend::SumRule::Double => Self::Double(FloatParts::EMPTY, boundary),
+            crate::backend::SumRule::Interval => {
+                Self::Interval(crate::backend::IntervalSum::default())
+            }
         }
     }
 
@@ -657,6 +670,8 @@ impl Total {
                         )
                         .ok_or(SumOutOfRange)?
                     }
+                    // A catalog and a stream that disagree have no answer.
+                    TotalDelta::Interval(_) => return Err(SumOutOfRange),
                 };
                 match integer_digits {
                     Some(limit) if integer_digits_of(value) > u64::from(*limit) => {
@@ -681,6 +696,32 @@ impl Total {
                 parts.finite = boundary.settle(parts.finite)?;
                 Ok(())
             }
+            // The catalog types the column, so only an interval cell reaches here.
+            Self::Interval(total) => {
+                let TotalDelta::Interval(change) = delta else {
+                    return Err(SumOutOfRange);
+                };
+                total.merge(*change);
+                self.answers()
+            }
+        }
+    }
+
+    /// Whether this total has an answer to report, which is always so for a
+    /// total that raises as it is added to.
+    ///
+    /// # Errors
+    ///
+    /// [`SumOutOfRange`] for an interval total whose sum or mean PostgreSQL
+    /// would answer with `interval out of range`.
+    fn answers(&self) -> Result<(), SumOutOfRange> {
+        match self {
+            Self::Interval(total) => total
+                .sum()
+                .and_then(|_| total.mean())
+                .map(drop)
+                .map_err(|_| SumOutOfRange),
+            _ => Ok(()),
         }
     }
 
@@ -730,6 +771,8 @@ impl Total {
             Self::Double(parts, _) => {
                 *parts = FloatParts::of(AggAccumulator::seed_f64(cell).unwrap_or(0.0), 1);
             }
+            // Seeded from its own four components by `seed_from_row`.
+            Self::Interval(_) => {}
         }
     }
 
@@ -748,6 +791,7 @@ impl Total {
             }
             Self::Decimal { value, .. } => *value = bigdecimal::BigDecimal::from(0),
             Self::Single(parts, _) | Self::Double(parts, _) => *parts = FloatParts::EMPTY,
+            Self::Interval(total) => *total = crate::backend::IntervalSum::default(),
         }
     }
 
@@ -769,7 +813,24 @@ impl Total {
             Self::Single(parts, _) | Self::Double(parts, _) => {
                 crate::NumericValue::Double(parts.value())
             }
+            // `add` refused every state without an answer, and an empty one
+            // is reported through the count rather than read here.
+            Self::Interval(total) => {
+                crate::NumericValue::Interval(total.sum().ok().flatten().unwrap_or_default())
+            }
         }
+    }
+
+    /// The interval mean, which `add` has already checked has an answer.
+    fn interval_mean(&self) -> Option<crate::NumericValue> {
+        let Self::Interval(total) = self else {
+            return None;
+        };
+        total
+            .mean()
+            .ok()
+            .flatten()
+            .map(crate::NumericValue::Interval)
     }
 }
 
@@ -871,6 +932,17 @@ impl AggAccumulator {
             }
             S::CountColumn { .. } => {
                 acc.contributions = row.first().and_then(|v| Self::seed_i64(v)).unwrap_or(0);
+            }
+            S::Sum { .. } | S::Avg { .. } if matches!(acc.total, Total::Interval(_)) => {
+                let count = |at| row.get(at).and_then(|v| Self::seed_i64(v)).unwrap_or(0);
+                let finite_sum = row.first().and_then(|cell| match cell {
+                    Value::Interval(interval) => Some(*interval),
+                    _ => None,
+                });
+                let seeded =
+                    crate::backend::IntervalSum::seeded(finite_sum, count(1), count(2), count(3));
+                acc.contributions = seeded.count();
+                acc.total = Total::Interval(seeded);
             }
             S::Sum { .. } | S::Avg { .. } => {
                 if let Some(cell) = row.first() {
@@ -1031,6 +1103,16 @@ impl AggAccumulator {
         self.total.clear();
     }
 
+    /// Whether the held state has an answer, which a seed read from the
+    /// database may not: PostgreSQL raised on those rows.
+    ///
+    /// # Errors
+    ///
+    /// [`SumOutOfRange`] where the engine answers `interval out of range`.
+    pub fn answers(&self) -> Result<(), SumOutOfRange> {
+        self.total.answers()
+    }
+
     /// Current aggregate value.
     pub fn value(&self) -> AggValue {
         self.value_of(self.kind)
@@ -1080,6 +1162,7 @@ impl AggAccumulator {
         }
         let double = || crate::NumericValue::Double(self.sum / self.contributions as f64);
         match (&self.total, self.mean_rule) {
+            (Total::Interval(_), _) => self.total.interval_mean(),
             // The full-statistics spread retains the double sum beside `SUM(real)`.
             (Total::Single(total, _), _) => {
                 let mut wide = *total;
@@ -1247,7 +1330,9 @@ impl AggAccumulator {
                     integer_digits: b, ..
                 },
             ) => a == b,
-            (Total::Single(..), Total::Single(..)) | (Total::Double(..), Total::Double(..)) => true,
+            (Total::Single(..), Total::Single(..))
+            | (Total::Double(..), Total::Double(..))
+            | (Total::Interval(_), Total::Interval(_)) => true,
             _ => false,
         };
         if !compatible {
@@ -1297,6 +1382,8 @@ pub enum TotalCk {
     },
     Single(FloatPartsCk),
     Double(FloatPartsCk),
+    /// Appended last, so earlier snapshots keep their tags.
+    Interval(crate::backend::IntervalSum),
 }
 
 /// An exact, portable snapshot of one aggregate subscription's running value.
@@ -1348,6 +1435,7 @@ fn fold_total_to_ck(t: &Total) -> TotalCk {
         },
         Total::Single(parts, _) => TotalCk::Single(fold_fp_to_ck(*parts)),
         Total::Double(parts, _) => TotalCk::Double(fold_fp_to_ck(*parts)),
+        Total::Interval(total) => TotalCk::Interval(*total),
     }
 }
 
@@ -1378,6 +1466,11 @@ fn fold_ck_to_total(ck: &TotalCk, rule: FoldRule) -> Result<Total, &'static str>
         },
         TotalCk::Single(fp) => Total::Single(parts(*fp)?, boundary),
         TotalCk::Double(fp) => Total::Double(parts(*fp)?, boundary),
+        TotalCk::Interval(total) => {
+            let total = Total::Interval(*total);
+            total.answers().map_err(|_| "interval total out of range")?;
+            total
+        }
     })
 }
 
@@ -1750,6 +1843,10 @@ impl<I: IdTypes, C: Checkpoint> AggregateTotal<I, C> {
                 PendingChange::Emptied => accumulator.clear(),
             }
         }
+        // A seed of rows the engine raised on has no answer, as the read does not.
+        accumulator
+            .answers()
+            .map_err(|_| AggregateInstallError::SumOutOfRange(subscription))?;
         self.seed.installed(kept_by.as_ref(), judge);
         self.accumulator = accumulator;
         Ok(self.accumulator.value())
@@ -1783,6 +1880,10 @@ impl<B: Backend> GroupValue<B> {
 
 /// One grouped change held until all seed rows arrive.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "`Emptied` is one marker among the folds, which a box would allocate for each"
+)]
 enum PendingGroupChange<B: Backend> {
     Fold {
         key: Vec<u8>,
@@ -2160,6 +2261,10 @@ impl<I: IdTypes, B: Backend, C: Checkpoint> GroupedAggregateTotal<I, B, C> {
 
         let mut opening = Vec::new();
         for (key, group) in &mut groups {
+            group
+                .accumulator
+                .answers()
+                .map_err(|_| AggregateInstallError::SumOutOfRange(subscription))?;
             group.announced = match &self.having {
                 Some(having) => having
                     .passes::<B>(group.rows, &group.accumulator)

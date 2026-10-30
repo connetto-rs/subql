@@ -207,6 +207,9 @@ pub enum NumericValue {
     Decimal(bigdecimal::BigDecimal),
     /// A double, which is what a floating column sums into everywhere.
     Double(f64),
+    /// A PostgreSQL interval, which is what `sum(interval)` and
+    /// `avg(interval)` answer there.
+    Interval(crate::backend::Interval),
 }
 
 impl core::fmt::Display for NumericValue {
@@ -215,6 +218,7 @@ impl core::fmt::Display for NumericValue {
             Self::Integer(value) => write!(f, "{value}"),
             Self::Decimal(value) => write!(f, "{value}"),
             Self::Double(value) => write!(f, "{value}"),
+            Self::Interval(value) => write!(f, "{value}"),
         }
     }
 }
