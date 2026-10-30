@@ -5185,8 +5185,7 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 [[package]]
 name = "sql-scalar-text"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe4d9c3734c9dfc32e255461a2ae1fb7493956adf798817f9adaa0af7f7c9d6c"
+source = "git+https://github.com/connetto-rs/sql-scalar-text?branch=main#db1be3824f3c7be5e97293d3d01982897196ef9d"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -5504,7 +5503,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
