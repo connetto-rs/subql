@@ -32,12 +32,9 @@ members = ["."]
 # is gone from both manifests.
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 sqlparser_derive = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
-# Route diesel through the LucaCappelletti94/future fork so the
-# `SqliteConnection` here is the same type diesel-sqlite-session sees.
-diesel = { git = "https://github.com/LucaCappelletti94/diesel", branch = "future" }
-
-[patch."https://github.com/diesel-rs/diesel"]
-diesel = { git = "https://github.com/LucaCappelletti94/diesel", branch = "future" }
+# diesel-rs main, named as diesel-sqlite-session names it, so the
+# `SqliteConnection` here is the same type it sees.
+diesel = { git = "https://github.com/diesel-rs/diesel" }
 
 [profile.release]
 debug = 1

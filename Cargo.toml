@@ -16,21 +16,16 @@ members = ["subql-demo"]
 exclude = ["fuzz"]
 
 [patch.crates-io]
-# Diesel `future` branch: bundles the merged sqlite update-hook, the
-# sqlite-expose-collected-binds accessor, and the mysql execute-returning-id
-# work. Drop once these land in a diesel release.
-diesel = { git = "https://github.com/LucaCappelletti94/diesel", branch = "future" }
+# diesel-rs main carries the sqlite update hook, the collected-binds accessor
+# and the MySQL `execute_returning_id` subql needs, none yet released. Named
+# with no branch, exactly as diesel-sqlite-session names it, so both graphs
+# resolve to one diesel. Drop once these land in a diesel release.
+diesel = { git = "https://github.com/diesel-rs/diesel" }
 # sqlparser tracked from the apache/datafusion-sqlparser-rs main branch,
 # the canonical upstream (version 0.62.0), which carries the merged
 # visitor no_std fix (#2343) and compound-chain exponential fix (#2344).
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 sqlparser_derive = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
-
-# diesel-sqlite-session depends on diesel via git (not crates.io), so
-# `[patch.crates-io]` above does not reach that graph. Route the git
-# dep to the same LucaCappelletti94 fork used by the crates-io patch.
-[patch."https://github.com/diesel-rs/diesel"]
-diesel = { git = "https://github.com/LucaCappelletti94/diesel", branch = "future" }
 
 [package]
 name = "subql"
@@ -188,9 +183,9 @@ r2d2 = { version = "0.8", optional = true }
 # apply methods (`src/patchset/mod.rs`). Off by default and
 # `default-features = false` so its backend selection stays under subql's
 # own feature gates. std-only (diesel-async needs an async runtime). Must
-# resolve to the same diesel node as subql's `future` fork patch, which it
+# resolve to the same diesel node as subql's diesel-rs main patch, which it
 # does because diesel-async's `diesel ~2.3` requirement is satisfied by
-# the fork.
+# main.
 diesel-async = { version = "0.9", optional = true, default-features = false }
 
 # SQLite patchsets and digest conversion for both CDC wire formats.
@@ -206,8 +201,8 @@ maxwell-cdc = { version = "0.1.0", default-features = false }
 # Diesel wrapper around SQLite's session extension. Backs the Phase 8
 # `SqliteCdcSource`: owns a live `SqliteConnection`, attaches tables
 # to a session, and calls `.changeset()` to surface accumulated change
-# bytes for `SqliteChangesetParser` to decode. Requires the diesel
-# `future` branch already pinned via the top-level `[patch]` blocks.
+# bytes for `SqliteChangesetParser` to decode. Its git diesel dependency is
+# the one the top-level `[patch.crates-io]` names, so both share one diesel.
 diesel-sqlite-session = { git = "https://github.com/connetto-rs/diesel-sqlite-session", optional = true }
 
 # Runtime-named tables and columns through diesel's own query builder, used by
