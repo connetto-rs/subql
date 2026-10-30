@@ -16,15 +16,22 @@
 
 use crate::common;
 
+use parking_lot::Mutex;
+use std::net::{Shutdown as SocketShutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use diesel::{sql_query, Connection, ExpressionMethods, PgConnection, RunQueryDsl};
+use pg_walstream::{error::ReplicationError, ColumnValue, EventType};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::CdcEvent;
 use subql::{
     CdcSource, EventKind, PgChangeEvent, PgCommit, PgCommitPosition, PgLsn, PgStreamingCdcSource,
-    PgStreamingConfig, SourceItem, TimelineSwitch,
+    PgStreamingConfig, PgStreamingError, SourceItem, TimelineSwitch,
 };
 
 diesel::table! {
@@ -48,6 +55,7 @@ fn insert(conn: &mut PgConnection, ids: &[i32]) {
 
 const DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, price FLOAT);";
 const PG_DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, price DOUBLE PRECISION)";
+const SCRATCH_DDL: &str = "CREATE TABLE scratch (id INT PRIMARY KEY, note TEXT);";
 
 /// How long a test waits for something that must arrive.
 ///
@@ -84,8 +92,7 @@ fn connect_against_real_pg() {
 
     let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
     let config = PgStreamingConfig::new(db.url(), &slot, publication)
-        .status_interval(Duration::from_secs(10))
-        .buffer_capacity(1024);
+        .status_interval(Duration::from_secs(10));
 
     current_thread_rt().block_on(async move {
         let _source = PgStreamingCdcSource::connect(config, catalog)
@@ -94,6 +101,24 @@ fn connect_against_real_pg() {
     });
 
     common::drop_slot(&mut setup, &slot);
+}
+
+#[test]
+fn invalid_connection_parameters_are_reported_as_postgres_errors() {
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+    let config = PgStreamingConfig::new(
+        "subql_invalid_option=1",
+        "unused_slot",
+        "unused_publication",
+    );
+    let error = current_thread_rt().block_on(async move {
+        tokio::time::timeout(ARRIVAL, PgStreamingCdcSource::connect(config, catalog))
+            .await
+            .expect("invalid parameters are refused promptly")
+            .err()
+            .expect("an invalid connection option must fail")
+    });
+    assert!(matches!(error, PgStreamingError::Postgres(_)), "{error:?}");
 }
 
 /// Query the slot's `confirmed_flush_lsn` via a side connection and
@@ -197,6 +222,7 @@ fn next_item_delivers_an_insert_without_waiting_for_a_tick() {
 fn acknowledging_a_commit_moves_the_slot_to_the_end_it_named() {
     common::assert_docker_available();
     let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
     let mut setup = db.connect();
     let mut dml = db.connect();
     let mut probe = db.connect();
@@ -205,7 +231,8 @@ fn acknowledging_a_commit_moves_the_slot_to_the_end_it_named() {
     let publication = "subql_pg_streaming_ack_pub";
     common::create_publication(&mut setup, publication, "orders");
     common::create_pgoutput_slot(&mut setup, &slot);
-    let config = PgStreamingConfig::new(db.url(), &slot, publication);
+    let config = PgStreamingConfig::new(db.url(), &slot, publication)
+        .status_interval(Duration::from_millis(100));
     let slot_inner = slot.clone();
 
     current_thread_rt().block_on(async move {
@@ -222,7 +249,7 @@ fn acknowledging_a_commit_moves_the_slot_to_the_end_it_named() {
 
         source.ack(commit.position()).await.expect("ack the commit");
         let flushed = flushed_after_ack(
-            &source,
+            &mut source,
             |lsn| lsn >= commit.end_lsn(),
             &mut probe,
             &slot_inner,
@@ -230,6 +257,58 @@ fn acknowledging_a_commit_moves_the_slot_to_the_end_it_named() {
         .await;
         assert_eq!(flushed, commit.end_lsn());
         assert_eq!(source.acknowledged_position(), Some(commit.end_lsn()));
+    });
+
+    common::drop_slot(&mut setup, &slot);
+}
+
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn an_early_commit_acknowledgement_waits_for_commit_delivery() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
+    let mut setup = db.connect();
+    let mut dml = db.connect();
+    let mut probe = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    let slot = db.slot("subql_pg_streaming_early_ack");
+    let publication = "subql_pg_streaming_early_ack_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+    let config = PgStreamingConfig::new(db.url(), &slot, publication)
+        .status_interval(Duration::from_millis(100));
+    let slot_inner = slot.clone();
+
+    current_thread_rt().block_on(async move {
+        let base = confirmed_flush_lsn(&mut probe, &slot_inner).expect("the slot exists");
+        let mut source = connect_when_free(&config).await;
+        insert(&mut dml, &[1, 2]);
+        let first = next_row(&mut source).await;
+        let position =
+            PgCommitPosition::at_commit(first.position().commit_lsn(), first.position().xid());
+        tokio::time::timeout(ARRIVAL, source.ack(position))
+            .await
+            .expect("the acknowledgement responds")
+            .expect("queue the early acknowledgement");
+        assert_eq!(source.acknowledged_position(), Some(base));
+        assert_eq!(confirmed_flush_lsn(&mut probe, &slot_inner), Some(base));
+
+        let second = next_row(&mut source).await;
+        assert!(first.position() < second.position());
+        assert_eq!(second.position().commit_lsn(), position.commit_lsn());
+        assert_eq!(source.acknowledged_position(), Some(base));
+        let commit = next_commit(&mut source).await;
+        assert_eq!(commit.position(), position);
+        assert_eq!(source.acknowledged_position(), Some(commit.end_lsn()));
+        let flushed = flushed_after_ack(
+            &mut source,
+            |lsn| lsn >= commit.end_lsn(),
+            &mut probe,
+            &slot_inner,
+        )
+        .await;
+        assert_eq!(flushed, commit.end_lsn());
     });
 
     common::drop_slot(&mut setup, &slot);
@@ -243,6 +322,7 @@ fn acknowledging_every_row_without_the_commit_never_moves_the_slot() {
     const STATUS_INTERVAL: Duration = Duration::from_millis(100);
     common::assert_docker_available();
     let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
     let mut setup = db.connect();
     let mut dml = db.connect();
     let mut probe = db.connect();
@@ -264,13 +344,9 @@ fn acknowledging_every_row_without_the_commit_never_moves_the_slot() {
         next_commit(&mut source).await;
 
         source.ack(last.position()).await.expect("ack the last row");
-        flushed_after_ack(&source, |_| true, &mut probe, &slot_inner).await;
-        let before = source.status_updates_sent();
-        let deadline = Instant::now() + ARRIVAL;
-        while source.status_updates_sent() < before + 5 {
-            assert!(Instant::now() < deadline, "the status pump stalled");
-            tokio::time::sleep(STATUS_INTERVAL).await;
-        }
+        // Let several status intervals elapse, driving the reader so the
+        // periodic feedback the slot would act on actually leaves the source.
+        drive_idle(&mut source, Duration::from_millis(500)).await;
         assert_eq!(
             confirmed_flush_lsn(&mut probe, &slot_inner),
             Some(started),
@@ -400,6 +476,7 @@ fn positions_strictly_increase_through_a_multi_row_transaction() {
 fn acknowledging_the_first_of_interleaved_commits_releases_exactly_its_end() {
     common::assert_docker_available();
     let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
     let mut setup = db.connect();
     let mut older = db.connect();
     let mut newer = db.connect();
@@ -409,7 +486,8 @@ fn acknowledging_the_first_of_interleaved_commits_releases_exactly_its_end() {
     let publication = "subql_pg_streaming_interleaved_ack_pub";
     common::create_publication(&mut setup, publication, "orders");
     common::create_pgoutput_slot(&mut setup, &slot);
-    let config = PgStreamingConfig::new(db.url(), &slot, publication);
+    let config = PgStreamingConfig::new(db.url(), &slot, publication)
+        .status_interval(Duration::from_millis(100));
     let slot_inner = slot.clone();
 
     current_thread_rt().block_on(async move {
@@ -426,7 +504,7 @@ fn acknowledging_the_first_of_interleaved_commits_releases_exactly_its_end() {
             .await
             .expect("ack the first commit");
         let flushed = flushed_after_ack(
-            &source,
+            &mut source,
             |lsn| lsn >= first.end_lsn(),
             &mut probe,
             &slot_inner,
@@ -444,33 +522,62 @@ async fn connect_when_free(config: &PgStreamingConfig) -> PgStreamingCdcSource {
     let deadline = Instant::now() + ARRIVAL;
     loop {
         let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
-        match PgStreamingCdcSource::connect(config.clone(), catalog).await {
+        let error = match PgStreamingCdcSource::connect(config.clone(), catalog).await {
             Ok(source) => return source,
-            Err(err) if err.to_string().contains("is active") && Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(err) => panic!("connect: {err}"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("is active") && Instant::now() < deadline,
+            "connect failed {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Poll the reader without expecting an item, so the keepalive feedback the
+/// server needs actually leaves the source while the database sits idle.
+async fn drive_idle(source: &mut PgStreamingCdcSource, for_: Duration) {
+    let deadline = Instant::now() + for_;
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(100), source.next_item()).await {
+            Ok(Ok(Some(item))) => panic!("an item arrived in an idle database {item:?}"),
+            Ok(Ok(None)) => panic!("the source closed while the database was idle"),
+            Ok(Err(err)) => panic!("next_item failed while the database was idle {err}"),
+            Err(_) => {}
         }
     }
 }
 
-/// Wait until the source has reported an acknowledgement at least `past`
-/// far, then return the slot's `confirmed_flush_lsn` as the server holds it.
+/// Whether the server still reports a live backend holding the slot.
+///
+/// Replication-slot administration, which the query DSL does not express.
+fn slot_is_active(conn: &mut diesel::PgConnection, slot: &str) -> bool {
+    #[derive(diesel::QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        active: bool,
+    }
+    let row: Row = diesel::sql_query(format!(
+        "SELECT active_pid IS NOT NULL AS active \
+         FROM pg_replication_slots WHERE slot_name = '{slot}'"
+    ))
+    .get_result(conn)
+    .expect("query pg_replication_slots");
+    row.active
+}
+
+/// Wait until the slot's confirmed flush passes `past`, driving the reader
+/// between queries so the feedback reaches the server, and return the
+/// position the server holds.
 async fn flushed_after_ack(
-    source: &PgStreamingCdcSource,
+    source: &mut PgStreamingCdcSource,
     past: impl Fn(PgLsn) -> bool,
     probe: &mut diesel::PgConnection,
     slot: &str,
 ) -> PgLsn {
     let deadline = Instant::now() + ARRIVAL;
-    while !source.acknowledged_position().is_some_and(&past) {
-        assert!(
-            Instant::now() < deadline,
-            "the acknowledgement never reached the server"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
     loop {
+        drive_idle(source, Duration::from_millis(100)).await;
         let flushed = confirmed_flush_lsn(probe, slot).expect("the slot exists");
         if past(flushed) {
             return flushed;
@@ -479,7 +586,6 @@ async fn flushed_after_ack(
             Instant::now() < deadline,
             "the slot never took the acknowledgement"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -491,6 +597,7 @@ async fn flushed_after_ack(
 fn acknowledging_part_of_a_transaction_never_releases_it() {
     common::assert_docker_available();
     let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
     let mut setup = db.connect();
     let mut dml = db.connect();
     let mut probe = db.connect();
@@ -499,7 +606,8 @@ fn acknowledging_part_of_a_transaction_never_releases_it() {
     let publication = "subql_pg_streaming_partial_ack_pub";
     common::create_publication(&mut setup, publication, "orders");
     common::create_pgoutput_slot(&mut setup, &slot);
-    let config = PgStreamingConfig::new(db.url(), &slot, publication);
+    let config = PgStreamingConfig::new(db.url(), &slot, publication)
+        .status_interval(Duration::from_millis(100));
     let slot_inner = slot.clone();
 
     current_thread_rt().block_on(async move {
@@ -510,7 +618,7 @@ fn acknowledging_part_of_a_transaction_never_releases_it() {
         let commit = next_commit(&mut source).await;
 
         source.ack(first).await.expect("ack the first row");
-        let flushed = flushed_after_ack(&source, |_| true, &mut probe, &slot_inner).await;
+        let flushed = flushed_after_ack(&mut source, |_| true, &mut probe, &slot_inner).await;
         assert!(
             flushed < first.commit_lsn(),
             "the slot passed a transaction the consumer holds half of: {flushed:?} against {first:?}"
@@ -529,7 +637,7 @@ fn acknowledging_part_of_a_transaction_never_releases_it() {
         assert_eq!(next_commit(&mut source).await, commit, "with the same end");
 
         source.ack(commit.position()).await.expect("ack the commit");
-        flushed_after_ack(&source, |lsn| lsn >= commit.end_lsn(), &mut probe, &slot_inner).await;
+        flushed_after_ack(&mut source, |lsn| lsn >= commit.end_lsn(), &mut probe, &slot_inner).await;
         drop(source);
         let mut source = connect_when_free(&config).await;
         insert(&mut dml, &[3]);
@@ -612,24 +720,90 @@ fn resuming_from_a_position_delivers_exactly_the_items_after_it() {
     common::drop_slot(&mut setup, &slot);
 }
 
-/// The periodic status-update pump bumps the observability counter while the
-/// source is idle: no DML, no acks, no server-side timeout games. The claim is
-/// that the inner task fires its interval arm independently of the consumer
-/// and the server, so the test polls until the counter climbs rather than
-/// counting ticks inside a fixed window, which counts the runner's scheduling
-/// as much as the pump's.
+/// Resuming from an unacknowledged row must not release any WAL before the
+/// consumer acknowledges the transaction's commit.
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
-fn pump_increments_status_update_counter_during_idle() {
+fn resuming_from_an_unacknowledged_row_releases_nothing_until_the_commit_is_acked() {
     common::assert_docker_available();
     let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
     let mut setup = db.connect();
+    let mut dml = db.connect();
+    let mut probe = db.connect();
     sql_query(PG_DDL).execute(&mut setup).expect("create table");
-    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
+    let slot = db.slot("subql_pg_streaming_resume_retention");
+    let publication = "subql_pg_streaming_resume_retention_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+    let config = |start: Option<PgCommitPosition>| {
+        PgStreamingConfig::new(db.url(), &slot, publication)
+            .start(start)
+            .status_interval(Duration::from_millis(100))
+    };
+    let slot_inner = slot.clone();
+
+    current_thread_rt().block_on(async move {
+        let mut source = connect_when_free(&config(None)).await;
+        insert(&mut dml, &[1, 2]);
+        let first = next_row(&mut source).await.position();
+        let second = next_row(&mut source).await.position();
+        let commit = next_commit(&mut source).await;
+        let base = confirmed_flush_lsn(&mut probe, &slot_inner).expect("the slot exists");
+        drop(source);
+
+        let mut source = connect_when_free(&config(Some(first))).await;
+        assert_eq!(
+            next_row(&mut source).await.position(),
+            second,
+            "the resume starts at the rest of the unacknowledged transaction"
+        );
+        assert_eq!(
+            next_commit(&mut source).await,
+            commit,
+            "still unacknowledged"
+        );
+
+        // Let several feedback intervals elapse. An automatic release of the
+        // resume position would have reached the server by now.
+        drive_idle(&mut source, Duration::from_secs(1)).await;
+        assert_eq!(
+            confirmed_flush_lsn(&mut probe, &slot_inner),
+            Some(base),
+            "resuming from an unacknowledged row must not release WAL on its own"
+        );
+
+        source.ack(commit.position()).await.expect("ack the commit");
+        let flushed = flushed_after_ack(
+            &mut source,
+            |lsn| lsn >= commit.end_lsn(),
+            &mut probe,
+            &slot_inner,
+        )
+        .await;
+        assert_eq!(flushed, commit.end_lsn());
+    });
+
+    common::drop_slot(&mut setup, &slot);
+}
+
+/// A read cancelled by its deadline keeps the WAL progress it saw, and the
+/// reader still delivers normally afterwards.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_cancelled_read_retains_wal_progress_above_the_slot_seed() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.set("wal_sender_timeout", "3s");
+    let mut setup = db.connect();
+    let mut dml = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    // Created before the slot and carried by no publication.
+    sql_query(SCRATCH_DDL)
         .execute(&mut setup)
-        .expect("REPLICA IDENTITY FULL");
-    let slot = db.slot("subql_pg_streaming_pump_counter");
-    let publication = "subql_pg_streaming_pump_counter_pub";
+        .expect("create scratch table");
+    let slot = db.slot("subql_pg_streaming_retention_seed");
+    let publication = "subql_pg_streaming_retention_seed_pub";
     common::create_publication(&mut setup, publication, "orders");
     common::create_pgoutput_slot(&mut setup, &slot);
 
@@ -638,43 +812,50 @@ fn pump_increments_status_update_counter_during_idle() {
         .status_interval(Duration::from_millis(100));
 
     current_thread_rt().block_on(async move {
-        let source = PgStreamingCdcSource::connect(config, catalog)
+        let mut source = PgStreamingCdcSource::connect(config, catalog)
             .await
             .expect("connect");
-
         assert_eq!(
-            source.status_updates_sent(),
+            source.unacknowledged_bytes(),
             0,
-            "counter should start at 0 after connect"
+            "the retention gauges start at the slot's own seed"
         );
 
-        // A pump that never fires never reaches 3, however long this waits.
+        sql_query("INSERT INTO scratch VALUES (1, 'unpublished')")
+            .execute(&mut dml)
+            .expect("insert unpublished data");
+
+        // Drive reads that have no item to deliver. Each bounded timeout
+        // abandons the pending read, so the progress it saw must survive.
         let deadline = Instant::now() + ARRIVAL;
-        let mut observed = 0;
-        while Instant::now() < deadline {
-            observed = source.status_updates_sent();
-            if observed >= 3 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        while source.unacknowledged_bytes() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the unpublished WAL never reached the reader"
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(250), source.next_item()).await;
         }
         assert!(
-            observed >= 3,
-            "the periodic pump must emit while idle, counter reached {observed}"
+            source.unacknowledged_bytes() > 0,
+            "a cancelled read must keep the WAL progress it saw"
         );
-        println!("status_updates_sent while idle: {observed}");
+
+        sql_query("INSERT INTO orders VALUES (1, 5.0)")
+            .execute(&mut dml)
+            .expect("insert a published row");
+        let row = next_row(&mut source).await;
+        let commit = next_commit(&mut source).await;
+        assert!(
+            commit.end_lsn() > row.position().commit_lsn(),
+            "delivery survives the abandoned read"
+        );
     });
 
     common::drop_slot(&mut setup, &slot);
 }
 
-/// Idle through an impatient server's `wal_sender_timeout`
-/// and confirm the connection survives. PG runs with
-/// `wal_sender_timeout=3s`. The source's periodic pump
-/// (`status_interval=500ms`) sends a `StandbyStatusUpdate` ~10 times
-/// during the idle period, enough to keep the connection alive. After
-/// 5s idle, a freshly-issued INSERT must still be deliverable through
-/// `next_item`.
+/// Idle through an impatient server's `wal_sender_timeout` while the reader
+/// is polled, and confirm a freshly issued row still delivers.
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
 fn connection_survives_wal_sender_timeout() {
@@ -684,9 +865,6 @@ fn connection_survives_wal_sender_timeout() {
     let mut setup = db.connect();
     let mut dml = db.connect();
     sql_query(PG_DDL).execute(&mut setup).expect("create table");
-    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
-        .execute(&mut setup)
-        .expect("REPLICA IDENTITY FULL");
     let slot = db.slot("subql_pg_streaming_survive");
     let publication = "subql_pg_streaming_survive_pub";
     common::create_publication(&mut setup, publication, "orders");
@@ -701,54 +879,44 @@ fn connection_survives_wal_sender_timeout() {
             .await
             .expect("connect");
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        // status_updates_sent counts pumps, acks, and keepalive replies alike; delivery is the claim.
-        let pumped = source.status_updates_sent();
-
-        sql_query("INSERT INTO orders VALUES (1, 5.0)")
-            .execute(&mut dml)
-            .expect("insert after idle");
-
-        let ev = tokio::time::timeout(ARRIVAL, source.next_item())
-            .await
+        // The pull reader only stays alive while it is polled, so poll it
+        // across the whole idle window and issue the insert from a
+        // parallel branch.
+        let (item, ()) = tokio::join!(tokio::time::timeout(ARRIVAL, source.next_item()), async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            sql_query("INSERT INTO orders VALUES (1, 5.0)")
+                .execute(&mut dml)
+                .expect("insert after idle");
+        },);
+        let ev = item
             .expect("next_item timeout: connection likely torn down")
             .expect("next_item err: connection likely torn down")
             .and_then(SourceItem::into_event)
-            .expect("source closed or yielded a commit first: connection likely torn down");
+            .expect("the row arrives before its commit");
         assert_eq!(ev.kind(), EventKind::Insert);
-        println!(
-            "survived 5s idle with wal_sender_timeout=3s, \
-             {pumped} pumps emitted, insert still flowed through"
-        );
     });
 
     common::drop_slot(&mut setup, &slot);
 }
 
-/// Bounded back-pressure. With `buffer_capacity = 4` and 100
-/// inserts in flight, the inner task's event-push must block on
-/// `event_tx.send().await` while the channel is full, then resume as
-/// the consumer drains. No events dropped, order preserved end-to-end.
+/// A slow consumer that pauses between reads still receives every row and
+/// every commit, each exactly once, in commit order.
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
-fn back_pressure_under_slow_consumer_preserves_order_and_count() {
+fn a_slow_consumer_still_receives_every_item_in_commit_order() {
     common::assert_docker_available();
     let db = common::pg_database();
     let mut setup = db.connect();
     let mut dml = db.connect();
     sql_query(PG_DDL).execute(&mut setup).expect("create table");
-    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
-        .execute(&mut setup)
-        .expect("REPLICA IDENTITY FULL");
-    let slot = db.slot("subql_pg_streaming_backpressure");
-    let publication = "subql_pg_streaming_backpressure_pub";
+    let slot = db.slot("subql_pg_streaming_slow_consumer");
+    let publication = "subql_pg_streaming_slow_consumer_pub";
     common::create_publication(&mut setup, publication, "orders");
     common::create_pgoutput_slot(&mut setup, &slot);
 
     let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
-    // Tiny buffer forces back-pressure: 100 inserts >> 4-slot channel.
-    let config = PgStreamingConfig::new(db.url(), &slot, publication).buffer_capacity(4);
+    let config = PgStreamingConfig::new(db.url(), &slot, publication)
+        .status_interval(Duration::from_millis(500));
 
     const N: i32 = 100;
 
@@ -757,119 +925,100 @@ fn back_pressure_under_slow_consumer_preserves_order_and_count() {
             .await
             .expect("connect");
 
-        // Insert before draining so the source hits back-pressure before the consumer polls.
+        // One transaction per row, all committed before the first read.
         for id in 1..=N {
             sql_query(format!("INSERT INTO orders VALUES ({id}, {id}.0)"))
                 .execute(&mut dml)
                 .unwrap_or_else(|e| panic!("insert id={id}: {e}"));
         }
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
         let schema = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
-        let n = usize::try_from(N).expect("N fits usize");
-        let mut observed_ids = Vec::with_capacity(n);
-        while observed_ids.len() < n {
-            let SourceItem::Event(ev) = next_item(&mut source).await else {
-                continue;
-            };
-            assert_eq!(ev.kind(), EventKind::Insert);
-            let id = match ev
+        for id in 1..=N {
+            // A deliberate pause between reads, so the consumer lags the wire.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let row = next_row(&mut source).await;
+            let row_id = match row
                 .value_at(&schema, subql::backend::RowKind::New, 0)
                 .unwrap()
             {
                 subql::backend::Value::Int(v) => v,
                 other => panic!("expected int id, got {other:?}"),
             };
-            observed_ids.push(id);
+            assert_eq!(
+                row_id,
+                i64::from(id),
+                "the slow consumer must miss nothing and reorder nothing"
+            );
+            next_commit(&mut source).await;
         }
-
-        assert_eq!(
-            observed_ids.len(),
-            n,
-            "must receive all {N} events; got {}",
-            observed_ids.len()
-        );
-        let expected: Vec<i64> = (1..=i64::from(N)).collect();
-        assert_eq!(
-            observed_ids, expected,
-            "events must arrive in commit order under back-pressure"
-        );
-        println!("back-pressure: drained {N} events through a 4-slot buffer in commit order");
     });
 
     common::drop_slot(&mut setup, &slot);
 }
 
-/// Dropping the source cleanly shuts down the inner task.
-/// No panic, no leaked task. The `task_exited` flag flips to true
-/// within a small window after `drop(source)` because the cooperative
-/// shutdown signal makes the task break out of its loop on the next
-/// `select!` poll.
+/// Dropping the source closes its replication connection, frees the slot's
+/// backend, and leaves the slot reusable.
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
-fn drop_source_shuts_down_inner_task() {
+fn drop_source_closes_the_connection_and_frees_the_slot() {
     common::assert_docker_available();
     let db = common::pg_database();
     let mut setup = db.connect();
+    let mut dml = db.connect();
+    let mut probe = db.connect();
     sql_query(PG_DDL).execute(&mut setup).expect("create table");
-    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
-        .execute(&mut setup)
-        .expect("REPLICA IDENTITY FULL");
     let slot = db.slot("subql_pg_streaming_shutdown");
     let publication = "subql_pg_streaming_shutdown_pub";
     common::create_publication(&mut setup, publication, "orders");
     common::create_pgoutput_slot(&mut setup, &slot);
-
     let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
     let config = PgStreamingConfig::new(db.url(), &slot, publication)
         .status_interval(Duration::from_millis(100));
+    let slot_inner = slot.clone();
+    assert!(
+        !slot_is_active(&mut probe, &slot_inner),
+        "the slot starts free"
+    );
 
-    current_thread_rt().block_on(async move {
+    let mut probe = current_thread_rt().block_on(async move {
         let source = PgStreamingCdcSource::connect(config, catalog)
             .await
             .expect("connect");
-
-        // Clone before drop so we can observe shutdown after the source is gone.
-        let task_exited = source.task_exited_handle();
-
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        assert!(
-            !task_exited.load(std::sync::atomic::Ordering::Relaxed),
-            "inner task must still be running before drop"
-        );
-        assert!(
-            !source.task_exited(),
-            "and the source says so itself, which is what an operator asks"
-        );
-
-        // Shutdown is cooperative; the biased select! polls the cancel arm before the WAL read.
-        drop(source);
-
-        // Loop is a liveness check; a leaked task never flips the flag.
         let deadline = Instant::now() + ARRIVAL;
-        let mut observed_exit = false;
-        while Instant::now() < deadline {
-            if task_exited.load(std::sync::atomic::Ordering::Relaxed) {
-                observed_exit = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        while !slot_is_active(&mut probe, &slot_inner) {
+            assert!(
+                Instant::now() < deadline,
+                "the slot never became active while the source held it"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        drop(source);
+        probe
+    });
+
+    let deadline = Instant::now() + ARRIVAL;
+    while slot_is_active(&mut probe, &slot) {
         assert!(
-            observed_exit,
-            "inner task never exited after dropping the source"
+            Instant::now() < deadline,
+            "the dropped source still holds the slot"
         );
-        println!("inner task exited cleanly after source drop");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let config = PgStreamingConfig::new(db.url(), &slot, publication);
+    current_thread_rt().block_on(async move {
+        let mut source = connect_when_free(&config).await;
+        insert(&mut dml, &[1]);
+        let row = next_row(&mut source).await;
+        assert_eq!(row.kind(), EventKind::Insert);
+        next_commit(&mut source).await;
     });
 
     common::drop_slot(&mut setup, &slot);
 }
 
-/// `events_received` counter is incremented as the inner task
-/// pushes row events to the consumer channel, and commits do not count.
-/// Symmetric counter exists on `PollingPgCdcSource` so generic benchmark
-/// code can read throughput on either transport.
+/// `events_received` counts the row events the source delivers, and commits
+/// do not count.
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
 fn events_received_counter_tracks_pushed_events() {
@@ -897,7 +1046,7 @@ fn events_received_counter_tracks_pushed_events() {
         assert_eq!(
             source.events_received(),
             0,
-            "counter starts at 0 before any events have been pushed"
+            "counter starts at 0 before any event has been delivered"
         );
 
         const N: i32 = 5;
@@ -915,7 +1064,7 @@ fn events_received_counter_tracks_pushed_events() {
         assert_eq!(
             observed,
             u64::try_from(N).unwrap(),
-            "counter must equal the number of events pushed"
+            "counter must equal the number of delivered row events"
         );
         println!("events_received after {N} inserts: {observed}");
     });
@@ -923,22 +1072,16 @@ fn events_received_counter_tracks_pushed_events() {
     common::drop_slot(&mut setup, &slot);
 }
 
-/// The source says its task died, without being dropped to find out.
-///
-/// An operator asks a live source whether its inner task is still there,
-/// and the answer matters most when the server ended the connection
-/// rather than the caller ending the source. Terminating the slot's
-/// backend is that case.
+/// Terminating the slot's backend makes the source terminal, with no
+/// automatic reconnect.
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
-fn a_source_reports_a_task_the_server_killed() {
+fn a_killed_backend_makes_the_source_terminal() {
     common::assert_docker_available();
     let db = common::pg_database();
     let mut setup = db.connect();
+    let mut probe = db.connect();
     sql_query(PG_DDL).execute(&mut setup).expect("create table");
-    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
-        .execute(&mut setup)
-        .expect("REPLICA IDENTITY FULL");
     let slot = db.slot("subql_pg_streaming_killed");
     let publication = "subql_pg_streaming_killed_pub";
     common::create_publication(&mut setup, publication, "orders");
@@ -947,38 +1090,180 @@ fn a_source_reports_a_task_the_server_killed() {
     let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
     let config = PgStreamingConfig::new(db.url(), &slot, publication)
         .status_interval(Duration::from_millis(100));
+    let slot_inner = slot.clone();
 
-    let (mut setup, slot) = current_thread_rt().block_on(async move {
+    let mut setup = current_thread_rt().block_on(async move {
         let mut source = PgStreamingCdcSource::connect(config, catalog)
             .await
             .expect("connect");
-        assert!(!source.task_exited(), "the task is there to begin with");
+        insert(&mut setup, &[1]);
+        next_row(&mut source).await;
+        let commit = next_commit(&mut source).await;
 
         // Only this slot's backend, named by the slot rather than by a
         // sweep, so no other test's connection is touched.
         sql_query(format!(
             "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots \
-             WHERE slot_name = '{slot}' AND active_pid IS NOT NULL"
+             WHERE slot_name = '{slot_inner}' AND active_pid IS NOT NULL"
         ))
         .execute(&mut setup)
         .expect("terminate the slot's backend");
 
-        // Drive the source so the loop notices the connection is gone.
-        let deadline = Instant::now() + ARRIVAL;
-        while Instant::now() < deadline {
-            if source.task_exited() {
-                break;
-            }
-            let _ = tokio::time::timeout(Duration::from_millis(100), source.next_item()).await;
+        tokio::time::timeout(ARRIVAL, source.next_item())
+            .await
+            .expect("the reader reports the death promptly")
+            .expect_err("next_item must report the dead connection");
+        let error = tokio::time::timeout(ARRIVAL, source.next_item())
+            .await
+            .expect("the terminal source keeps responding")
+            .expect_err("no automatic reconnect");
+        assert!(matches!(error, PgStreamingError::SourceClosed), "{error:?}");
+        let error = tokio::time::timeout(ARRIVAL, source.ack(commit.position()))
+            .await
+            .expect("the terminal source refuses acknowledgements promptly")
+            .expect_err("a dead source must not accept an acknowledgement");
+        assert!(matches!(error, PgStreamingError::SourceClosed), "{error:?}");
+        assert!(
+            !slot_is_active(&mut probe, &slot_inner),
+            "the server never saw a replacement connection"
+        );
+        setup
+    });
+
+    common::drop_slot(&mut setup, &slot);
+}
+
+/// An acknowledgement whose feedback the dead connection refuses makes the
+/// source terminal.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn an_acknowledgement_the_connection_cannot_send_makes_the_source_terminal() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    let mut probe = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    let slot = db.slot("subql_pg_streaming_dead_ack");
+    let publication = "subql_pg_streaming_dead_ack_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+
+    // Closing the router's sockets resets the client side, which the
+    // server's own proxy would only half-close.
+    let router = EndpointRouter::start(
+        loopback_port(&db.url()),
+        loopback_port(&db.url()),
+        Duration::ZERO,
+        Instant::now() + Duration::from_secs(120),
+        None,
+    );
+    let config = PgStreamingConfig::new(router.url(db.name()), &slot, publication)
+        .status_interval(Duration::from_secs(3600));
+    let slot_inner = slot.clone();
+
+    let mut setup = current_thread_rt().block_on(async move {
+        let mut source = connect_when_free(&config).await;
+        let mut commits = Vec::new();
+        for id in 1..=3 {
+            insert(&mut setup, &[id]);
+            next_row(&mut source).await;
+            commits.push(next_commit(&mut source).await);
         }
 
+        router.finish();
+
+        // The first write to the closed socket can still be buffered, and
+        // the reset it provokes refuses the next one.
+        let mut refused = None;
+        for commit in &commits {
+            match tokio::time::timeout(ARRIVAL, source.ack(commit.position()))
+                .await
+                .expect("the acknowledgement responds")
+            {
+                Ok(()) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error) => {
+                    refused = Some(error);
+                    break;
+                }
+            }
+        }
+        let error = refused.expect("feedback to a closed connection fails");
         assert!(
-            source.task_exited(),
-            "a live source reports the task the server took from it"
+            !matches!(error, PgStreamingError::SourceClosed),
+            "{error:?}"
         );
-        (setup, slot)
+        let last = commits.last().expect("three commits").position();
+        let error = tokio::time::timeout(ARRIVAL, source.ack(last))
+            .await
+            .expect("the terminal source refuses acknowledgements promptly")
+            .expect_err("a source whose feedback failed accepts no acknowledgement");
+        assert!(matches!(error, PgStreamingError::SourceClosed), "{error:?}");
+        let error = tokio::time::timeout(ARRIVAL, source.next_item())
+            .await
+            .expect("the terminal source keeps responding")
+            .expect_err("no automatic reconnect");
+        assert!(matches!(error, PgStreamingError::SourceClosed), "{error:?}");
+        let deadline = Instant::now() + ARRIVAL;
+        while slot_is_active(&mut probe, &slot_inner) {
+            assert!(Instant::now() < deadline, "the walsender never exited");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        setup
     });
+
     common::drop_slot(&mut setup, &slot);
+}
+
+/// Reconnecting at a saved resume position after the slot was dropped must
+/// fail with a typed slot error rather than create a replacement slot.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn reopening_a_source_whose_slot_was_dropped_fails_typed() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    let mut dml = db.connect();
+    let mut probe = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    let slot = db.slot("subql_pg_streaming_slot_dropped");
+    let publication = "subql_pg_streaming_slot_dropped_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+    let config = PgStreamingConfig::new(db.url(), &slot, publication);
+    let slot_inner = slot.clone();
+
+    let resume = current_thread_rt().block_on(async {
+        // A first, valid connect, so the consumer holds a resume position.
+        let mut source = connect_when_free(&config).await;
+        insert(&mut dml, &[1]);
+        let position = next_row(&mut source).await.position();
+        next_commit(&mut source).await;
+        position
+    });
+
+    // The operator drops the slot and the database moves on.
+    common::drop_slot(&mut setup, &slot_inner);
+    insert(&mut setup, &[2]);
+
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+    let err = current_thread_rt().block_on(async move {
+        match PgStreamingCdcSource::connect(config.start(Some(resume)), catalog).await {
+            Ok(_) => panic!("a dropped slot must refuse the reconnect"),
+            Err(error) => error,
+        }
+    });
+    assert!(
+        matches!(
+            err,
+            PgStreamingError::Postgres(ReplicationError::ReplicationSlot(_))
+        ),
+        "the missing slot must surface as a typed slot error, got {err:?}",
+    );
+
+    assert!(
+        confirmed_flush_lsn(&mut probe, &slot).is_none(),
+        "the reader must not have created a replacement slot"
+    );
 }
 
 #[derive(diesel::QueryableByName)]
@@ -1206,6 +1491,17 @@ impl PitrCluster {
             "find /var/lib/postgresql/data/pg_wal -name 00000002.history -exec cat {} +",
         ])
     }
+
+    /// Delete the clone's `00000002.history` from its disk.
+    fn remove_history(&self) {
+        docker_ok(&[
+            "exec",
+            &self.container,
+            "sh",
+            "-c",
+            "find /var/lib/postgresql/data/pg_wal -name 00000002.history -delete",
+        ]);
+    }
 }
 
 impl Drop for PitrCluster {
@@ -1248,7 +1544,8 @@ fn cluster_identity_of_the_running_cluster() {
     common::drop_slot(&mut setup, &slot);
 }
 
-/// A promoted point-in-time clone reports timeline 2 and its own history file's switch point.
+/// A promoted point-in-time clone reports timeline 2 and its own history file's switch point,
+/// and refuses to start once that history is gone.
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
 fn cluster_identity_of_a_promoted_point_in_time_clone() {
@@ -1269,16 +1566,452 @@ fn cluster_identity_of_a_promoted_point_in_time_clone() {
     let expected = raw_history_switches(&clone.raw_history());
     assert!(!expected.is_empty(), "history file names the branch");
 
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+    let connect = |config: PgStreamingConfig| {
+        let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+        current_thread_rt().block_on(PgStreamingCdcSource::connect(config, catalog))
+    };
     let config = PgStreamingConfig::new(clone.url(db.name()), &slot, publication);
-    current_thread_rt().block_on(async move {
-        let source = PgStreamingCdcSource::connect(config, catalog)
-            .await
-            .expect("connect to promoted clone");
-        let identity = source.cluster_identity();
-        assert_eq!(identity.timeline, 2);
-        assert_eq!(identity.history, expected);
-        // Promotion keeps the system id, which is why the timeline is needed.
-        assert_eq!(identity.system_id, system_id);
+    let source = connect(config.clone()).expect("connect to promoted clone");
+    let identity = source.cluster_identity();
+    assert_eq!(identity.timeline, 2);
+    assert_eq!(identity.history, expected);
+    // Promotion keeps the system id, which is why the timeline is needed.
+    assert_eq!(identity.system_id, system_id);
+    drop(source);
+
+    clone.remove_history();
+    let deadline = Instant::now() + ARRIVAL;
+    let error = loop {
+        match connect(config.clone()) {
+            Err(error) if error.to_string().contains("is active") && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => break error,
+            Ok(_) => panic!("a clone without its timeline history must not report an identity"),
+        }
+    };
+    assert!(
+        !matches!(error, PgStreamingError::SourceClosed),
+        "{error:?}"
+    );
+}
+
+/// A physical slot that bears the configured name is refused rather than streamed.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_physical_slot_of_the_configured_name_is_refused() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    let slot = db.slot("subql_pg_streaming_physical");
+    let publication = "subql_pg_streaming_physical_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    // Replication administration, which the query DSL does not express.
+    sql_query(format!(
+        "SELECT pg_create_physical_replication_slot('{slot}')"
+    ))
+    .execute(&mut setup)
+    .expect("create physical slot");
+
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+    let config = PgStreamingConfig::new(db.url(), &slot, publication);
+    let result = current_thread_rt().block_on(PgStreamingCdcSource::connect(config, catalog));
+    assert!(
+        result.is_err(),
+        "a physical slot cannot feed logical decoding"
+    );
+    common::drop_slot(&mut setup, &slot);
+}
+
+struct RouterState {
+    stopped: bool,
+    sockets: Vec<TcpStream>,
+}
+
+impl RouterState {
+    fn stop(&mut self) {
+        self.stopped = true;
+        for socket in self.sockets.drain(..) {
+            let _ = socket.shutdown(SocketShutdown::Both);
+        }
+    }
+}
+
+struct EndpointRouter {
+    stalls: Arc<AtomicU64>,
+    state: Arc<Mutex<RouterState>>,
+    port: u16,
+    accept_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+const ROUTER_ACCEPT_POLL: Duration = Duration::from_millis(5);
+const ROUTER_JOIN_BUDGET: Duration = Duration::from_secs(30);
+
+fn join_bounded(handle: std::thread::JoinHandle<()>, deadline: Instant) -> bool {
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(ROUTER_ACCEPT_POLL);
+    }
+    handle.join().is_ok()
+}
+
+fn loopback_port(url: &str) -> u16 {
+    let host_port = url.rsplit_once('@').expect("fixture host").1;
+    let port = host_port.rsplit_once(':').expect("fixture port").1;
+    port.split('/')
+        .next()
+        .expect("fixture port")
+        .parse()
+        .expect("fixture port")
+}
+
+impl EndpointRouter {
+    fn start(
+        first: u16,
+        later: u16,
+        delay: Duration,
+        deadline: Instant,
+        heartbeat: Option<Arc<AtomicU64>>,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("router listener");
+        let port = listener.local_addr().expect("router address").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let state = Arc::new(Mutex::new(RouterState {
+            stopped: false,
+            sockets: Vec::new(),
+        }));
+        let stalls = Arc::new(AtomicU64::new(0));
+        let accept_state = Arc::clone(&state);
+        let accept_stalls = Arc::clone(&stalls);
+        let accept_thread = std::thread::spawn(move || {
+            let mut handlers = Vec::new();
+            let mut initial = true;
+            while Instant::now() < deadline {
+                if accept_state.lock().stopped {
+                    break;
+                }
+                let client = match listener.accept() {
+                    Ok((client, _)) => client,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(ROUTER_ACCEPT_POLL);
+                        continue;
+                    }
+                    Err(error) => panic!("router accept failed {error}"),
+                };
+                {
+                    let mut gate = accept_state.lock();
+                    if gate.stopped {
+                        let _ = client.shutdown(SocketShutdown::Both);
+                        break;
+                    }
+                    gate.sockets.push(client.try_clone().expect("track client"));
+                }
+                let target = if initial { first } else { later };
+                initial = false;
+                let state = Arc::clone(&accept_state);
+                let stalls = Arc::clone(&accept_stalls);
+                let heartbeat = heartbeat.clone();
+                handlers.push(std::thread::spawn(move || {
+                    router_handler(client, target, delay, deadline, heartbeat, &stalls, &state);
+                }));
+            }
+            accept_state.lock().stop();
+            let join_deadline = Instant::now() + ROUTER_JOIN_BUDGET;
+            for handler in handlers {
+                assert!(
+                    join_bounded(handler, join_deadline),
+                    "router handler failed"
+                );
+            }
+        });
+        Self {
+            stalls,
+            state,
+            port,
+            accept_thread: Some(accept_thread),
+        }
+    }
+
+    fn url(&self, database: &str) -> String {
+        common::PgDatabase::url_at(self.port, database)
+    }
+
+    fn stalled_handshakes(&self) -> u64 {
+        self.stalls.load(Ordering::Relaxed)
+    }
+
+    fn shutdown(&mut self) -> bool {
+        self.state.lock().stop();
+        self.accept_thread.take().is_none_or(|thread| {
+            let deadline = Instant::now()
+                .checked_add(ROUTER_JOIN_BUDGET)
+                .unwrap_or_else(Instant::now);
+            join_bounded(thread, deadline)
+        })
+    }
+
+    fn finish(mut self) {
+        assert!(self.shutdown(), "router cleanup failed");
+    }
+}
+
+fn router_handler(
+    mut client: TcpStream,
+    port: u16,
+    delay: Duration,
+    deadline: Instant,
+    heartbeat: Option<Arc<AtomicU64>>,
+    stalls: &AtomicU64,
+    state: &Mutex<RouterState>,
+) {
+    if !delay.is_zero() {
+        let heartbeat = heartbeat.expect("handshake heartbeat");
+        let before = heartbeat.load(Ordering::Relaxed);
+        std::thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+        if heartbeat.load(Ordering::Relaxed) == before {
+            stalls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() || state.lock().stopped {
+        let _ = client.shutdown(SocketShutdown::Both);
+        return;
+    }
+    let mut target = TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], port)),
+        remaining.min(Duration::from_secs(10)),
+    )
+    .expect("router target");
+    {
+        let mut gate = state.lock();
+        if gate.stopped {
+            let _ = client.shutdown(SocketShutdown::Both);
+            let _ = target.shutdown(SocketShutdown::Both);
+            return;
+        }
+        gate.sockets.push(target.try_clone().expect("track target"));
+    }
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(1));
+    for socket in [&client, &target] {
+        socket
+            .set_read_timeout(Some(remaining))
+            .expect("bounded reads");
+        socket
+            .set_write_timeout(Some(remaining))
+            .expect("bounded writes");
+    }
+    let mut client_read = client.try_clone().expect("client relay");
+    let mut target_write = target.try_clone().expect("target relay");
+    let upstream = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut client_read, &mut target_write);
+        let _ = target_write.shutdown(SocketShutdown::Write);
     });
+    let _ = std::io::copy(&mut target, &mut client);
+    let _ = client.shutdown(SocketShutdown::Both);
+    let _ = target.shutdown(SocketShutdown::Both);
+    assert!(
+        join_bounded(upstream, Instant::now() + ROUTER_JOIN_BUDGET),
+        "router relay failed"
+    );
+}
+
+impl Drop for EndpointRouter {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+fn inserted_id(event: &PgChangeEvent) -> i32 {
+    match &event.change().event_type {
+        EventType::Insert { data, .. } => data
+            .get("id")
+            .and_then(ColumnValue::as_str)
+            .and_then(|text| text.parse().ok())
+            .expect("pending row id"),
+        other => panic!("expected an insert, got {other:?}"),
+    }
+}
+
+/// Metadata and unacknowledged feedback belong to the endpoint delivering the row.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_foreign_baseline_cannot_advance_a_foreign_slot() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
+    let mut setup = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
+        .execute(&mut setup)
+        .expect("REPLICA IDENTITY FULL");
+    let slot = db.slot("subql_pg_streaming_foreign_seed");
+    let publication = "subql_pg_streaming_foreign_seed_pub";
+    // Recovery discards restored logical slots.
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+
+    let clone = PitrCluster::promoted(db.name(), db.container(), &mut setup);
+    let mut on_clone =
+        diesel::PgConnection::establish(&clone.url(db.name())).expect("connect to the clone");
+    common::create_pgoutput_slot(&mut on_clone, &slot);
+    let clone_baseline = confirmed_flush_lsn(&mut on_clone, &slot).expect("the clone slot exists");
+
+    // A foreign seed must exceed the clone's retained position.
+    insert(&mut setup, &[1]);
+    let advance = PgStreamingConfig::new(db.url(), &slot, publication)
+        .status_interval(Duration::from_millis(100));
+    let mut probe = db.connect();
+    let slot_name = slot.clone();
+    current_thread_rt().block_on(async move {
+        let mut source = connect_when_free(&advance).await;
+        next_row(&mut source).await;
+        let commit = next_commit(&mut source).await;
+        source
+            .ack(commit.position())
+            .await
+            .expect("ack the advance commit");
+        flushed_after_ack(
+            &mut source,
+            |lsn| lsn >= commit.end_lsn(),
+            &mut probe,
+            &slot_name,
+        )
+        .await;
+    });
+    let primary_baseline = confirmed_flush_lsn(&mut setup, &slot).expect("the primary slot exists");
+    assert!(
+        primary_baseline > clone_baseline,
+        "the primary must lead the clone for a foreign seed to be observable: \
+         {primary_baseline:?} against {clone_baseline:?}"
+    );
+
+    insert(&mut setup, &[100]);
+    insert(&mut on_clone, &[200]);
+
+    let router = EndpointRouter::start(
+        loopback_port(&db.url()),
+        clone.port,
+        Duration::ZERO,
+        Instant::now() + Duration::from_secs(120),
+        None,
+    );
+    let config = PgStreamingConfig::new(router.url(db.name()), &slot, publication)
+        .status_interval(Duration::from_millis(100));
+
+    current_thread_rt().block_on(async {
+        let mut source = connect_when_free(&config).await;
+        let streamed_the_clone = match inserted_id(&next_row(&mut source).await) {
+            100 => false,
+            200 => true,
+            id => panic!("unexpected endpoint marker {id}"),
+        };
+        let (system_id, timeline) = if streamed_the_clone {
+            control_system(&mut on_clone)
+        } else {
+            control_system(&mut setup)
+        };
+        let expected_history = if streamed_the_clone {
+            raw_history_switches(&clone.raw_history())
+        } else {
+            Vec::new()
+        };
+        let identity = source.cluster_identity();
+        assert_eq!(
+            identity.system_id, system_id,
+            "the identity names the streamed cluster"
+        );
+        assert_eq!(
+            identity.timeline, timeline,
+            "the identity names the streamed timeline"
+        );
+        assert_eq!(
+            identity.history, expected_history,
+            "the identity carries the streamed history"
+        );
+
+        next_commit(&mut source).await;
+        drive_idle(&mut source, Duration::from_secs(2)).await;
+    });
+
+    router.finish();
+    assert_eq!(
+        confirmed_flush_lsn(&mut setup, &slot).expect("the primary slot exists"),
+        primary_baseline,
+        "the primary slot must hold its baseline without an acknowledgement"
+    );
+    assert_eq!(
+        confirmed_flush_lsn(&mut on_clone, &slot).expect("the clone slot exists"),
+        clone_baseline,
+        "the clone slot must hold its baseline without a foreign seed"
+    );
+    common::drop_slot(&mut setup, &slot);
+}
+
+/// Each delayed startup handshake leaves the current-thread heartbeat running.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn startup_never_blocks_the_current_thread_runtime() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
+    let mut setup = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
+        .execute(&mut setup)
+        .expect("REPLICA IDENTITY FULL");
+    let slot = db.slot("subql_pg_streaming_startup_block");
+    let publication = "subql_pg_streaming_startup_block_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+    insert(&mut setup, &[1]);
+
+    const HANDSHAKE_DELAY: Duration = Duration::from_millis(300);
+    let heartbeat = Arc::new(AtomicU64::new(0));
+    let target = loopback_port(&db.url());
+    let router = EndpointRouter::start(
+        target,
+        target,
+        HANDSHAKE_DELAY,
+        Instant::now() + Duration::from_secs(60),
+        Some(Arc::clone(&heartbeat)),
+    );
+    let config = PgStreamingConfig::new(router.url(db.name()), &slot, publication)
+        .status_interval(Duration::from_millis(100));
+
+    current_thread_rt().block_on(async {
+        let ticks = Arc::clone(&heartbeat);
+        tokio::task::spawn(async move {
+            let deadline = Instant::now() + ARRIVAL;
+            while Instant::now() < deadline {
+                ticks.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let mut source = connect_when_free(&config).await;
+        let (system_id, timeline) = control_system(&mut setup);
+        let identity = source.cluster_identity();
+        assert_eq!(identity.system_id, system_id);
+        assert_eq!(identity.timeline, timeline);
+        next_row(&mut source).await;
+        next_commit(&mut source).await;
+    });
+
+    assert!(
+        heartbeat.load(Ordering::Relaxed) > 0,
+        "the heartbeat must have run while the source connected"
+    );
+    assert_eq!(
+        router.stalled_handshakes(),
+        0,
+        "a startup handshake blocked the current-thread runtime"
+    );
+    router.finish();
+    common::drop_slot(&mut setup, &slot);
 }

@@ -1130,12 +1130,7 @@ fn byte_ordered_text_columns_admit_the_extreme() {
             Value::String("a".into()),
             "byte order puts 'a' above 'B'"
         );
-        let mut min = detector_of(
-            &engine,
-            "SELECT MIN(label) FROM labels",
-            labels,
-            rows.clone(),
-        );
+        let mut min = detector_of(&engine, "SELECT MIN(label) FROM labels", labels, rows);
         assert_eq!(
             extreme_of(min.answer()),
             Value::String("B".into()),

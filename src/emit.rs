@@ -1127,6 +1127,7 @@ mod tests {
             },
             lsn: Lsn::new(1),
             metadata: None,
+            xid: None,
         };
         let cdc_bytes = pgoutput_patchset(&db, core::slice::from_ref(&ev)).unwrap();
 
@@ -1193,6 +1194,7 @@ mod tests {
             },
             lsn: Lsn::new(1),
             metadata: None,
+            xid: None,
         };
         let cdc_bytes = pgoutput_patchset(&db, core::slice::from_ref(&ev)).unwrap();
 
@@ -1287,6 +1289,7 @@ mod tests {
                 },
                 lsn: Lsn::new(1),
                 metadata: None,
+                xid: None,
             })
             .collect();
         let pgoutput = pgoutput_patchset(&db, &events).unwrap();
@@ -1444,6 +1447,7 @@ mod tests {
             },
             lsn: Lsn::new(1),
             metadata: None,
+            xid: None,
         };
         let bytes = pgoutput_patchset(&db, core::slice::from_ref(&ev)).unwrap();
         let ParsedDiffSet::Patchset(diff) = parse_patchset(&bytes) else {
