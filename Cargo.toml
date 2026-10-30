@@ -107,7 +107,7 @@ sqlparser = { version = "0.63", default-features = false, features = ["visitor"]
 # a compiled program persists, which is why subql carries no copy of them.
 sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "main", default-features = false, features = ["serde"] }
 
-sql-scalar-text = { version = "0.2.0", features = ["decimal"] }
+sql-scalar-text = { git = "https://github.com/connetto-rs/sql-scalar-text", branch = "main", features = ["decimal"] }
 
 # Compressed bitmaps for predicate/user sets.
 roaring = "0.11"
