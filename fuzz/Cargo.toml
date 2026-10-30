@@ -24,8 +24,8 @@ resolver = "3"
 members = ["."]
 
 [patch.crates-io]
-# Carries isdaniel/pg-walstream PRs #136, #137, #138 and #140. Remove once released.
-pg_walstream = { git = "https://github.com/LucaCappelletti94/pg-walstream", branch = "future" }
+# Tracks upstream main until a release ships owned-connection startup metadata.
+pg_walstream = { git = "https://github.com/isdaniel/pg-walstream", branch = "main" }
 # Mirror the root Cargo.toml [patch.crates-io] pins. cargo-fuzz's standalone
 # workspace does not inherit the parent's patch table, so every root pin has
 # to be repeated here and moved when the root moves. sqlparser tracks the

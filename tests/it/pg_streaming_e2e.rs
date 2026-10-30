@@ -16,10 +16,16 @@
 
 use crate::common;
 
+use parking_lot::Mutex;
+use std::net::{Shutdown as SocketShutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use diesel::{sql_query, Connection, ExpressionMethods, PgConnection, RunQueryDsl};
-use pg_walstream::error::ReplicationError;
+use pg_walstream::{error::ReplicationError, ColumnValue, EventType};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::CdcEvent;
@@ -516,13 +522,15 @@ async fn connect_when_free(config: &PgStreamingConfig) -> PgStreamingCdcSource {
     let deadline = Instant::now() + ARRIVAL;
     loop {
         let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
-        match PgStreamingCdcSource::connect(config.clone(), catalog).await {
+        let error = match PgStreamingCdcSource::connect(config.clone(), catalog).await {
             Ok(source) => return source,
-            Err(err) if err.to_string().contains("is active") && Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(err) => panic!("connect: {err}"),
-        }
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("is active") && Instant::now() < deadline,
+            "connect failed {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -1477,4 +1485,396 @@ fn cluster_identity_of_a_promoted_point_in_time_clone() {
         // Promotion keeps the system id, which is why the timeline is needed.
         assert_eq!(identity.system_id, system_id);
     });
+}
+
+struct RouterState {
+    stopped: bool,
+    sockets: Vec<TcpStream>,
+}
+
+impl RouterState {
+    fn stop(&mut self) {
+        self.stopped = true;
+        for socket in self.sockets.drain(..) {
+            let _ = socket.shutdown(SocketShutdown::Both);
+        }
+    }
+}
+
+struct EndpointRouter {
+    stalls: Arc<AtomicU64>,
+    state: Arc<Mutex<RouterState>>,
+    port: u16,
+    accept_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+const ROUTER_ACCEPT_POLL: Duration = Duration::from_millis(5);
+const ROUTER_JOIN_BUDGET: Duration = Duration::from_secs(30);
+
+fn join_bounded(handle: std::thread::JoinHandle<()>, deadline: Instant) -> bool {
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(ROUTER_ACCEPT_POLL);
+    }
+    handle.join().is_ok()
+}
+
+fn loopback_port(url: &str) -> u16 {
+    let host_port = url.rsplit_once('@').expect("fixture host").1;
+    let port = host_port.rsplit_once(':').expect("fixture port").1;
+    port.split('/')
+        .next()
+        .expect("fixture port")
+        .parse()
+        .expect("fixture port")
+}
+
+impl EndpointRouter {
+    fn start(
+        first: u16,
+        later: u16,
+        delay: Duration,
+        deadline: Instant,
+        heartbeat: Option<Arc<AtomicU64>>,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("router listener");
+        let port = listener.local_addr().expect("router address").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let state = Arc::new(Mutex::new(RouterState {
+            stopped: false,
+            sockets: Vec::new(),
+        }));
+        let stalls = Arc::new(AtomicU64::new(0));
+        let accept_state = Arc::clone(&state);
+        let accept_stalls = Arc::clone(&stalls);
+        let accept_thread = std::thread::spawn(move || {
+            let mut handlers = Vec::new();
+            let mut initial = true;
+            while Instant::now() < deadline {
+                if accept_state.lock().stopped {
+                    break;
+                }
+                let client = match listener.accept() {
+                    Ok((client, _)) => client,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(ROUTER_ACCEPT_POLL);
+                        continue;
+                    }
+                    Err(error) => panic!("router accept failed {error}"),
+                };
+                {
+                    let mut gate = accept_state.lock();
+                    if gate.stopped {
+                        let _ = client.shutdown(SocketShutdown::Both);
+                        break;
+                    }
+                    gate.sockets.push(client.try_clone().expect("track client"));
+                }
+                let target = if initial { first } else { later };
+                initial = false;
+                let state = Arc::clone(&accept_state);
+                let stalls = Arc::clone(&accept_stalls);
+                let heartbeat = heartbeat.clone();
+                handlers.push(std::thread::spawn(move || {
+                    router_handler(client, target, delay, deadline, heartbeat, &stalls, &state);
+                }));
+            }
+            accept_state.lock().stop();
+            let join_deadline = Instant::now() + ROUTER_JOIN_BUDGET;
+            for handler in handlers {
+                assert!(
+                    join_bounded(handler, join_deadline),
+                    "router handler failed"
+                );
+            }
+        });
+        Self {
+            stalls,
+            state,
+            port,
+            accept_thread: Some(accept_thread),
+        }
+    }
+
+    fn url(&self, database: &str) -> String {
+        common::PgDatabase::url_at(self.port, database)
+    }
+
+    fn stalled_handshakes(&self) -> u64 {
+        self.stalls.load(Ordering::Relaxed)
+    }
+
+    fn shutdown(&mut self) -> bool {
+        self.state.lock().stop();
+        self.accept_thread.take().is_none_or(|thread| {
+            let deadline = Instant::now()
+                .checked_add(ROUTER_JOIN_BUDGET)
+                .unwrap_or_else(Instant::now);
+            join_bounded(thread, deadline)
+        })
+    }
+
+    fn finish(mut self) {
+        assert!(self.shutdown(), "router cleanup failed");
+    }
+}
+
+fn router_handler(
+    mut client: TcpStream,
+    port: u16,
+    delay: Duration,
+    deadline: Instant,
+    heartbeat: Option<Arc<AtomicU64>>,
+    stalls: &AtomicU64,
+    state: &Mutex<RouterState>,
+) {
+    if !delay.is_zero() {
+        let heartbeat = heartbeat.expect("handshake heartbeat");
+        let before = heartbeat.load(Ordering::Relaxed);
+        std::thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+        if heartbeat.load(Ordering::Relaxed) == before {
+            stalls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() || state.lock().stopped {
+        let _ = client.shutdown(SocketShutdown::Both);
+        return;
+    }
+    let mut target = TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], port)),
+        remaining.min(Duration::from_secs(10)),
+    )
+    .expect("router target");
+    {
+        let mut gate = state.lock();
+        if gate.stopped {
+            let _ = client.shutdown(SocketShutdown::Both);
+            let _ = target.shutdown(SocketShutdown::Both);
+            return;
+        }
+        gate.sockets.push(target.try_clone().expect("track target"));
+    }
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(1));
+    for socket in [&client, &target] {
+        socket
+            .set_read_timeout(Some(remaining))
+            .expect("bounded reads");
+        socket
+            .set_write_timeout(Some(remaining))
+            .expect("bounded writes");
+    }
+    let mut client_read = client.try_clone().expect("client relay");
+    let mut target_write = target.try_clone().expect("target relay");
+    let upstream = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut client_read, &mut target_write);
+        let _ = target_write.shutdown(SocketShutdown::Write);
+    });
+    let _ = std::io::copy(&mut target, &mut client);
+    let _ = client.shutdown(SocketShutdown::Both);
+    let _ = target.shutdown(SocketShutdown::Both);
+    assert!(
+        join_bounded(upstream, Instant::now() + ROUTER_JOIN_BUDGET),
+        "router relay failed"
+    );
+}
+
+impl Drop for EndpointRouter {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+fn inserted_id(event: &PgChangeEvent) -> i32 {
+    match &event.change().event_type {
+        EventType::Insert { data, .. } => data
+            .get("id")
+            .and_then(ColumnValue::as_str)
+            .and_then(|text| text.parse().ok())
+            .expect("pending row id"),
+        other => panic!("expected an insert, got {other:?}"),
+    }
+}
+
+/// Metadata and unacknowledged feedback belong to the endpoint delivering the row.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_foreign_baseline_cannot_advance_a_foreign_slot() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
+    let mut setup = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
+        .execute(&mut setup)
+        .expect("REPLICA IDENTITY FULL");
+    let slot = db.slot("subql_pg_streaming_foreign_seed");
+    let publication = "subql_pg_streaming_foreign_seed_pub";
+    // Recovery discards restored logical slots.
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+
+    let clone = PitrCluster::promoted(db.name(), db.container(), &mut setup);
+    let mut on_clone =
+        diesel::PgConnection::establish(&clone.url(db.name())).expect("connect to the clone");
+    common::create_pgoutput_slot(&mut on_clone, &slot);
+    let clone_baseline = confirmed_flush_lsn(&mut on_clone, &slot).expect("the clone slot exists");
+
+    // A foreign seed must exceed the clone's retained position.
+    insert(&mut setup, &[1]);
+    let advance = PgStreamingConfig::new(db.url(), &slot, publication)
+        .status_interval(Duration::from_millis(100));
+    let mut probe = db.connect();
+    let slot_name = slot.clone();
+    current_thread_rt().block_on(async move {
+        let mut source = connect_when_free(&advance).await;
+        next_row(&mut source).await;
+        let commit = next_commit(&mut source).await;
+        source
+            .ack(commit.position())
+            .await
+            .expect("ack the advance commit");
+        flushed_after_ack(
+            &mut source,
+            |lsn| lsn >= commit.end_lsn(),
+            &mut probe,
+            &slot_name,
+        )
+        .await;
+    });
+    let primary_baseline = confirmed_flush_lsn(&mut setup, &slot).expect("the primary slot exists");
+    assert!(
+        primary_baseline > clone_baseline,
+        "the primary must lead the clone for a foreign seed to be observable: \
+         {primary_baseline:?} against {clone_baseline:?}"
+    );
+
+    insert(&mut setup, &[100]);
+    insert(&mut on_clone, &[200]);
+
+    let router = EndpointRouter::start(
+        loopback_port(&db.url()),
+        clone.port,
+        Duration::ZERO,
+        Instant::now() + Duration::from_secs(120),
+        None,
+    );
+    let config = PgStreamingConfig::new(router.url(db.name()), &slot, publication)
+        .status_interval(Duration::from_millis(100));
+
+    current_thread_rt().block_on(async {
+        let mut source = connect_when_free(&config).await;
+        let streamed_the_clone = match inserted_id(&next_row(&mut source).await) {
+            100 => false,
+            200 => true,
+            id => panic!("unexpected endpoint marker {id}"),
+        };
+        let (system_id, timeline) = if streamed_the_clone {
+            control_system(&mut on_clone)
+        } else {
+            control_system(&mut setup)
+        };
+        let expected_history = if streamed_the_clone {
+            raw_history_switches(&clone.raw_history())
+        } else {
+            Vec::new()
+        };
+        let identity = source.cluster_identity();
+        assert_eq!(
+            identity.system_id, system_id,
+            "the identity names the streamed cluster"
+        );
+        assert_eq!(
+            identity.timeline, timeline,
+            "the identity names the streamed timeline"
+        );
+        assert_eq!(
+            identity.history, expected_history,
+            "the identity carries the streamed history"
+        );
+
+        next_commit(&mut source).await;
+        drive_idle(&mut source, Duration::from_secs(2)).await;
+    });
+
+    router.finish();
+    assert_eq!(
+        confirmed_flush_lsn(&mut setup, &slot).expect("the primary slot exists"),
+        primary_baseline,
+        "the primary slot must hold its baseline without an acknowledgement"
+    );
+    assert_eq!(
+        confirmed_flush_lsn(&mut on_clone, &slot).expect("the clone slot exists"),
+        clone_baseline,
+        "the clone slot must hold its baseline without a foreign seed"
+    );
+    common::drop_slot(&mut setup, &slot);
+}
+
+/// Each delayed startup handshake leaves the current-thread heartbeat running.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn startup_never_blocks_the_current_thread_runtime() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.set("wal_sender_timeout", "1s");
+    let mut setup = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
+        .execute(&mut setup)
+        .expect("REPLICA IDENTITY FULL");
+    let slot = db.slot("subql_pg_streaming_startup_block");
+    let publication = "subql_pg_streaming_startup_block_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+    insert(&mut setup, &[1]);
+
+    const HANDSHAKE_DELAY: Duration = Duration::from_millis(300);
+    let heartbeat = Arc::new(AtomicU64::new(0));
+    let target = loopback_port(&db.url());
+    let router = EndpointRouter::start(
+        target,
+        target,
+        HANDSHAKE_DELAY,
+        Instant::now() + Duration::from_secs(60),
+        Some(Arc::clone(&heartbeat)),
+    );
+    let config = PgStreamingConfig::new(router.url(db.name()), &slot, publication)
+        .status_interval(Duration::from_millis(100));
+
+    current_thread_rt().block_on(async {
+        let ticks = Arc::clone(&heartbeat);
+        tokio::task::spawn(async move {
+            let deadline = Instant::now() + ARRIVAL;
+            while Instant::now() < deadline {
+                ticks.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let mut source = connect_when_free(&config).await;
+        let (system_id, timeline) = control_system(&mut setup);
+        let identity = source.cluster_identity();
+        assert_eq!(identity.system_id, system_id);
+        assert_eq!(identity.timeline, timeline);
+        next_row(&mut source).await;
+        next_commit(&mut source).await;
+    });
+
+    assert!(
+        heartbeat.load(Ordering::Relaxed) > 0,
+        "the heartbeat must have run while the source connected"
+    );
+    assert_eq!(
+        router.stalled_handshakes(),
+        0,
+        "a startup handshake blocked the current-thread runtime"
+    );
+    router.finish();
+    common::drop_slot(&mut setup, &slot);
 }

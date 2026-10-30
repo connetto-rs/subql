@@ -366,6 +366,7 @@ mod tests {
             },
             lsn: Lsn::new(0x10),
             metadata: None,
+            xid: None,
         });
         let row = EventRow::current(&event, &db).expect("insert on a known table builds");
         assert_eq!(row.table_id(), docs);
@@ -461,6 +462,7 @@ mod tests {
             },
             lsn: Lsn::new(1),
             metadata: None,
+            xid: None,
         });
         assert_eq!(
             stranger.table_id(&db),
@@ -563,6 +565,7 @@ mod tests {
             },
             lsn: Lsn::new(1),
             metadata: None,
+            xid: None,
         });
         let row = EventRow::current(&event, &db).expect("insert on a known table builds");
 

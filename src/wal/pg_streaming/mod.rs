@@ -11,16 +11,14 @@
 //! has acknowledged, and no further.
 
 use alloc::collections::VecDeque;
-use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
 use pg_walstream::error::ReplicationError;
 use pg_walstream::{
-    parse_lsn, LogicalReplicationStream, PgReplicationConnection, ReplicationStreamConfig,
-    RetryConfig, SharedLsnFeedback,
+    LogicalReplicationStream, ReplicationStreamConfig, RetryConfig, SharedLsnFeedback,
 };
 use sql_traits::prelude::DatabaseLike;
 use tokio_util::sync::CancellationToken;
@@ -32,7 +30,7 @@ use super::{
 use crate::{PgCommitPosition, PgLsn};
 
 mod wire_format_helpers;
-use wire_format_helpers::{ensure_replication_param, parse_timeline_history};
+use wire_format_helpers::ensure_replication_param;
 
 /// Configuration for a [`PgStreamingCdcSource`].
 ///
@@ -169,8 +167,7 @@ pub struct PgStreamingCdcSource {
 }
 
 impl PgStreamingCdcSource {
-    /// Open the replication connection, read the cluster identity and the
-    /// slot's confirmed flush seed, and start streaming from the slot.
+    /// Read identity, timeline history and the slot's confirmed flush seed through the owned replication connection, then start streaming.
     ///
     /// # Pre-conditions
     ///
@@ -180,57 +177,65 @@ impl PgStreamingCdcSource {
     /// - `config.url` is a libpq conninfo string. The source appends
     ///   `replication=database` if the caller did not.
     ///
-    /// The engine resolves events against its own catalog at dispatch time.
+    /// The engine resolves events against its own catalog at dispatch time, so this constructor releases `catalog` before creating its future.
     ///
     /// # Errors
     ///
     /// Returns an error if connection setup, identity discovery, slot lookup or replication startup fails.
-    pub async fn connect<DB: DatabaseLike + 'static>(
+    pub fn connect<DB: DatabaseLike + 'static>(
         config: PgStreamingConfig,
-        _catalog: DB,
-    ) -> Result<Self, PgStreamingError> {
-        let conninfo = ensure_replication_param(&config.url);
-        let slot_name = config.slot_name.clone();
-        let start = config.start;
+        catalog: DB,
+    ) -> impl core::future::Future<Output = Result<Self, PgStreamingError>> {
+        drop(catalog);
+        async move {
+            let conninfo = ensure_replication_param(&config.url);
 
-        // The side connection's pre-replication SQL round trips block the
-        // socket, so they bounce through the blocking pool.
-        let side_conninfo = conninfo.clone();
-        let (cluster_identity, base_lsn) =
-            tokio::task::spawn_blocking(move || -> Result<_, PgStreamingError> {
-                let mut conn = PgReplicationConnection::connect(&side_conninfo)?;
-                let cluster_identity = read_cluster_identity(&mut conn)?;
-                // The slot's own position, so the retention gauges start at the
-                // distance the slot is already holding rather than at an absolute
-                // LSN that would read as gigabytes.
-                let slot_row = conn.exec(&format!(
-                    "SELECT confirmed_flush_lsn::text FROM pg_replication_slots \
-                 WHERE slot_name = '{}'",
-                    slot_name.replace('\'', "''")
-                ))?;
-                let base_lsn = slot_row
-                    .get_value(0, 0)
-                    .and_then(|text| parse_lsn(&text).ok())
-                    .unwrap_or(0);
-                Ok((cluster_identity, base_lsn))
+            // One connection attempt. The consumer owns reconnection.
+            let stream_config = ReplicationStreamConfig::builder(
+                config.slot_name.clone(),
+                config.publication_name.clone(),
+            )
+            .with_protocol_version(1)
+            .with_feedback_interval(config.status_interval)
+            .with_retry_config(RetryConfig {
+                max_attempts: 1,
+                ..RetryConfig::default()
             })
-            .await
-            .map_err(|e| PgStreamingError::Protocol(format!("connection task panicked: {e}")))??;
+            .with_existing_slot_required(true);
 
-        // One connection attempt. The consumer owns reconnection.
-        let stream_config = ReplicationStreamConfig::builder(
-            config.slot_name.clone(),
-            config.publication_name.clone(),
-        )
-        .with_protocol_version(1)
-        .with_feedback_interval(config.status_interval)
-        .with_retry_config(RetryConfig {
-            max_attempts: 1,
-            ..RetryConfig::default()
-        })
-        .with_existing_slot_required(true);
+            let reader = LogicalReplicationStream::new(&conninfo, stream_config).await?;
+            Self::start_reader(config, reader).await
+        }
+    }
 
-        let mut reader = LogicalReplicationStream::new(&conninfo, stream_config).await?;
+    // Separate initialization bounds the public constructor's future frame.
+    async fn start_reader(
+        config: PgStreamingConfig,
+        mut reader: LogicalReplicationStream,
+    ) -> Result<Self, PgStreamingError> {
+        let start = config.start;
+        let identity = reader.server_identity();
+        let system_id = identity.system_id();
+        let timeline = identity.timeline();
+        let history = reader
+            .timeline_history()
+            .await?
+            .into_iter()
+            .map(|switch| TimelineSwitch {
+                timeline: switch.timeline(),
+                switch_lsn: PgLsn(switch.switchpoint().value()),
+            })
+            .collect();
+        // The slot position seeds the distance gauges rather than an absolute LSN.
+        let base_lsn = reader
+            .slot_confirmed_flush_lsn()
+            .await?
+            .map_or(0, |lsn| lsn.value());
+        let cluster_identity = ClusterIdentity {
+            system_id,
+            timeline,
+            history,
+        };
         reader
             .start(start.map(|position| position.commit_lsn().0))
             .await?;
@@ -413,57 +418,4 @@ impl Delivery {
     fn unseen(&self, position: PgCommitPosition) -> bool {
         self.start.is_none_or(|start| position > start)
     }
-}
-
-/// Read `IDENTIFY_SYSTEM` and, above timeline 1, the current timeline's history.
-fn read_cluster_identity(
-    conn: &mut PgReplicationConnection,
-) -> Result<ClusterIdentity, PgStreamingError> {
-    let ident = conn.identify_system()?;
-    if ident.ntuples() == 0 {
-        return Err(PgStreamingError::Protocol(
-            "IDENTIFY_SYSTEM returned no row; is the connection in \
-             replication=database mode?"
-                .to_string(),
-        ));
-    }
-    let system_id = ident
-        .get_value(0, 0)
-        .and_then(|text| text.trim().parse::<u64>().ok())
-        .ok_or_else(|| {
-            PgStreamingError::Protocol(format!(
-                "IDENTIFY_SYSTEM returned an unreadable systemid: {:?}",
-                ident.get_value(0, 0)
-            ))
-        })?;
-    let timeline = ident
-        .get_value(0, 1)
-        .and_then(|text| text.trim().parse::<u32>().ok())
-        .ok_or_else(|| {
-            PgStreamingError::Protocol(format!(
-                "IDENTIFY_SYSTEM returned an unreadable timeline: {:?}",
-                ident.get_value(0, 1)
-            ))
-        })?;
-    // The server has no history file for timeline 1 and rejects the command there.
-    let history = if timeline > 1 {
-        let reply = conn.exec(&format!("TIMELINE_HISTORY {timeline}"))?;
-        let content = (reply.ntuples() == 1)
-            .then(|| reply.get_value(0, 1))
-            .flatten()
-            .ok_or_else(|| {
-                PgStreamingError::Protocol(format!(
-                    "TIMELINE_HISTORY {timeline} returned {} rows, expected one file",
-                    reply.ntuples()
-                ))
-            })?;
-        parse_timeline_history(&content)?
-    } else {
-        Vec::new()
-    };
-    Ok(ClusterIdentity {
-        system_id,
-        timeline,
-        history,
-    })
 }
