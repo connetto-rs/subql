@@ -22,17 +22,17 @@ const CATALOG: &str = "CREATE EXTENSION vector; \
     CREATE TYPE mood AS ENUM ('happy', 'sad'); \
     CREATE TABLE arrays (id INT PRIMARY KEY, small INT2[], grid INT4[][], ratios FLOAT4[], \
     labels VARCHAR(5)[], prices NUMERIC[], flags BOOLEAN[], days DATE[], stamps TIMESTAMPTZ[], \
-    docs JSONB[], moods mood[], emb vector(3));";
+    docs JSONB[], moods mood[], emb vector(3), spans INTERVAL[]);";
 
 const PG_SETUP: [&str; 3] = [
     "CREATE EXTENSION vector",
     "CREATE TYPE mood AS ENUM ('happy', 'sad')",
     "CREATE TABLE arrays (id INT PRIMARY KEY, small INT2[], grid INT4[][], ratios FLOAT4[], \
      labels VARCHAR(5)[], prices NUMERIC[], flags BOOLEAN[], days DATE[], stamps TIMESTAMPTZ[], \
-     docs JSONB[], moods mood[], emb vector(3))",
+     docs JSONB[], moods mood[], emb vector(3), spans INTERVAL[])",
 ];
 
-const COLUMNS: [(&str, &str); 12] = [
+const COLUMNS: [(&str, &str); 13] = [
     ("id", ""),
     ("small", ""),
     ("grid", ""),
@@ -45,6 +45,7 @@ const COLUMNS: [(&str, &str); 12] = [
     ("docs", ""),
     ("moods", ""),
     ("emb", ""),
+    ("spans", ""),
 ];
 
 #[derive(diesel::sql_types::SqlType)]
@@ -122,6 +123,8 @@ fn arrays_and_vectors_bind_natively() {
         .set(10, "[[\"happy\"],[\"sad\"]]")
         .unwrap()
         .set(11, emb)
+        .unwrap()
+        .set(12, "[\"1 day 02:00:00\",null,\"-00:15:00\"]")
         .unwrap();
     let inserts = PatchSet::<SimpleTable, String, Vec<u8>>::new().insert(row);
 
@@ -136,7 +139,7 @@ fn arrays_and_vectors_bind_natively() {
 
     let printed: Printed = sql_query(
         "SELECT concat_ws(' | ', small, grid, ratios, labels, prices, flags, days, stamps, docs, \
-         moods, emb) AS row FROM arrays WHERE id = 1",
+         moods, emb, spans) AS row FROM arrays WHERE id = 1",
     )
     .get_result(&mut conn)
     .expect("load");
@@ -144,7 +147,7 @@ fn arrays_and_vectors_bind_natively() {
         printed.row,
         "{1,NULL,-3} | {{1,2},{3,4}} | {1.5,0.25} | {ab,c} | {12.50,-0.001} | {t,f} | \
          {2024-03-04} | {\"2024-03-04 05:06:07.891+00\"} | {\"{\\\"a\\\": 2, \\\"b\\\": 1}\"} | \
-         {{happy},{sad}} | [1,-2.5,3]"
+         {{happy},{sad}} | [1,-2.5,3] | {\"1 day 02:00:00\",NULL,-00:15:00}"
     );
 }
 
