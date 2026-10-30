@@ -39,8 +39,8 @@ allow-git = [
     # Repoint at upstream apache/datafusion-sqlparser-rs once #2349 merges.
     "https://github.com/LucaCappelletti94/sqlparser-rs",
     "https://github.com/apache/datafusion-sqlparser-rs",
-    # diesel sqlite hooks (PR #4969). subql-demo uses hook-driven WAL emulation.
-    "https://github.com/LucaCappelletti94/diesel",
+    # diesel sqlite hooks and MySQL `execute_returning_id`, on main but unreleased.
+    "https://github.com/diesel-rs/diesel",
     # pg2sqlite, the PG-DDL -> SQLite-DDL translator the demo uses for preset schemas.
     "https://github.com/connetto-rs/pg2sqlite",
 ]

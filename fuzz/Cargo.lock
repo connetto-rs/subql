@@ -364,8 +364,8 @@ dependencies = [
 
 [[package]]
 name = "diesel"
-version = "2.3.12"
-source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#705e43404056739897f3a123be6332adf2b13d7a"
+version = "2.3.14"
+source = "git+https://github.com/diesel-rs/diesel#04f6aafd45c84cc10214ac9b21cf18fe2498b157"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -377,7 +377,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "serde_json",
- "sqlite-wasm-rs 0.4.8",
+ "sqlite-wasm-rs",
  "time",
 ]
 
@@ -397,14 +397,14 @@ source = "git+https://github.com/connetto-rs/diesel-sqlite-session#7e08e927ce99b
 dependencies = [
  "diesel",
  "libsqlite3-sys",
- "sqlite-wasm-rs 0.6.2",
+ "sqlite-wasm-rs",
  "thiserror",
 ]
 
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#705e43404056739897f3a123be6332adf2b13d7a"
+source = "git+https://github.com/diesel-rs/diesel#04f6aafd45c84cc10214ac9b21cf18fe2498b157"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -413,8 +413,8 @@ dependencies = [
 
 [[package]]
 name = "diesel_derives"
-version = "2.3.9"
-source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#705e43404056739897f3a123be6332adf2b13d7a"
+version = "2.3.10"
+source = "git+https://github.com/diesel-rs/diesel#04f6aafd45c84cc10214ac9b21cf18fe2498b157"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -427,7 +427,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.3.0"
-source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#705e43404056739897f3a123be6332adf2b13d7a"
+source = "git+https://github.com/diesel-rs/diesel#04f6aafd45c84cc10214ac9b21cf18fe2498b157"
 dependencies = [
  "syn 3.0.9",
 ]
@@ -451,7 +451,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.2.0"
-source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#705e43404056739897f3a123be6332adf2b13d7a"
+source = "git+https://github.com/diesel-rs/diesel#04f6aafd45c84cc10214ac9b21cf18fe2498b157"
 dependencies = [
  "darling",
  "either",
@@ -1308,21 +1308,6 @@ dependencies = [
 
 [[package]]
 name = "sqlite-wasm-rs"
-version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60bdd87fcb4c9764b024805fb2df5f1d659bea6e629fdbdcdcfc4042b9a640d0"
-dependencies = [
- "js-sys",
- "once_cell",
- "thiserror",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "sqlite-wasm-rs"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36bd8e29bf08189a005b2df1df99823aa0861cabe9044e5f31ed54ca292ee618"
@@ -1538,15 +1523,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
-name = "tokio"
-version = "1.54.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
-dependencies = [
- "pin-project-lite",
-]
-
-[[package]]
 name = "toml"
 version = "1.1.8+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1677,17 +1653,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-bindgen-futures"
-version = "0.4.79"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbab34de2d982e9b48e18d216d04c4a6f641066ff19ffb699980f591ee3610e"
-dependencies = [
- "js-sys",
- "tokio",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "wasm-bindgen-macro"
 version = "0.2.129"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1717,16 +1682,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "web-sys"
-version = "0.3.106"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88261b9deccee56594c11a3460c462c41f58d148598fe70ad77070126a68aba4"
-dependencies = [
- "js-sys",
- "wasm-bindgen",
 ]
 
 [[package]]
