@@ -173,6 +173,11 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> Backend for Postgres<V> {
     /// holding 9007199254740993, since the `NULL` takes the type of `b`.
     const RANGE_WITH_NULL_BOUND_COMPARES_DOUBLES: bool = false;
 
+    /// Measured on 16 and 18: `- NULL` and `NULL + NULL`, and `-`, `*`, `/`
+    /// and `%` alike, raise `operator is not unique`, while `+ NULL` and
+    /// `NULL + n` are answered.
+    const NULL_ARITHMETIC_IS_AMBIGUOUS: bool = true;
+
     /// The quotient's scale is the engine's, resolved at registration.
     fn decimal_quotient(
         dividend: bigdecimal::BigDecimal,
@@ -602,6 +607,10 @@ impl<C: MySqlTableNameCase> Backend for MySql<C> {
     /// `NULL + 0`, while `b BETWEEN 0 AND (b - 1)` is `0`.
     const RANGE_WITH_NULL_BOUND_COMPARES_DOUBLES: bool = true;
 
+    /// Measured on 8.0.46: `(- NULL) IS NULL` and `(NULL + NULL) IS NULL`
+    /// are `1`, and so are `-`, `*`, `/` and `%`.
+    const NULL_ARITHMETIC_IS_AMBIGUOUS: bool = false;
+
     /// The quotient's scale is the engine's, resolved at registration.
     fn decimal_quotient(
         dividend: bigdecimal::BigDecimal,
@@ -877,6 +886,10 @@ impl Backend for SQLite {
     /// Measured on 3.51: `b BETWEEN NULL AND (b - 1)` is `0` with `b` an
     /// `INTEGER` holding 9007199254740993, since SQLite compares by value.
     const RANGE_WITH_NULL_BOUND_COMPARES_DOUBLES: bool = false;
+
+    /// Measured on 3.45: `(- NULL) IS NULL` and `(NULL + NULL) IS NULL` are
+    /// `1`, and so are `-`, `*`, `/` and `%`.
+    const NULL_ARITHMETIC_IS_AMBIGUOUS: bool = false;
 
     /// SQLite decodes no decimal cell, so this states the rule it declares rather than a second one.
     fn decimal_quotient(

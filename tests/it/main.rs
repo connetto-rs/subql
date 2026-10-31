@@ -406,6 +406,8 @@ mod semantics_cross_kind;
 
 mod semantics_arith_overflow;
 
+mod untyped_null_arithmetic;
+
 mod semantics_div_zero;
 
 mod semantics_division;
