@@ -688,6 +688,7 @@ where
                         | BinaryOperator::Multiply
                         | BinaryOperator::Divide
                         | BinaryOperator::Modulo => {
+                            refuse_null_arithmetic::<B>(&[left, right])?;
                             refuse_non_numeric_operand::<B, DB>(left, table_id, database, depth)?;
                             refuse_non_numeric_operand::<B, DB>(right, table_id, database, depth)?;
                             refuse_mixed_arithmetic::<B, DB>(
@@ -989,6 +990,7 @@ where
                     // Unary + emits nothing over a number.
                 }
                 UnaryOperator::Minus => {
+                    refuse_null_arithmetic::<B>(&[inner])?;
                     refuse_non_numeric_operand::<B, DB>(inner, table_id, database, depth)?;
                     out.push(Instruction::Negate(float_result_width::<B, DB>(
                         expr, table_id, database, depth,
@@ -1251,6 +1253,30 @@ fn refuse_non_numeric_operand<B: Backend, DB: DatabaseLike>(
             "arithmetic is served over numbers only".to_string(),
         ))
     }
+}
+
+/// Refuse arithmetic whose every operand is `NULL` on an engine that will not
+/// run it, having no operand type to pick an operator by.
+fn refuse_null_arithmetic<B: Backend>(operands: &[&Expr]) -> Result<(), RegisterError> {
+    fn is_null(operand: &Expr) -> bool {
+        match operand {
+            Expr::Nested(inner) => is_null(inner),
+            Expr::Value(ValueWithSpan {
+                value: SqlValue::Null,
+                ..
+            }) => true,
+            _ => false,
+        }
+    }
+    if B::NULL_ARITHMETIC_IS_AMBIGUOUS && operands.iter().all(|operand| is_null(operand)) {
+        return Err(RegisterError::RefusedByEngine {
+            engine: core::any::type_name::<B>(),
+            reason: "arithmetic over `NULL` alone has no operand type to pick an operator by, \
+                     and the engine answers `operator is not unique`"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Refuse arithmetic whose operands carry two kinds, and `%` over anything

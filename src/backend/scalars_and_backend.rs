@@ -521,6 +521,14 @@ pub trait Backend: 'static {
     /// routed to a database read where this is true.
     const RANGE_WITH_NULL_BOUND_COMPARES_DOUBLES: bool;
 
+    /// Whether this engine refuses arithmetic over `NULL` alone, `- NULL` or
+    /// `NULL + NULL`, having no operand to pick an operator by.
+    ///
+    /// Required, and per backend, because one engine refuses what the
+    /// others answer `NULL`. Such arithmetic is refused at registration
+    /// where this is true.
+    const NULL_ARITHMETIC_IS_AMBIGUOUS: bool;
+
     /// What this engine answers when a floating total leaves its range.
     ///
     /// Required, and per backend, because no two agree: measured,
