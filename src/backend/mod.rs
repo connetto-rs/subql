@@ -50,7 +50,10 @@ pub(crate) mod shipped;
 pub use crate::compiler::value_cmp::cross_kind_numeric_ordering;
 pub(crate) use cdc_event::ResolvedEvent;
 pub use cdc_event::{decode_cell, encode_value_key, CdcEvent, CellPresence};
-pub use interval::{Interval, IntervalOutOfRange, IntervalSum};
+pub use interval::{
+    shift_time, shift_timestamp, timestamp_difference, Interval, IntervalOutOfRange, IntervalSum,
+    TimestampShift,
+};
 pub use row_kind::RowKind;
 pub use scalar_value::at_float4;
 pub use scalar_value::declared_type_of;
