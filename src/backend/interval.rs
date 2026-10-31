@@ -418,6 +418,9 @@ mod tests {
             ),
             ("-1 mons", 7.0, "-4 days -06:51:25.6896"),
             ("00:00:00.5", 3.0, "00:00:00.166667"),
+            // The month's remainder and the day's both push the clock's past the day, so the cascade carries a whole day into the clock.
+            ("1 mon 6 days", 7.0, "5 days 03:25:42.832457"),
+            ("-1 mon -6 days", 7.0, "-5 days -03:25:42.832457"),
         ] {
             assert_eq!(
                 interval(dividend).divided_by(factor).unwrap().to_string(),
@@ -425,7 +428,15 @@ mod tests {
                 "{dividend} / {factor}"
             );
         }
+        // Each quotient leaves a field's range, and PostgreSQL 16 and 18 raise `interval out of range` there.
         assert_eq!(interval("2147483647 days").divided_by(0.5), None);
+        assert_eq!(interval("178956970 years 7 months").divided_by(0.5), None);
+        let clock = Interval {
+            months: 0,
+            days: 0,
+            microseconds: i64::MAX,
+        };
+        assert_eq!(clock.divided_by(0.5), None);
     }
 
     fn fold(sum: &mut IntervalSum, text: &str, weight: i64) {
@@ -468,6 +479,55 @@ mod tests {
         assert_eq!(
             seeded.mean().unwrap().unwrap().to_string(),
             "15 days 12:00:00"
+        );
+    }
+
+    /// Totals past a field's range and a total holding the infinity's own
+    /// fields are refused, while the months at the field's ceiling answer,
+    /// as PostgreSQL 16 and 18 do.
+    #[test]
+    fn a_sum_that_leaves_a_field_range_is_refused() {
+        let mut months_ceiling = IntervalSum::default();
+        fold(&mut months_ceiling, "178956969 years 11 months", 1);
+        fold(&mut months_ceiling, "8 months", 1);
+        assert_eq!(
+            months_ceiling.sum(),
+            Ok(Some(interval("178956970 years 7 mons")))
+        );
+        let mut months_overflow = IntervalSum::default();
+        fold(&mut months_overflow, "2147483647 mons", 1);
+        assert!(
+            months_overflow.sum().is_ok(),
+            "the months' ceiling stays in range"
+        );
+        fold(&mut months_overflow, "1 mons", 1);
+        assert_eq!(months_overflow.sum(), Err(IntervalOutOfRange));
+        let mut days = IntervalSum::default();
+        fold(&mut days, "1500000000 days", 1);
+        fold(&mut days, "1500000000 days", 1);
+        assert_eq!(days.sum(), Err(IntervalOutOfRange));
+        // The total leaves the clock's range, which PostgreSQL 16 and 18 answer differently, so the stop serves the database's answer.
+        let mut clock = IntervalSum::default();
+        fold(&mut clock, "9223372036854775807 microseconds", 1);
+        assert!(
+            clock.sum().is_ok(),
+            "one of the ceiling's value stays in range"
+        );
+        fold(&mut clock, "9223372036854775807 microseconds", 1);
+        assert_eq!(clock.sum(), Err(IntervalOutOfRange));
+        // Each row keeps the total in range until it holds the infinity's own fields, which no answer can carry.
+        let mut sentinel = IntervalSum::default();
+        fold(&mut sentinel, "178956970 years 7 mons", 1);
+        assert!(sentinel.sum().is_ok(), "the months' ceiling stays in range");
+        fold(&mut sentinel, "2147483647 days", 1);
+        assert!(sentinel.sum().is_ok(), "the days' ceiling stays in range");
+        fold(&mut sentinel, "9223372036854775807 microseconds", 1);
+        assert_eq!(sentinel.sum(), Err(IntervalOutOfRange));
+        // The same fields read from their text are the infinity's own span.
+        assert_eq!(
+            interval("178956970 years 7 mons 2147483647 days 9223372036854775807 microseconds")
+                .span(),
+            sql_scalar_text::PgInterval::INFINITY
         );
     }
 
