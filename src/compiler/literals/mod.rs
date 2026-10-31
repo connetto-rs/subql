@@ -123,7 +123,11 @@ pub(crate) fn interval_literal(
     };
     // `SECOND(p)` alone carries its precision as the leading one.
     let precision = match (fields, interval.leading_precision) {
-        (Some(IntervalFields::Second), Some(precision)) => Some(precision),
+        (Some(IntervalFields::Second), Some(precision))
+            if interval.fractional_seconds_precision.is_none() =>
+        {
+            Some(precision)
+        }
         (_, None) => interval.fractional_seconds_precision,
         (_, Some(_)) => return Err(refused()),
     };
@@ -344,7 +348,6 @@ mod tests {
     #[test]
     fn a_typed_interval_postgres_refuses_is_refused() {
         for sql in [
-            "interval '1' week",
             "interval '1' hour(2)",
             "interval '1 fortnight'",
             "interval 5 hour",

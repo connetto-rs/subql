@@ -97,6 +97,7 @@ fn an_unreadable_interval_literal_is_refused() {
         "span = 3600",
         "span = interval '1' week",
         "span = interval '1' hour(2)",
+        "span = interval '1' second(2,3)",
         "span = interval x hour",
         "span IN (interval '1' week)",
     ] {
