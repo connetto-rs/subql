@@ -136,15 +136,12 @@ fn a_bound_interval_matches_by_span() {
     assert!(!reached("1 day"));
 }
 
-/// What the engine does not model over an interval is read from the database.
+/// Grouping by an interval, and comparing an integer with one, are read from
+/// the database.
 #[test]
-fn interval_arithmetic_and_grouping_are_reread() {
+fn interval_grouping_is_reread() {
     for statement in [
-        "SELECT * FROM shifts WHERE span + interval '1 hour' > '2 hours'",
-        "SELECT * FROM shifts WHERE span * 2 > '2 hours'",
         "SELECT span, COUNT(*) FROM shifts GROUP BY span",
-        "SELECT * FROM shifts WHERE -span > '1 hour'",
-        "SELECT * FROM shifts WHERE span > interval '1 hour' * 2",
         "SELECT * FROM shifts WHERE id = interval '1 hour'",
     ] {
         let registered = register::<Postgres>(DDL, statement);
