@@ -85,7 +85,9 @@ where
         }
         // `DECIMAL(p,s)` arrives as the replica's integer count of minor
         // units, `value × 10^s`.
-        if let Some(scale) = crate::catalog_helpers::minor_unit_scale(self.catalog, col) {
+        if let Some(scale) =
+            crate::catalog_helpers::minor_unit_scale(self.catalog, col.data_type(self.catalog))
+        {
             return Ok(match minor_units(col.column_name(), value, scale)? {
                 Some(decimal) => Box::new(DecimalBinder(decimal)),
                 None => Box::new(DefaultBinder::from(value)),

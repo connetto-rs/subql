@@ -172,6 +172,8 @@ where
             .get_result::<TextRow>(conn)?
             .v
             .map_or(Value::Null, B::value_from_string),
+        // subql holds no interval value, so the read escalates.
+        ScalarFamily::Interval => Value::Missing,
     };
     Ok(
         B::decode_group_value(crate::backend::ValueKind::from(kind), value)

@@ -220,6 +220,7 @@ impl PgOutputOrder {
                         },
                         lsn: change.lsn,
                         metadata: change.metadata.clone(),
+                        xid: change.xid,
                     };
                     rows.extend([PgChangeEvent::new(
                         single,
@@ -495,6 +496,7 @@ mod tests {
             },
             lsn: Lsn::new(0x10),
             metadata: None,
+            xid: None,
         });
         assert_eq!(ev.kind(), EventKind::Insert);
         assert_eq!(ev.pk_columns(&db), vec![0u16]);
@@ -544,6 +546,7 @@ mod tests {
             },
             lsn: Lsn::new(0),
             metadata: None,
+            xid: None,
         });
         assert_eq!(ev.kind(), EventKind::Update);
         assert_eq!(ev.pk_columns(&db), vec![0u16]);
@@ -586,6 +589,7 @@ mod tests {
             },
             lsn: Lsn::new(0),
             metadata: None,
+            xid: None,
         })
     }
 
@@ -611,6 +615,7 @@ mod tests {
             },
             lsn: Lsn::new(0),
             metadata: None,
+            xid: None,
         });
         assert!(
             ev.changed_columns(&db).is_empty(),
@@ -755,6 +760,7 @@ mod tests {
             },
             lsn: Lsn::new(0),
             metadata: None,
+            xid: None,
         });
         // Present-but-NULL decodes to Null.
         assert_eq!(ev.value_at(&db, RowKind::New, 3).unwrap(), Value::Null);
@@ -965,6 +971,7 @@ mod tests {
                 event_type: pg_walstream::EventType::StreamStop,
                 lsn: Lsn::new(0),
                 metadata: None,
+                xid: None,
             };
             let prepare = ChangeEvent::begin_prepare(
                 1,

@@ -125,6 +125,8 @@ macro_rules! postgres_like_backend {
 
             const RANGE_WITH_NULL_BOUND_COMPARES_DOUBLES: bool = false;
 
+            const NULL_ARITHMETIC_IS_AMBIGUOUS: bool = true;
+
             fn decimal_quotient(
                 dividend: bigdecimal::BigDecimal,
                 divisor: bigdecimal::BigDecimal,

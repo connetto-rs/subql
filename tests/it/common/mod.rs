@@ -7,7 +7,7 @@
 //! The Docker-backed helpers below run one server per engine per nextest
 //! run, looked up by name and label from every test process, with one
 //! database per test on it. Those require Docker. The Postgres image
-//! `subql-test/postgres-wal2json:16` is built from
+//! `subql-test/postgres-wal2json:16-pgvector` is built from
 //! `tests/fixtures/Dockerfile.postgres` on first use.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -45,7 +45,7 @@ pub mod store;
 pub mod throttle;
 
 const PG_IMAGE: &str = "subql-test/postgres-wal2json";
-const PG_TAG: &str = "16";
+const PG_TAG: &str = "16-pgvector";
 const PASSWORD: &str = "subql_test";
 const ENGINE_LABEL: &str = "subql.test.engine";
 const RUN_LABEL: &str = "subql.test.run";

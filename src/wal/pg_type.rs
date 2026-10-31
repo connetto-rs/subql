@@ -67,6 +67,8 @@ pub(super) fn text_to_pg_value_by_kind(text: &str, kind: DeclaredType) -> Value<
         ScalarFamily::Jsonb => serde_json::from_str(text).map_or(Value::Missing, Value::Jsonb),
         // Answered above, where the width decides.
         ScalarFamily::Float => Value::Missing,
+        // subql holds no interval value.
+        ScalarFamily::Interval => Value::Missing,
     }
 }
 
@@ -195,6 +197,8 @@ fn json_value_by_kind<B: JsonWireScalars>(
         ScalarFamily::Jsonb => B::document(value).map_or(Value::Missing, Value::Jsonb),
         // Answered above, where the width decides.
         ScalarFamily::Float => Value::Missing,
+        // subql holds no interval value.
+        ScalarFamily::Interval => Value::Missing,
     }
 }
 
@@ -1012,6 +1016,23 @@ mod tests {
         );
         assert_eq!(
             text_to_pg_value_by_kind("2026-01-01 00:00:00+00", declared(ScalarFamily::Timestamp)),
+            Value::Missing
+        );
+    }
+
+    /// An interval cell is undecodable on both wire paths, so the event
+    /// escalates and a predicate on the column is re-executed rather than
+    /// answered from a value subql cannot hold.
+    #[test]
+    fn an_interval_cell_is_undecodable_on_both_wire_paths() {
+        let interval = declared(ScalarFamily::Interval);
+        assert_eq!(interval.family(), ScalarFamily::Interval);
+        assert_eq!(
+            text_to_pg_value_by_kind("00:15:00", interval),
+            Value::Missing
+        );
+        assert_eq!(
+            json_value_to_pg_value_by_kind(&serde_json::json!("00:15:00"), interval),
             Value::Missing
         );
     }

@@ -114,6 +114,8 @@ pub enum DeclaredType {
     Json,
     /// Binary JSON.
     Jsonb,
+    /// Time interval.
+    Interval,
 }
 
 impl DeclaredType {
@@ -135,6 +137,7 @@ impl DeclaredType {
             Self::TimestampTz => ScalarFamily::TimestampTz,
             Self::Json => ScalarFamily::Json,
             Self::Jsonb => ScalarFamily::Jsonb,
+            Self::Interval => ScalarFamily::Interval,
         }
     }
 
@@ -208,6 +211,7 @@ pub const fn declared_type_of(
         ScalarFamily::TimestampTz => DeclaredType::TimestampTz,
         ScalarFamily::Json => DeclaredType::Json,
         ScalarFamily::Jsonb => DeclaredType::Jsonb,
+        ScalarFamily::Interval => DeclaredType::Interval,
     }
 }
 
@@ -305,6 +309,7 @@ mod declared_type_serde {
             DeclaredType::Float(FloatWidth::Single) => 13,
             DeclaredType::Text(TextWidth::Fixed) => 14,
             DeclaredType::Int(IntWidth::UpToThirtyTwo) => 15,
+            DeclaredType::Interval => 16,
         }
     }
 
@@ -326,6 +331,7 @@ mod declared_type_serde {
             13 => DeclaredType::Float(FloatWidth::Single),
             14 => DeclaredType::Text(TextWidth::Fixed),
             15 => DeclaredType::Int(IntWidth::UpToThirtyTwo),
+            16 => DeclaredType::Interval,
             _ => return None,
         })
     }
@@ -449,6 +455,7 @@ mod scalar_kind_serde_tests {
             (13, DeclaredType::Float(FloatWidth::Single)),
             (14, DeclaredType::Text(TextWidth::Fixed)),
             (15, DeclaredType::Int(IntWidth::UpToThirtyTwo)),
+            (16, DeclaredType::Interval),
         ] {
             let stored = ScalarKind::<TestCustom>::Builtin(kind);
             let encoded = postcard::to_allocvec(&stored).unwrap();
@@ -462,7 +469,7 @@ mod scalar_kind_serde_tests {
 
     #[test]
     fn scalar_kind_rejects_an_unknown_builtin_tag() {
-        assert!(postcard::from_bytes::<ScalarKind<TestCustom>>(&[0, 16]).is_err());
+        assert!(postcard::from_bytes::<ScalarKind<TestCustom>>(&[0, 17]).is_err());
     }
 
     /// A comparison's persisted bytes, pinned because the compiled program

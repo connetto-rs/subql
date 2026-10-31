@@ -68,6 +68,9 @@ mod apply_patchset_pg_e2e;
 mod apply_patchset_pg_rich_scalars_e2e;
 
 #[cfg(feature = "apply-patchset-postgres")]
+mod apply_patchset_pg_arrays_e2e;
+
+#[cfg(feature = "apply-patchset-postgres")]
 mod apply_patchset_pg_uuid_e2e;
 
 #[cfg(feature = "apply-patchset-sqlite")]
@@ -402,6 +405,8 @@ mod semantics_collation_pairs;
 mod semantics_cross_kind;
 
 mod semantics_arith_overflow;
+
+mod untyped_null_arithmetic;
 
 mod semantics_div_zero;
 
