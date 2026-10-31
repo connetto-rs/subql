@@ -58,6 +58,16 @@ pub(super) fn nested_column_scalar_of<B: Backend, DB: DatabaseLike>(
     }
     match expr {
         Expr::BinaryOp { left, op, right } => {
+            if let Ok(Some(plan)) = super::temporal_arithmetic::plan::<B, DB>(
+                op,
+                left,
+                right,
+                table_id,
+                database,
+                depth + 1,
+            ) {
+                return Some(plan.result.into());
+            }
             let operand = nested_column_scalar_of::<B, DB>(left, table_id, database, depth + 1)
                 .or_else(|| nested_column_scalar_of::<B, DB>(right, table_id, database, depth + 1));
             quotient_kind::<B>(op, operand)
@@ -101,8 +111,7 @@ fn comparison_target<B: Backend, DB: DatabaseLike>(
 /// comparison reads, `inherited`. A result of another kind is refused to a
 /// read, since `r > (1 / 2)` divides integers to `0` where reading them at the
 /// float column's kind gives `0.5`. With no literal naming a kind either, the
-/// operands are read at `inherited`. Arithmetic over an interval is read from
-/// the database, since its operands are of other kinds.
+/// operands are read at `inherited`.
 fn arithmetic_target<B: Backend, DB: DatabaseLike>(
     op: &BinaryOperator,
     left: &Expr,
@@ -112,30 +121,23 @@ fn arithmetic_target<B: Backend, DB: DatabaseLike>(
     database: &DB,
     depth: usize,
 ) -> Result<ValueKindOf<B>, RegisterError> {
-    let kind = if let Some(kind) = nested_column_scalar_of::<B, DB>(left, table_id, database, depth)
+    if let Some(kind) = nested_column_scalar_of::<B, DB>(left, table_id, database, depth)
         .or_else(|| nested_column_scalar_of::<B, DB>(right, table_id, database, depth))
     {
-        kind
-    } else {
-        let operands = agreeing_kind::<B>(
-            literal_kind::<B>(left, depth)?,
-            literal_kind::<B>(right, depth)?,
-        )?;
-        match operands {
-            Some(kind) if quotient_kind::<B>(op, Some(kind)) == Some(inherited) => kind,
-            Some(_) => return Err(RegisterError::UnsupportedSql(
-                "arithmetic over literals is served where it answers the kind it is compared with"
-                    .to_string(),
-            )),
-            None => inherited,
-        }
-    };
-    if kind == ScalarFamily::Interval.into() {
-        return Err(RegisterError::UnsupportedSql(
-            "arithmetic over an interval is read from the database".to_string(),
-        ));
+        return Ok(kind);
     }
-    Ok(kind)
+    let operands = agreeing_kind::<B>(
+        literal_kind::<B>(left, depth)?,
+        literal_kind::<B>(right, depth)?,
+    )?;
+    match operands {
+        Some(kind) if quotient_kind::<B>(op, Some(kind)) == Some(inherited) => Ok(kind),
+        Some(_) => Err(RegisterError::UnsupportedSql(
+            "arithmetic over literals is served where it answers the kind it is compared with"
+                .to_string(),
+        )),
+        None => Ok(inherited),
+    }
 }
 
 /// The kind the literals in `expr` name, looking through arithmetic and
@@ -585,6 +587,41 @@ where
                     refuse_condition_operand(right)?;
                     refuse_literal_foreign_to_coalesce::<B, DB>(left, right, table_id, database)?;
 
+                    // An interval, or a date or time it moves, reads each
+                    // operand at its own kind and answers a third.
+                    if let Some(plan) = super::temporal_arithmetic::plan::<B, DB>(
+                        op, left, right, table_id, database, depth,
+                    )? {
+                        compile_expr_recursive::<B, DB>(
+                            left,
+                            table_id,
+                            database,
+                            out,
+                            depth + 1,
+                            plan.left.into(),
+                        )?;
+                        compile_expr_recursive::<B, DB>(
+                            right,
+                            table_id,
+                            database,
+                            out,
+                            depth + 1,
+                            plan.right.into(),
+                        )?;
+                        let width = B::float_arithmetic_width(
+                            float_result_width::<B, DB>(left, table_id, database, depth),
+                            float_result_width::<B, DB>(right, table_id, database, depth),
+                        );
+                        let instruction = match op {
+                            BinaryOperator::Plus => Instruction::Add(width),
+                            BinaryOperator::Minus => Instruction::Subtract(width),
+                            BinaryOperator::Multiply => Instruction::Multiply(width),
+                            _ => Instruction::Divide(width, out.quotient()?),
+                        };
+                        out.push(instruction);
+                        return Ok(());
+                    }
+
                     // Non-short-circuit operators: compile both sides,
                     // then emit the op. Target-typed literal inference
                     // picks whichever sibling is a column reference and
@@ -1017,7 +1054,11 @@ where
                 }
                 UnaryOperator::Minus => {
                     refuse_null_arithmetic::<B>(&[inner])?;
-                    refuse_non_numeric_operand::<B, DB>(inner, table_id, database, depth)?;
+                    if !super::temporal_arithmetic::is_interval::<B, DB>(
+                        inner, table_id, database, depth,
+                    ) {
+                        refuse_non_numeric_operand::<B, DB>(inner, table_id, database, depth)?;
+                    }
                     out.push(Instruction::Negate(float_result_width::<B, DB>(
                         expr, table_id, database, depth,
                     )));
