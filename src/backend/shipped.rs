@@ -169,6 +169,8 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> Backend for Postgres<V> {
     /// Measured: `(NULL = 1) IS UNKNOWN` is true.
     const READS_IS_UNKNOWN: bool = true;
 
+    const HAS_INTERVAL: bool = true;
+
     /// Measured: `b BETWEEN NULL AND (b - 1)` is false with `b` a `bigint`
     /// holding 9007199254740993, since the `NULL` takes the type of `b`.
     const RANGE_WITH_NULL_BOUND_COMPARES_DOUBLES: bool = false;
@@ -602,6 +604,9 @@ impl<C: MySqlTableNameCase> Backend for MySql<C> {
     /// Measured: `(NULL = 1) IS UNKNOWN` is `1`.
     const READS_IS_UNKNOWN: bool = true;
 
+    /// MySQL has no interval type, only `INTERVAL` as date arithmetic syntax.
+    const HAS_INTERVAL: bool = false;
+
     /// Measured on 8.0.46: `b BETWEEN NULL AND (b - 1)` is `NULL` with `b` a
     /// `BIGINT` holding 9007199254740993, and so is the range with the bound
     /// `NULL + 0`, while `b BETWEEN 0 AND (b - 1)` is `0`.
@@ -882,6 +887,9 @@ impl Backend for SQLite {
     /// Measured on 3.51: `x IS UNKNOWN` fails with `no such column: UNKNOWN`,
     /// since the word is read as a name.
     const READS_IS_UNKNOWN: bool = false;
+
+    /// SQLite stores an `INTERVAL` column's text and compares it as text.
+    const HAS_INTERVAL: bool = false;
 
     /// Measured on 3.51: `b BETWEEN NULL AND (b - 1)` is `0` with `b` an
     /// `INTEGER` holding 9007199254740993, since SQLite compares by value.

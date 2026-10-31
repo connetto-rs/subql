@@ -10,9 +10,9 @@
 //!   wrapper that owns a diesel `SqliteConnection`, attaches tables to a
 //!   SQLite session, calls `.changeset()` on poll, and feeds the bytes to
 //!   the parser. Gated behind the `sqlite-cdc` cargo feature because it
-//!   pulls `diesel-sqlite-session` (which needs the diesel `future`
-//!   branch already pinned in the top-level `[patch.crates-io]`). Not
-//!   part of the `no_std + alloc` surface.
+//!   pulls `diesel-sqlite-session`, which needs the unreleased diesel the
+//!   top-level `[patch.crates-io]` names. Not part of the `no_std + alloc`
+//!   surface.
 //!
 //! Mirror of how the pgoutput decode path is unconditional while
 //! [`crate::PgStreamingCdcSource`] hides behind the `pg-streaming`

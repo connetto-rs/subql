@@ -40,7 +40,7 @@
 use bigdecimal::BigDecimal;
 use core::str::FromStr as _;
 use proptest::prelude::*;
-use subql::backend::{Backend, ScalarFamily, Value};
+use subql::backend::{Backend, Interval, ScalarFamily, Value};
 
 use super::oracle::Engine;
 
@@ -191,6 +191,14 @@ pub const COLUMNS: &[ColumnSpec] = &[
         name: "binary_document",
         kind: ScalarFamily::Jsonb,
         postgres: Some("JSONB"),
+        mysql: None,
+        sqlite: None,
+    },
+    ColumnSpec {
+        name: "span",
+        kind: ScalarFamily::Interval,
+        postgres: Some("INTERVAL"),
+        // MySQL has no interval type, and SQLite compares the stored text.
         mysql: None,
         sqlite: None,
     },
@@ -360,6 +368,8 @@ pub enum Cell {
     Decimal(BigDecimal),
     Text(String),
     Bytes(Vec<u8>),
+    /// A PostgreSQL interval, whose carrier every backend shares.
+    Interval(Interval),
 }
 
 impl Cell {
@@ -381,6 +391,7 @@ impl Cell {
             Self::Decimal(value) => value.to_string(),
             Self::Text(text) => format!("'{}'", text.replace('\'', "''")),
             Self::Bytes(bytes) => format!("'{}'", hex(bytes)),
+            Self::Interval(interval) => format!("interval '{interval}'"),
         }
     }
 
@@ -460,6 +471,7 @@ impl Cell {
             Self::Decimal(value) => Value::Decimal(value.clone()),
             Self::Text(text) => Value::String(text.clone()),
             Self::Bytes(bytes) => Value::Bytes(bytes.clone().into()),
+            Self::Interval(interval) => Value::Interval(*interval),
         }
     }
 }
@@ -726,15 +738,30 @@ pub fn cell_strategy(
             ]
             .boxed(),
         ),
+        ScalarFamily::Interval => Some(interval_strategy().boxed()),
         ScalarFamily::Uuid
         | ScalarFamily::Date
         | ScalarFamily::Time
         | ScalarFamily::Timestamp
         | ScalarFamily::TimestampTz
         | ScalarFamily::Json
-        | ScalarFamily::Jsonb
-        | ScalarFamily::Interval => None,
+        | ScalarFamily::Jsonb => None,
     }
+}
+
+/// Intervals that spell one span three ways and one with mixed signs, so
+/// equality and ordering by span are both exercised. The infinities are
+/// left out because the PostgreSQL 16 the oracle runs has none.
+fn interval_strategy() -> impl Strategy<Value = Cell> {
+    let interval = |text| Cell::Interval(Interval::parse(text).expect("a PostgreSQL interval"));
+    prop_oneof![
+        Just(interval("01:00:00")),
+        Just(interval("1 mon")),
+        Just(interval("30 days")),
+        Just(interval("720:00:00")),
+        Just(interval("-1 days +02:00:00")),
+        Just(Cell::Null),
+    ]
 }
 
 /// A predicate over the generated schema, in the forms each corrected
@@ -834,6 +861,10 @@ pub fn predicate_forms(engine: Engine) -> Vec<String> {
         forms.push("unbounded_nondet = 'AB'".to_string());
         forms.push("unbounded_bytes ILIKE 'ab'".to_string());
         forms.push("exact / 3 > 0.33333333333333333333".to_string());
+        // Equality and ordering of intervals by span, and an `IN` list of them.
+        forms.push("span = interval '30 days'".to_string());
+        forms.push("span > '29 days'".to_string());
+        forms.push("span IN (interval '1 hour', '720 hours')".to_string());
     }
     if engine == Engine::MySql {
         forms.push("exact / 3 > 0.333333333".to_string());
@@ -869,7 +900,12 @@ pub fn served_forms(engine: Engine) -> Vec<&'static str> {
         forms.extend(["narrow <=> wide", "NOT (narrow <=> 3)"]);
     }
     if engine == Engine::Postgres {
-        forms.push(r"unbounded_bytes ILIKE 'A!%' ESCAPE '!'");
+        forms.extend([
+            r"unbounded_bytes ILIKE 'A!%' ESCAPE '!'",
+            "span = interval '30 days'",
+            "span > '29 days'",
+            "span IN (interval '1 hour', '720 hours')",
+        ]);
     }
     forms
 }
@@ -906,6 +942,7 @@ mod tests {
             ScalarFamily::TimestampTz,
             ScalarFamily::Json,
             ScalarFamily::Jsonb,
+            ScalarFamily::Interval,
         ] {
             assert!(
                 COLUMNS.iter().any(|column| column.kind == kind),
@@ -927,7 +964,6 @@ mod tests {
                 | ScalarFamily::TimestampTz
                 | ScalarFamily::Json
                 | ScalarFamily::Jsonb
-                // subql holds no interval value, so no column generates one.
                 | ScalarFamily::Interval => {}
             }
         }
@@ -1223,6 +1259,7 @@ mod tests {
             ScalarFamily::Decimal,
             ScalarFamily::String,
             ScalarFamily::Bytes,
+            ScalarFamily::Interval,
         ] {
             assert!(
                 cell_strategy(kind, "INT", Engine::Postgres).is_some(),

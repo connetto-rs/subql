@@ -487,9 +487,8 @@ pub fn column_comparison<B: crate::backend::Backend, DB: DatabaseLike>(
 pub(crate) fn classify_scalar_kind<B: crate::backend::Backend>(
     declared_type: &str,
 ) -> Option<ScalarKindOf<B>> {
-    // subql holds no interval value, so an interval predicate is re-executed.
     if let Some(family) = scalar_family(declared_type)
-        .filter(|family| *family != crate::backend::ScalarFamily::Interval)
+        .filter(|family| *family != crate::backend::ScalarFamily::Interval || B::HAS_INTERVAL)
     {
         // The family is upstream's coarse answer; the refinements the
         // declaration fixes are the backend's, because the spellings differ

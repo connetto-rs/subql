@@ -289,6 +289,9 @@ mod reexec_mysql_async;
 #[cfg(feature = "executor-diesel-postgres")]
 mod reexec_postgres;
 
+#[cfg(feature = "executor-diesel-postgres")]
+mod interval_postgres_e2e;
+
 // Docker-backed integration test for AsyncAutoResolvingEngine +
 // PgAsyncDieselConnector against a real Postgres with logical replication.
 // Run with:
@@ -415,6 +418,8 @@ mod semantics_division;
 mod semantics_ilike;
 
 mod semantics_missing_cell;
+
+mod semantics_interval;
 
 mod null_safe_equality;
 

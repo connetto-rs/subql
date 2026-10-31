@@ -59,6 +59,7 @@ mod bound_query_wire {
         Json(Vec<u8>),
         Jsonb(Vec<u8>),
         Custom(<B::Custom as crate::backend::CustomScalars>::Value),
+        Interval(crate::backend::Interval),
     }
 
     impl<B: Backend> Bind<B> {
@@ -80,6 +81,7 @@ mod bound_query_wire {
                 Self::Json(bytes) => Value::Json(serde_json::from_slice(&bytes)?),
                 Self::Jsonb(bytes) => Value::Jsonb(serde_json::from_slice(&bytes)?),
                 Self::Custom(value) => Value::Custom(value),
+                Self::Interval(value) => Value::Interval(value),
             })
         }
     }
@@ -139,6 +141,9 @@ mod bound_query_wire {
                 ),
                 Value::Custom(value) => {
                     serializer.serialize_newtype_variant("Bind", 15, "Custom", value)
+                }
+                Value::Interval(value) => {
+                    serializer.serialize_newtype_variant("Bind", 16, "Interval", value)
                 }
             }
         }
@@ -447,6 +452,15 @@ mod tests {
             any::<i64>().prop_map(|value| Value::Decimal(bigdecimal::BigDecimal::from(value))),
             arb_json().prop_map(Value::Json),
             arb_json().prop_map(Value::Jsonb),
+            any::<(i32, i32, i64)>().prop_map(|(months, days, microseconds)| {
+                Value::Interval(crate::backend::Interval::from(
+                    sql_scalar_text::PgInterval {
+                        months,
+                        days,
+                        microseconds,
+                    },
+                ))
+            }),
         ]
         .boxed()
     }
@@ -478,6 +492,10 @@ mod tests {
             ),
             Value::Json(serde_json::json!({"bind": [1, true, null]})),
             Value::Jsonb(serde_json::json!({"bindb": {"nested": "value"}})),
+            Value::Interval(
+                crate::backend::Interval::parse("1 year 2 mons -3 days +04:05:06.789")
+                    .expect("valid interval"),
+            ),
         ]
     }
 

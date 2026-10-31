@@ -472,6 +472,35 @@ mod scalar_kind_serde_tests {
         assert!(postcard::from_bytes::<ScalarKind<TestCustom>>(&[0, 17]).is_err());
     }
 
+    /// An interval names the interval kind, and the exact group value of a
+    /// kind answers only a value that names that kind back.
+    #[test]
+    fn an_interval_value_names_its_kind_and_answers_only_for_it() {
+        use super::{decode_exact_group_value, Value};
+        use crate::backend::{Interval, Postgres, ValueKind};
+
+        let span = Interval::parse("1 mon").expect("PostgreSQL reads this interval");
+        let value: Value<Postgres> = Value::Interval(span);
+        assert_eq!(
+            value.scalar_kind(),
+            Some(ValueKind::Builtin(ScalarFamily::Interval)),
+            "a span names the interval kind"
+        );
+        assert_eq!(
+            decode_exact_group_value::<Postgres>(
+                ValueKind::Builtin(ScalarFamily::Interval),
+                value.clone()
+            ),
+            Some(Value::Interval(span)),
+            "a span answers for the interval kind"
+        );
+        assert_eq!(
+            decode_exact_group_value::<Postgres>(ValueKind::Builtin(ScalarFamily::Int), value),
+            None,
+            "and refuses to answer for another"
+        );
+    }
+
     /// A comparison's persisted bytes, pinned because the compiled program
     /// carries them and a reader refuses only a version it was told about.
     ///
@@ -1911,6 +1940,8 @@ pub enum Carried<'a, B: Backend> {
     Json(&'a B::Json),
     /// [`Backend::Jsonb`] payload.
     Jsonb(&'a B::Jsonb),
+    /// [`Interval`](crate::backend::Interval) payload.
+    Interval(&'a crate::backend::Interval),
 }
 
 /// A scalar value carried in the VM's evaluation stack, or as a literal
@@ -1960,6 +1991,9 @@ pub enum Value<B: Backend> {
     /// One of the embedder's own types, decoded through
     /// [`CustomScalars::convert`].
     Custom(<B::Custom as CustomScalars>::Value),
+    /// A PostgreSQL `interval`, declared after [`Value::Custom`] so the
+    /// tags persisted before it keep their meaning.
+    Interval(crate::backend::Interval),
 }
 
 impl<B: Backend> Value<B> {
@@ -1982,6 +2016,7 @@ impl<B: Backend> Value<B> {
             Self::Decimal(_) => ValueKind::Builtin(ScalarFamily::Decimal),
             Self::Json(_) => ValueKind::Builtin(ScalarFamily::Json),
             Self::Jsonb(_) => ValueKind::Builtin(ScalarFamily::Jsonb),
+            Self::Interval(_) => ValueKind::Builtin(ScalarFamily::Interval),
             Self::Custom(value) => ValueKind::Custom(<B::Custom as CustomScalars>::kind_of(value)),
         })
     }
@@ -2008,6 +2043,7 @@ impl<B: Backend> Value<B> {
             Self::Decimal(x) => Carried::Decimal(x),
             Self::Json(x) => Carried::Json(x),
             Self::Jsonb(x) => Carried::Jsonb(x),
+            Self::Interval(x) => Carried::Interval(x),
         })
     }
 
@@ -2056,6 +2092,7 @@ impl<B: Backend> Clone for Value<B> {
             Self::Json(x) => Self::Json(x.clone()),
             Self::Jsonb(x) => Self::Jsonb(x.clone()),
             Self::Custom(x) => Self::Custom(x.clone()),
+            Self::Interval(x) => Self::Interval(*x),
         }
     }
 }
@@ -2079,6 +2116,7 @@ impl<B: Backend> core::fmt::Debug for Value<B> {
             Self::Json(x) => f.debug_tuple("Json").field(x).finish(),
             Self::Custom(x) => f.debug_tuple("Custom").field(x).finish(),
             Self::Jsonb(x) => f.debug_tuple("Jsonb").field(x).finish(),
+            Self::Interval(x) => f.debug_tuple("Interval").field(x).finish(),
         }
     }
 }
@@ -2105,6 +2143,7 @@ impl<B: Backend> PartialEq for Value<B> {
             // equal custom values, which is the silent wrong answer the
             // wildcard hides from the compiler.
             (Self::Custom(a), Self::Custom(b)) => a == b,
+            (Self::Interval(a), Self::Interval(b)) => a == b,
             _ => false,
         }
     }

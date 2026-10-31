@@ -21,8 +21,8 @@ use diesel::pg::data_types::PgNumeric;
 use diesel::pg::Pg;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types::{
-    Array, BigInt, Bool, Date, Double, HasSqlType, Json as JsonSql, Jsonb, Numeric, Text, Time,
-    Timestamp, Timestamptz,
+    Array, BigInt, Bool, Date, Double, HasSqlType, Interval as IntervalSql, Json as JsonSql, Jsonb,
+    Numeric, Text, Time, Timestamp, Timestamptz,
 };
 use serde_json::Value as Json;
 use sqlite_diff_rs::Binder;
@@ -177,8 +177,9 @@ pub(super) fn bind_builtin_array(
         ScalarFamily::TimestampTz => bind_array_as::<Timestamptz>(array, encode_timestamptz),
         ScalarFamily::Json => bind_array_as::<JsonSql>(array, encode_json),
         ScalarFamily::Jsonb => bind_array_as::<Jsonb>(array, encode_jsonb),
-        // A replica holds no array of BLOB-stored elements, and subql reads no interval text.
-        ScalarFamily::Bytes | ScalarFamily::Uuid | ScalarFamily::Interval => None,
+        ScalarFamily::Interval => bind_array_as::<IntervalSql>(array, encode_interval),
+        // A replica holds no array of BLOB-stored elements.
+        ScalarFamily::Bytes | ScalarFamily::Uuid => None,
     }
 }
 
@@ -197,6 +198,16 @@ fn encode_text(value: &Json) -> Option<Vec<u8>> {
 fn encode_date(value: &Json) -> Option<Vec<u8>> {
     let days = (sql_scalar_text::parse_date(value.as_str()?)? - pg_epoch_date()).num_days();
     Some(i32::try_from(days).ok()?.to_be_bytes().to_vec())
+}
+
+/// An interval element, its binary format being microseconds, days, then months.
+fn encode_interval(value: &Json) -> Option<Vec<u8>> {
+    let interval = sql_scalar_text::parse_interval(value.as_str()?)?;
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(&interval.microseconds.to_be_bytes());
+    bytes.extend_from_slice(&interval.days.to_be_bytes());
+    bytes.extend_from_slice(&interval.months.to_be_bytes());
+    Some(bytes)
 }
 
 fn encode_time(value: &Json) -> Option<Vec<u8>> {
@@ -421,7 +432,7 @@ mod tests {
     #[test]
     fn an_element_that_does_not_read_as_its_type_does_not_encode() {
         type Encode = fn(&Json) -> Option<Vec<u8>>;
-        let refusals: [(&str, Encode, [Json; 2]); 11] = [
+        let refusals: [(&str, Encode, [Json; 2]); 12] = [
             ("int", encode_int, [json!(1.5), json!("1")]),
             ("float", encode_float, [json!("1.5"), json!(true)]),
             ("text", encode_text, [json!(1), json!(true)]),
@@ -433,6 +444,11 @@ mod tests {
             ("timestamptz", encode_timestamptz, [json!(1), json!("noon")]),
             ("json", encode_json, [json!(1), json!("{")]),
             ("jsonb", encode_jsonb, [json!(1), json!("{")]),
+            (
+                "interval",
+                encode_interval,
+                [json!(1), json!("1 fortnight")],
+            ),
         ];
         for (name, encode, values) in refusals {
             for value in values {
@@ -516,6 +532,7 @@ mod tests {
             (ScalarFamily::TimestampTz, "[\"2024-03-04 05:06:07+00:00\"]"),
             (ScalarFamily::Json, "[\"{}\"]"),
             (ScalarFamily::Jsonb, "[\"[]\"]"),
+            (ScalarFamily::Interval, "[\"00:15:00\",null]"),
         ] {
             let array = PgArray::parse(text).unwrap();
             assert!(bind_builtin_array(family, &array).is_some(), "{family:?}");
@@ -526,13 +543,22 @@ mod tests {
     fn an_array_binds_only_when_every_element_encodes() {
         let ints = PgArray::parse("[1,null,2]").unwrap();
         assert!(bind_builtin_array(ScalarFamily::Date, &ints).is_none());
-        for family in [
-            ScalarFamily::Bytes,
-            ScalarFamily::Uuid,
-            ScalarFamily::Interval,
-        ] {
+        for family in [ScalarFamily::Bytes, ScalarFamily::Uuid] {
             assert!(bind_builtin_array(family, &ints).is_none(), "{family:?}");
         }
+    }
+
+    /// An interval element keeps its microseconds, days and months apart, in
+    /// PostgreSQL's binary order.
+    #[test]
+    fn an_interval_element_encodes_its_three_fields() {
+        let mut expected = 14_706_789_000_i64.to_be_bytes().to_vec();
+        expected.extend_from_slice(&(-3_i32).to_be_bytes());
+        expected.extend_from_slice(&14_i32.to_be_bytes());
+        assert_eq!(
+            encode_interval(&json!("1 year 2 mons -3 days +04:05:06.789")),
+            Some(expected)
+        );
     }
 
     #[test]

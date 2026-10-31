@@ -108,7 +108,8 @@ impl DieselBackend for crate::backend::Postgres {
             | Value::Uuid(_)
             | Value::TimestampTz(_)
             | Value::Jsonb(_)
-            | Value::Custom(_) => return None,
+            | Value::Custom(_)
+            | Value::Interval(_) => return None,
         })
     }
 }
@@ -127,7 +128,11 @@ impl<C: crate::backend::MySqlTableNameCase> DieselBackend for crate::backend::My
             Value::Time(value) => DieselReadBind::Time(value),
             Value::Decimal(value) => DieselReadBind::Decimal(value),
             Value::Json(value) | Value::Jsonb(value) => DieselReadBind::Json(value),
-            Value::Missing | Value::Null | Value::TimestampTz(_) | Value::Custom(_) => return None,
+            Value::Missing
+            | Value::Null
+            | Value::TimestampTz(_)
+            | Value::Custom(_)
+            | Value::Interval(_) => return None,
         })
     }
     fn double_cast_type() -> &'static str {
@@ -156,7 +161,11 @@ impl DieselBackend for crate::backend::SQLite {
                 crate::backend::SqliteJsonStorage::Real(value) => DieselReadBind::Float(value),
                 crate::backend::SqliteJsonStorage::Blob(value) => DieselReadBind::Bytes(value),
             },
-            Value::Missing | Value::Null | Value::TimestampTz(_) | Value::Custom(_) => return None,
+            Value::Missing
+            | Value::Null
+            | Value::TimestampTz(_)
+            | Value::Custom(_)
+            | Value::Interval(_) => return None,
         })
     }
 }
@@ -263,6 +272,19 @@ where
     Ok(boxed)
 }
 
+/// diesel's form of an interval bind, the same three fields.
+#[cfg(any(
+    feature = "executor-diesel-postgres",
+    feature = "executor-diesel-async-postgres"
+))]
+const fn diesel_interval(interval: crate::backend::Interval) -> diesel::pg::data_types::PgInterval {
+    diesel::pg::data_types::PgInterval::new(
+        interval.microseconds(),
+        interval.days(),
+        interval.months(),
+    )
+}
+
 /// Build a Postgres-specific boxed query with borrowed binds.
 ///
 /// Uses `sql_query` because the re-execution query is user-supplied SQL
@@ -287,6 +309,9 @@ pub(super) fn boxed_postgres_read_query<'a>(
             Value::Decimal(value) => boxed.bind::<Numeric, _>(value),
             Value::Json(value) => boxed.bind::<Json, _>(value),
             Value::Jsonb(value) => boxed.bind::<diesel::sql_types::Jsonb, _>(value),
+            Value::Interval(value) => {
+                boxed.bind::<diesel::sql_types::Interval, _>(diesel_interval(*value))
+            }
             Value::Missing | Value::Null | Value::Custom(_) => {
                 return Err(diesel::result::Error::QueryBuilderError(Box::new(
                     UnsupportedReadBinds,
@@ -321,6 +346,9 @@ pub fn boxed_postgres_read_query_owned(
             Value::Decimal(value) => boxed.bind::<Numeric, _>(value.clone()),
             Value::Json(value) => boxed.bind::<Json, _>(value.clone()),
             Value::Jsonb(value) => boxed.bind::<diesel::sql_types::Jsonb, _>(value.clone()),
+            Value::Interval(value) => {
+                boxed.bind::<diesel::sql_types::Interval, _>(diesel_interval(*value))
+            }
             Value::Missing | Value::Null | Value::Custom(_) => {
                 return Err(diesel::result::Error::QueryBuilderError(Box::new(
                     UnsupportedReadBinds,
@@ -351,7 +379,11 @@ pub fn boxed_mysql_read_query_owned<C: crate::backend::MySqlTableNameCase>(
             Value::Time(value) => boxed.bind::<Time, _>(*value),
             Value::Decimal(value) => boxed.bind::<Numeric, _>(value.clone()),
             Value::Json(value) | Value::Jsonb(value) => boxed.bind::<Json, _>(value.clone()),
-            Value::Missing | Value::Null | Value::TimestampTz(_) | Value::Custom(_) => {
+            Value::Missing
+            | Value::Null
+            | Value::TimestampTz(_)
+            | Value::Custom(_)
+            | Value::Interval(_) => {
                 return Err(diesel::result::Error::QueryBuilderError(Box::new(
                     UnsupportedReadBinds,
                 )));
@@ -359,4 +391,49 @@ pub fn boxed_mysql_read_query_owned<C: crate::backend::MySqlTableNameCase>(
         };
     }
     Ok(boxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+
+    use super::{boxed_read_query, ReadQuery, Value};
+    use crate::backend::{Interval, MySql, Postgres, SQLite};
+    use diesel::result::Error;
+
+    /// The generic re-execution read carries no interval bind, so a query
+    /// that binds an interval refuses at construction on every diesel
+    /// backend, never at the connection. The PostgreSQL page read alone
+    /// takes the interval-native query builder beside it.
+    #[test]
+    fn a_generic_read_query_refuses_an_interval_bind() {
+        let span = Interval::parse("1 day").expect("PostgreSQL reads this interval");
+        let postgres =
+            ReadQuery::<Postgres>::owned(String::from("SELECT 1"), vec![Value::Interval(span)]);
+        assert!(
+            matches!(
+                boxed_read_query::<diesel::pg::Pg, Postgres>(&postgres),
+                Err(Error::QueryBuilderError(_))
+            ),
+            "the generic read refuses an interval bind"
+        );
+        let mysql =
+            ReadQuery::<MySql>::owned(String::from("SELECT 1"), vec![Value::Interval(span)]);
+        assert!(
+            matches!(
+                boxed_read_query::<diesel::mysql::Mysql, MySql>(&mysql),
+                Err(Error::QueryBuilderError(_))
+            ),
+            "the generic read refuses an interval bind"
+        );
+        let sqlite =
+            ReadQuery::<SQLite>::owned(String::from("SELECT 1"), vec![Value::Interval(span)]);
+        assert!(
+            matches!(
+                boxed_read_query::<diesel::sqlite::Sqlite, SQLite>(&sqlite),
+                Err(Error::QueryBuilderError(_))
+            ),
+            "the generic read refuses an interval bind"
+        );
+    }
 }
