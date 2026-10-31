@@ -2,9 +2,9 @@
 //!
 //! Registration admits these pairs only on the engine that has an interval,
 //! and only those whose answer does not depend on the session's time zone.
-//! A result PostgreSQL answers that `chrono` cannot hold, an infinite
-//! timestamp or one past the year 262142, is a missing value, so the event
-//! leaves that answer unknown.
+//! A timestamp PostgreSQL answers that `chrono` does not carry, an infinite
+//! one or one past the year 262142, is refused for the row with
+//! [`EvaluationRefusal::DatetimeUnrepresentable`].
 
 use alloc::string::ToString;
 use core::any::Any;
@@ -20,8 +20,10 @@ use crate::backend::{
 ///
 /// # Errors
 ///
-/// [`EvaluationRefusal::DatetimeOutOfRange`] where PostgreSQL raises, and
-/// [`EvaluationRefusal::OperandKinds`] for a pair it is not computed over.
+/// [`EvaluationRefusal::DatetimeOutOfRange`] where PostgreSQL raises,
+/// [`EvaluationRefusal::DatetimeUnrepresentable`] for a timestamp `chrono`
+/// does not carry, and [`EvaluationRefusal::OperandKinds`] for a pair it is
+/// not computed over.
 pub(super) fn add<B: Backend>(a: Value<B>, b: Value<B>) -> Result<Value<B>, EvaluationRefusal> {
     let operation = ArithmeticOp::Add;
     match (a, b) {
@@ -158,13 +160,9 @@ fn shifted<B: Backend>(
         // no time zone moves.
         Value::TimestampTz(at) if span.months() == 0 && span.days() == 0 => {
             let at = instant::<B>(&at, operation)?;
-            match shift_timestamp(at.naive_utc(), span) {
-                Ok(moved) => {
-                    same::<B::TimestampTz, _>(moved.and_utc(), operation).map(Value::TimestampTz)
-                }
-                Err(TimestampShift::Unrepresentable) => Ok(Value::Missing),
-                Err(TimestampShift::OutOfRange) => Err(out_of_range),
-            }
+            let moved =
+                shift_timestamp(at.naive_utc(), span).map_err(|error| refusal(error, operation))?;
+            same::<B::TimestampTz, _>(moved.and_utc(), operation).map(Value::TimestampTz)
         }
         _ => Err(EvaluationRefusal::OperandKinds { operation }),
     }
@@ -174,10 +172,14 @@ fn timestamp_value<B: Backend>(
     moved: Result<NaiveDateTime, TimestampShift>,
     operation: ArithmeticOp,
 ) -> Result<Value<B>, EvaluationRefusal> {
-    match moved {
-        Ok(moved) => same::<B::Timestamp, _>(moved, operation).map(Value::Timestamp),
-        Err(TimestampShift::Unrepresentable) => Ok(Value::Missing),
-        Err(TimestampShift::OutOfRange) => Err(EvaluationRefusal::DatetimeOutOfRange { operation }),
+    let moved = moved.map_err(|error| refusal(error, operation))?;
+    same::<B::Timestamp, _>(moved, operation).map(Value::Timestamp)
+}
+
+const fn refusal(error: TimestampShift, operation: ArithmeticOp) -> EvaluationRefusal {
+    match error {
+        TimestampShift::OutOfRange => EvaluationRefusal::DatetimeOutOfRange { operation },
+        TimestampShift::Unrepresentable => EvaluationRefusal::DatetimeUnrepresentable { operation },
     }
 }
 

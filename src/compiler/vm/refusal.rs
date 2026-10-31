@@ -71,6 +71,14 @@ pub enum EvaluationRefusal {
         /// The operation whose result left the range.
         operation: ArithmeticOp,
     },
+    /// A timestamp result PostgreSQL holds that `chrono` does not carry, an
+    /// infinite one or one past the year 262142, is not computed. A null in
+    /// its place would answer `IS NOT NULL` false where PostgreSQL keeps the
+    /// row, so no answer is given.
+    DatetimeUnrepresentable {
+        /// The operation whose result could not be carried.
+        operation: ArithmeticOp,
+    },
 }
 
 /// What a backend answers when a divisor is zero.

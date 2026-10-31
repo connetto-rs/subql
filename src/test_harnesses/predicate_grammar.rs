@@ -174,6 +174,27 @@ pub enum Op {
     Or,
 }
 
+impl Op {
+    /// The operator as SQL spells it.
+    pub(super) const fn sql(self) -> &'static str {
+        match self {
+            Self::Eq => "=",
+            Self::Ne => "<>",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Mod => "%",
+            Self::And => "AND",
+            Self::Or => "OR",
+        }
+    }
+}
+
 /// The value a truth test names.
 #[derive(Clone, Copy, Debug)]
 pub enum TruthValue {
@@ -206,7 +227,7 @@ enum Scalar {
 }
 
 /// The comparison operators, which read two values of one kind.
-const COMPARISONS: [Op; 6] = [Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge];
+pub(super) const COMPARISONS: [Op; 6] = [Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge];
 
 /// An expression tree, rendered fully parenthesised.
 #[derive(Clone, Debug)]
@@ -548,24 +569,12 @@ impl Expr {
             Self::Null => "NULL".into(),
             Self::Not(inner) => format!("(NOT {})", inner.render(engine)),
             Self::Neg(inner) => format!("(- {})", inner.render(engine)),
-            Self::Binary(op, left, right) => {
-                let op = match op {
-                    Op::Eq => "=",
-                    Op::Ne => "<>",
-                    Op::Lt => "<",
-                    Op::Le => "<=",
-                    Op::Gt => ">",
-                    Op::Ge => ">=",
-                    Op::Add => "+",
-                    Op::Sub => "-",
-                    Op::Mul => "*",
-                    Op::Div => "/",
-                    Op::Mod => "%",
-                    Op::And => "AND",
-                    Op::Or => "OR",
-                };
-                format!("({} {op} {})", left.render(engine), right.render(engine))
-            }
+            Self::Binary(op, left, right) => format!(
+                "({} {} {})",
+                left.render(engine),
+                op.sql(),
+                right.render(engine)
+            ),
             Self::IsNull(inner, negated) => {
                 format!("({} IS {}NULL)", inner.render(engine), not(*negated))
             }
@@ -662,7 +671,7 @@ impl Case {
     }
 }
 
-fn maybe<'a, T>(
+pub(super) fn maybe<'a, T>(
     u: &mut Unstructured<'a>,
     draw: impl FnOnce(&mut Unstructured<'a>) -> arbitrary::Result<T>,
 ) -> arbitrary::Result<Option<T>> {
@@ -673,13 +682,13 @@ fn maybe<'a, T>(
     }
 }
 
-fn pick<T: Copy>(u: &mut Unstructured<'_>, choices: &[T]) -> arbitrary::Result<T> {
+pub(super) fn pick<T: Copy>(u: &mut Unstructured<'_>, choices: &[T]) -> arbitrary::Result<T> {
     u.choose(choices).copied()
 }
 
 /// `i64::MIN` has no positive literal to negate, so it is written as the
 /// difference every engine folds exactly.
-fn int_literal(n: i64, _engine: Engine) -> String {
+pub(super) fn int_literal(n: i64, _engine: Engine) -> String {
     if n == i64::MIN {
         "(-9223372036854775807 - 1)".into()
     } else if n < 0 {
@@ -689,7 +698,7 @@ fn int_literal(n: i64, _engine: Engine) -> String {
     }
 }
 
-fn float_literal(x: f64) -> String {
+pub(super) fn float_literal(x: f64) -> String {
     if x < 0.0 {
         format!("({x:?})")
     } else {
@@ -744,12 +753,39 @@ where
     B::Bool: From<bool>,
     B::Dialect: sqlparser::dialect::Dialect + Default,
 {
-    let table = catalog_helpers::table_id::<B, _>(&database, "t")?;
+    served_verdict::<B>(
+        database,
+        "t",
+        &case.filter.render(engine),
+        case.row.cells::<B>(),
+        || case.reproduction(engine),
+    )
+}
+
+/// Whether subql, serving `filter` over `table` in process, delivers the
+/// row `cells`, `None` when it does not answer in process.
+///
+/// # Panics
+///
+/// When dispatch fails on a served filter, with `reproduction` in the
+/// message.
+pub(super) fn served_verdict<B>(
+    database: ParserDB,
+    table: &str,
+    filter: &str,
+    cells: Vec<Value<B>>,
+    reproduction: impl FnOnce() -> String,
+) -> Option<bool>
+where
+    B: Backend + SqlLiteralParse + 'static,
+    B::Dialect: sqlparser::dialect::Dialect + Default,
+{
+    let table_id = catalog_helpers::table_id::<B, _>(&database, table)?;
     let mut subql: SubscriptionEngine<TestEvent<B>, DefaultIds, ParserDB> =
         SubscriptionEngine::new(database, B::Dialect::default());
     let registered = match subql.register(SubscriptionRequest::new(
         1u64,
-        format!("SELECT * FROM t WHERE {}", case.filter.render(engine)),
+        format!("SELECT * FROM {table} WHERE {filter}"),
     )) {
         Ok(registered) => registered,
         Err(RegisterError::NotServedInProcess(_) | RegisterError::RefusedByEngine { .. }) => {
@@ -763,11 +799,11 @@ where
     // A served program that fails dispatch fails every subscription on the
     // table, which is a wrong answer for all of them.
     let notifications = subql
-        .consumers(&TestEvent::insert(table, case.row.cells::<B>()))
+        .consumers(&TestEvent::insert(table_id, cells))
         .unwrap_or_else(|error| {
             panic!(
                 "dispatch failed on a served filter: {error}\n{}",
-                case.reproduction(engine)
+                reproduction()
             )
         });
     if !notifications.evaluation_failures().is_empty() || !notifications.unanswered().is_empty() {

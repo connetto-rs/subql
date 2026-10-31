@@ -10,6 +10,7 @@
 use crate::common::semantics::{notifies, register};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use subql::backend::{Interval, Postgres, Value};
+use subql::compiler::vm::refusal::{ArithmeticOp, EvaluationRefusal};
 
 const DDL: &str = "CREATE TABLE shifts (id INT PRIMARY KEY, start TIMESTAMP, zoned TIMESTAMPTZ, \
                    day DATE, clock TIME, span INTERVAL, factor DOUBLE PRECISION, units INT, \
@@ -40,7 +41,14 @@ const SHIFT: Shift = Shift {
 
 impl Shift {
     fn cells(&self) -> Vec<Value<Postgres>> {
-        let at = |text| NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").unwrap();
+        // `chrono` reads a year past 9999 only after a sign.
+        let at = |text: &str| {
+            NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
+                .or_else(|_| {
+                    NaiveDateTime::parse_from_str(&format!("+{text}"), "%Y-%m-%d %H:%M:%S")
+                })
+                .unwrap()
+        };
         vec![
             Value::Int(1),
             Value::Timestamp(at(self.start)),
@@ -180,27 +188,17 @@ fn a_month_clamps_to_the_last_day() {
     ));
 }
 
-/// What PostgreSQL raises on is refused for the row, and the subscription
-/// is told why.
-#[test]
-fn a_result_postgres_raises_on_is_refused() {
+/// The refusal each predicate meets on `shift`, sorted.
+fn refusals(shift: &Shift, predicates: &[&str]) -> Vec<EvaluationRefusal> {
     use sql_traits::structs::ParserDB;
     use sqlparser::dialect::PostgreSqlDialect;
-    use subql::compiler::vm::refusal::{ArithmeticOp, EvaluationRefusal};
     use subql::testing::TestEvent;
 
     let database = ParserDB::parse::<PostgreSqlDialect>(DDL).unwrap();
     let table = subql::catalog_helpers::table_id::<Postgres, _>(&database, "shifts").unwrap();
     let mut engine: subql::SubscriptionEngine<TestEvent<Postgres>, subql::DefaultIds, ParserDB> =
         subql::SubscriptionEngine::new(database, PostgreSqlDialect {});
-    for (id, predicate) in [
-        (
-            1u64,
-            "start + interval '2147483647 mons' > '2024-01-01 00:00:00'",
-        ),
-        (2, "span / (units - 3) > '1 day'"),
-        (3, "span * 1e10 > '1 day'"),
-    ] {
+    for (id, predicate) in (1u64..).zip(predicates) {
         let registered = engine
             .register(subql::SubscriptionRequest::new(
                 id,
@@ -210,16 +208,34 @@ fn a_result_postgres_raises_on_is_refused() {
         assert!(registered.not_served_because.is_none(), "{predicate}");
     }
     let notifications = engine
-        .consumers(&TestEvent::insert(table, SHIFT.cells()))
+        .consumers(&TestEvent::insert(table, shift.cells()))
         .unwrap();
+    assert!(
+        notifications.inserted().is_empty(),
+        "a refused row reaches no consumer"
+    );
     let mut refused: Vec<_> = notifications
         .evaluation_failures()
         .iter()
         .map(|failure| failure.refusal)
         .collect();
     refused.sort_by_key(|refusal| format!("{refusal:?}"));
+    refused
+}
+
+/// What PostgreSQL raises on is refused for the row, and the subscription
+/// is told why.
+#[test]
+fn a_result_postgres_raises_on_is_refused() {
     assert_eq!(
-        refused,
+        refusals(
+            &SHIFT,
+            &[
+                "start + interval '2147483647 mons' > '2024-01-01 00:00:00'",
+                "span / (units - 3) > '1 day'",
+                "span * 1e10 > '1 day'",
+            ]
+        ),
         [
             EvaluationRefusal::DatetimeOutOfRange {
                 operation: ArithmeticOp::Add
@@ -229,6 +245,34 @@ fn a_result_postgres_raises_on_is_refused() {
             },
             EvaluationRefusal::DivisionByZero {
                 operation: ArithmeticOp::Divide
+            },
+        ]
+    );
+}
+
+/// PostgreSQL holds timestamps to the year 294276 and `chrono` to 262142,
+/// so a result between the two is refused for the row. Answering it as a
+/// null would leave `IS NOT NULL` false where PostgreSQL keeps the row.
+#[test]
+fn a_timestamp_past_the_last_chrono_year_is_refused() {
+    let late = Shift {
+        start: "262000-12-31 00:00:00",
+        ..SHIFT
+    };
+    assert_eq!(
+        refusals(
+            &late,
+            &[
+                "start + interval '1000 years' IS NOT NULL",
+                "(start - span) + '1000 years' > '2024-01-01 00:00:00'",
+            ]
+        ),
+        [
+            EvaluationRefusal::DatetimeUnrepresentable {
+                operation: ArithmeticOp::Add
+            },
+            EvaluationRefusal::DatetimeUnrepresentable {
+                operation: ArithmeticOp::Add
             },
         ]
     );
