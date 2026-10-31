@@ -2,32 +2,20 @@
 //! serve itself, rather than refusing it.
 #![allow(clippy::unwrap_used)]
 
-use sql_traits::structs::ParserDB;
-use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::Postgres;
 use subql::testing::TestEvent;
-use subql::{catalog_helpers, DefaultIds, SubscriptionEngine, SubscriptionRequest, TableId, Tier};
+use subql::{SubscriptionRequest, Tier};
+
+use crate::common::postgres_engine;
 
 const DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, price FLOAT, status TEXT);\
                    CREATE TABLE managers (id INT PRIMARY KEY);";
-
-type Engine = SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB>;
-
-fn engine() -> (Engine, TableId) {
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
-    let table = catalog_helpers::table_id::<subql::backend::Postgres, _>(&catalog, "orders")
-        .expect("orders resolves");
-    (
-        SubscriptionEngine::new(catalog, PostgreSqlDialect {}),
-        table,
-    )
-}
 
 /// No wrapper anywhere: the registry itself reports which read serves a query
 /// its own evaluator cannot decide.
 #[test]
 fn a_bare_registry_plans_the_read_it_cannot_serve() {
-    let (mut engine, table) = engine();
+    let (mut engine, table) = postgres_engine::<TestEvent<Postgres>>(DDL);
 
     let extreme = engine
         .register(SubscriptionRequest::new(
@@ -77,7 +65,7 @@ fn a_bare_registry_plans_the_read_it_cannot_serve() {
 /// A query nothing can plan is still refused, and says why.
 #[test]
 fn a_statement_no_tier_can_serve_is_still_refused() {
-    let (mut engine, _) = engine();
+    let (mut engine, _) = postgres_engine::<TestEvent<Postgres>>(DDL);
     let refusal = engine
         .register(SubscriptionRequest::new(1u64, "DELETE FROM orders"))
         .expect_err("only a SELECT can be maintained or re-read");

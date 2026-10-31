@@ -4,12 +4,8 @@
 //! subscription and watch its siblings keep folding.
 
 use sql_traits::prelude::DatabaseLike;
-use sql_traits::structs::ParserDB;
-use sqlparser::dialect::PostgreSqlDialect;
-use subql::backend::{CdcEvent, Postgres, RowKind, ScalarFamily, Value};
-use subql::{
-    catalog_helpers, ColumnId, DefaultIds, EventKind, SubscriptionEngine, TableId, ValueError,
-};
+use subql::backend::{CdcEvent, RowKind, ScalarFamily, Value};
+use subql::{ColumnId, EventKind, TableId, ValueError};
 
 /// An event wrapper with one undecodable cell. With `altered` clear the
 /// wrapper is a pass-through, so the same event type serves the clean
@@ -82,18 +78,4 @@ impl<E: CdcEvent> CdcEvent for AlteredCell<E> {
         }
         self.inner.value_at(db, row, col)
     }
-}
-
-/// One `orders` engine over a Postgres-cataloged table, for whatever event
-/// type a test wraps `TestEvent` into.
-pub fn postgres_engine<E: CdcEvent<Backend = Postgres>>(
-    ddl: &str,
-) -> (SubscriptionEngine<E, DefaultIds, ParserDB>, TableId) {
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(ddl).expect("parse DDL");
-    let table =
-        catalog_helpers::table_id::<Postgres, _>(&catalog, "orders").expect("orders resolves");
-    (
-        SubscriptionEngine::new(catalog, PostgreSqlDialect {}),
-        table,
-    )
 }

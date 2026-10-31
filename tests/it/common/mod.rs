@@ -13,6 +13,10 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use sql_traits::structs::ParserDB;
+use sqlparser::dialect::PostgreSqlDialect;
+use subql::backend::{CdcEvent, Postgres};
+use subql::{catalog_helpers, DefaultIds, SubscriptionEngine, TableId};
 use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{ContainerRequest, GenericImage, ImageExt, ReuseDirective};
@@ -44,6 +48,20 @@ pub mod reexec;
 pub mod semantics;
 pub mod store;
 pub mod throttle;
+
+/// One `orders` engine over a Postgres-cataloged table, for whatever event
+/// type a test wraps `TestEvent` into.
+pub fn postgres_engine<E: CdcEvent<Backend = Postgres>>(
+    ddl: &str,
+) -> (SubscriptionEngine<E, DefaultIds, ParserDB>, TableId) {
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(ddl).expect("parse DDL");
+    let table =
+        catalog_helpers::table_id::<Postgres, _>(&catalog, "orders").expect("orders resolves");
+    (
+        SubscriptionEngine::new(catalog, PostgreSqlDialect {}),
+        table,
+    )
+}
 
 const PG_IMAGE: &str = "subql-test/postgres-wal2json";
 const PG_TAG: &str = "16-pgvector";

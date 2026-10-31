@@ -2407,6 +2407,7 @@ where
             let checkpoint = event.checkpoint();
             if let QueryRuntime::Grouped(query) = &mut entry.runtime {
                 let grouped = match query.on_event(
+                    subscription_id,
                     event,
                     vm,
                     database,
@@ -2419,15 +2420,6 @@ where
                     // deterministic for this subscription, so stop it and
                     // report it, and dispatch the event to the rest as usual.
                     Err(error) => {
-                        let error = match error {
-                            DispatchError::TierTransition { message, .. } => {
-                                DispatchError::TierTransition {
-                                    subscription: subscription_id,
-                                    message,
-                                }
-                            }
-                            error => error,
-                        };
                         stopped.push(crate::StoppedSubscription {
                             subscription_id,
                             consumer_id,

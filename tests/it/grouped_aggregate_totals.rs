@@ -11,20 +11,12 @@ use subql::{
     PgLsn, SubscriptionEngine, SubscriptionRequest, TableId,
 };
 
+use crate::common::postgres_engine;
+
 const DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, region TEXT, amount INT, status TEXT);";
 
 type Event = TestEvent<Postgres, PgLsn>;
 type Engine = SubscriptionEngine<Event, DefaultIds, ParserDB>;
-
-fn engine() -> (Engine, TableId) {
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
-    let table =
-        catalog_helpers::table_id::<Postgres, _>(&catalog, "orders").expect("orders resolves");
-    (
-        SubscriptionEngine::new(catalog, PostgreSqlDialect {}),
-        table,
-    )
-}
 
 fn register(engine: &mut Engine) -> u64 {
     engine
@@ -88,7 +80,7 @@ fn one(
 
 #[test]
 fn a_group_that_empties_is_removed_and_comes_back_under_the_same_key() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let subscription = register(&mut engine);
     let opening = seed(
         &mut engine,
@@ -149,7 +141,7 @@ fn a_group_that_empties_is_removed_and_comes_back_under_the_same_key() {
 
 #[test]
 fn moving_a_row_between_groups_emits_remove_and_set() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let subscription = register(&mut engine);
     let opening = seed(
         &mut engine,
@@ -199,7 +191,7 @@ fn moving_a_row_between_groups_emits_remove_and_set() {
 
 #[test]
 fn empty_and_refill_during_the_seed_read_uses_position_and_row_count_together() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let subscription = register(&mut engine);
 
     // The read is taken at 25. It already contains the south insert at 20 and
@@ -248,7 +240,7 @@ fn empty_and_refill_during_the_seed_read_uses_position_and_row_count_together() 
 
 #[test]
 fn an_all_null_group_uses_source_row_count_not_aggregate_value() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let subscription = engine
         .register(SubscriptionRequest::new(
             8u64,
@@ -291,7 +283,7 @@ fn an_all_null_group_uses_source_row_count_not_aggregate_value() {
 
 #[test]
 fn a_new_multi_column_group_reports_values_in_statement_order() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let subscription = engine
         .register(SubscriptionRequest::new(
             9u64,
@@ -316,7 +308,7 @@ fn a_new_multi_column_group_reports_values_in_statement_order() {
 
 #[test]
 fn a_replayed_multi_column_group_keeps_its_identity() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let subscription = engine
         .register(SubscriptionRequest::new(
             10u64,
