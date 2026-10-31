@@ -161,3 +161,17 @@ fn engines_without_the_type_reread_interval_predicates() {
     assert!(!served::<SQLite>(DDL, predicate));
     assert!(!served::<MySql>(DDL, predicate));
 }
+
+/// Interval arithmetic plans only where the engine has the type, so an
+/// engine without one reads the arithmetic from the database as well.
+#[test]
+fn engines_without_the_type_reread_interval_arithmetic() {
+    for predicate in [
+        "SELECT * FROM shifts WHERE span + interval '1 day' > '2 hours'",
+        "SELECT * FROM shifts WHERE span - interval '1 day' > '2 hours'",
+    ] {
+        assert!(served::<Postgres>(DDL, predicate));
+        assert!(!served::<SQLite>(DDL, predicate), "{predicate} is served");
+        assert!(!served::<MySql>(DDL, predicate), "{predicate} is served");
+    }
+}

@@ -94,7 +94,9 @@ fn operand<B: Backend, DB: DatabaseLike>(
             _ => Operand::Other,
         },
         Expr::Nested(inner) => operand::<B, DB>(inner, table_id, database, depth + 1),
-        // Only an interval and a number have a sign to flip.
+        // Only an interval and a number have a sign to flip, and PostgreSQL
+        // has no unary `+ interval` operator, so a plus over an interval is
+        // `Other` below.
         Expr::UnaryOp {
             op: sign @ (UnaryOperator::Plus | UnaryOperator::Minus),
             expr: inner,
@@ -102,13 +104,9 @@ fn operand<B: Backend, DB: DatabaseLike>(
             Operand::Temporal {
                 kind: ScalarFamily::Interval,
                 literal,
-            } => Operand::Temporal {
+            } if matches!(sign, UnaryOperator::Minus) => Operand::Temporal {
                 kind: ScalarFamily::Interval,
-                literal: if matches!(sign, UnaryOperator::Minus) {
-                    literal.and_then(Interval::checked_neg)
-                } else {
-                    literal
-                },
+                literal: literal.and_then(Interval::checked_neg),
             },
             number @ Operand::Number(_) => number,
             _ => Operand::Other,
