@@ -19,6 +19,7 @@ use testcontainers::{ContainerRequest, GenericImage, ImageExt, ReuseDirective};
 
 // Shared round-trip dispatch machinery, only for test crates that enable
 // the full apply stack. Empty (undeclared) for every other test.
+pub mod altered_cell;
 #[cfg(all(
     feature = "apply-patchset-postgres",
     feature = "apply-patchset-sqlite",
