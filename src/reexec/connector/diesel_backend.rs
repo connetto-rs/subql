@@ -6,6 +6,7 @@ use super::ReadQuery;
 use crate::backend::Value;
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 use diesel::query_builder::{BoxedSqlQuery, SqlQuery};
 use diesel::sql_query;
 use diesel::sql_types::{BigInt, Binary, Bool, Date, Double, Json, Numeric, Text, Time, Timestamp};

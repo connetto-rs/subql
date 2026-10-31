@@ -65,6 +65,10 @@ jobs:
           # under `--no-default-features` is intentionally not exercised.
           - name: no-default-features
             args: "--lib --no-default-features"
+          # diesel's core is no_std, so the patchset apply surface and the
+          # diesel connector it builds on must compile without `std` too.
+          - name: apply-patchset-postgres-no-std
+            args: "--lib --no-default-features --features apply-patchset-postgres"
           # `sqlite-cdc` activated in isolation. Catches unconditional
           # uses of items that should be feature-gated under
           # `executor-diesel`, `pg-streaming`, or other neighbours; the
