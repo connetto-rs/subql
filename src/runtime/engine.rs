@@ -2667,6 +2667,7 @@ where
 
     /// The session a restored re-read belongs to, for rebuilding its
     /// resolve context on adoption.
+    #[cfg(feature = "std")]
     pub(crate) fn reexec_session(&self, subscription_id: SubscriptionId) -> Option<I::SessionId> {
         self.reexec.get(&subscription_id).and_then(|e| e.session)
     }
