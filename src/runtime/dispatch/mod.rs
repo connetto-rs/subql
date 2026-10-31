@@ -43,6 +43,9 @@ fn dispatch_vm_error(error: VmError) -> DispatchError {
 struct DispatchReports {
     refusals: Vec<(ConsumerOrdinal, SubscriptionId, EvaluationRefusal)>,
     unanswered: Vec<(ConsumerOrdinal, SubscriptionId, crate::ColumnId)>,
+    /// Subscriptions whose predicate or projection failed the event
+    /// deterministically, with the failure that stopped each.
+    stopped: Vec<(ConsumerOrdinal, SubscriptionId, DispatchError)>,
 }
 
 /// The four values every evaluation pass carries: which event, which row
@@ -720,15 +723,15 @@ pub fn dispatch_consumers<I, E, DB>(
     vm: &mut Vm<E::Backend>,
     arity: usize,
     db: &DB,
-) -> Result<ConsumerNotifications<I, E::Checkpoint, E::Backend>, DispatchError>
+) -> ConsumerNotifications<I, E::Checkpoint, E::Backend>
 where
     I: IdTypes,
     E: CdcEvent,
     DB: DatabaseLike,
 {
     let (notifs, _) =
-        dispatch_consumers_with_stamps(event, partition, consumer_dict, vm, arity, db)?;
-    Ok(notifs)
+        dispatch_consumers_with_stamps(event, partition, consumer_dict, vm, arity, db);
+    notifs
 }
 
 /// Like [`dispatch_consumers`] but also returns the `SubscriptionId`s
@@ -744,13 +747,10 @@ pub fn dispatch_consumers_with_stamps<I, E, DB>(
     vm: &mut Vm<E::Backend>,
     arity: usize,
     db: &DB,
-) -> Result<
-    (
-        ConsumerNotifications<I, E::Checkpoint, E::Backend>,
-        Vec<SubscriptionId>,
-    ),
-    DispatchError,
->
+) -> (
+    ConsumerNotifications<I, E::Checkpoint, E::Backend>,
+    Vec<SubscriptionId>,
+)
 where
     I: IdTypes,
     E: CdcEvent,
@@ -773,7 +773,7 @@ where
                 arity,
                 db,
                 (&mut stamps, &mut reports),
-            )?;
+            );
             ConsumerNotifications::from_parts(
                 resolve_ordinals(bitmap, consumer_dict),
                 Vec::new(),
@@ -789,7 +789,7 @@ where
                 arity,
                 db,
                 (&mut stamps, &mut reports),
-            )?;
+            );
             ConsumerNotifications::from_parts(
                 Vec::new(),
                 resolve_ordinals(bitmap, consumer_dict),
@@ -804,7 +804,7 @@ where
             db,
             &mut stamps,
             &mut reports,
-        )?,
+        ),
     };
     let failures = reports
         .refusals
@@ -828,13 +828,17 @@ where
             })
         })
         .collect();
-    Ok((
+    let stopped = stopped_subscriptions(reports.stopped, |ordinal, _| {
+        consumer_dict.get_consumer(ordinal)
+    });
+    (
         notifs
             .with_checkpoint(checkpoint)
             .with_evaluation_failures(failures)
-            .with_unanswered(unanswered),
+            .with_unanswered(unanswered)
+            .with_stopped(stopped),
         stamps,
-    ))
+    )
 }
 
 /// Record one per-subscription report row against every subscription bound
@@ -876,6 +880,49 @@ fn extend_subscriptions<I: IdTypes, B: Backend>(
     }
 }
 
+/// Record one deterministic predicate failure against every subscription bound to it.
+fn collect_stopped_subscriptions<I: IdTypes, B: Backend>(
+    predicates: &PredicateStore<I, B>,
+    pred_id: PredicateId,
+    consumers: &RoaringBitmap,
+    error: &DispatchError,
+    out: &mut Vec<(ConsumerOrdinal, SubscriptionId, DispatchError)>,
+) {
+    for ord_u32 in consumers {
+        let ord = ConsumerOrdinal::new(ord_u32);
+        for sub_id in predicates.subscription_ids_of(pred_id, ord) {
+            out.push((ord, sub_id, error.clone()));
+        }
+    }
+}
+
+/// One entry per stopped subscription, in subscription-id order, keeping
+/// the first error each subscription met. `consumer_of` resolves the
+/// consumer that registered a stopped subscription.
+fn stopped_subscriptions<I: IdTypes, R>(
+    stopped: Vec<(ConsumerOrdinal, SubscriptionId, DispatchError)>,
+    consumer_of: R,
+) -> Vec<crate::types::StoppedSubscription<I>>
+where
+    R: Fn(ConsumerOrdinal, SubscriptionId) -> Option<I::ConsumerId>,
+{
+    let mut out: Vec<crate::types::StoppedSubscription<I>> = stopped
+        .into_iter()
+        .filter_map(|(ordinal, subscription_id, error)| {
+            consumer_of(ordinal, subscription_id).map(|consumer_id| {
+                crate::types::StoppedSubscription {
+                    subscription_id,
+                    consumer_id,
+                    error,
+                }
+            })
+        })
+        .collect();
+    out.sort_by_key(|entry| entry.subscription_id);
+    out.dedup_by_key(|entry| entry.subscription_id);
+    out
+}
+
 /// Dual-eval dispatch for UPDATE events: evaluates both old and new rows
 /// to produce view-relative `inserted` / `deleted` / `updated` sets.
 ///
@@ -886,6 +933,10 @@ fn extend_subscriptions<I: IdTypes, B: Backend>(
 /// indistinguishable from a genuine non-match.
 /// [`CdcEvent::presence_at`](crate::backend::CdcEvent::presence_at) is what
 /// tells the two apart; no caller acts on it yet.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the candidate predicates evaluates both rows and records each predicate's stops in place"
+)]
 fn dispatch_update_with_stamps<I, E, DB>(
     event: &E,
     partition: &TablePartition<I, E::Backend>,
@@ -894,7 +945,7 @@ fn dispatch_update_with_stamps<I, E, DB>(
     db: &DB,
     stamps: &mut Vec<SubscriptionId>,
     reports: &mut DispatchReports,
-) -> Result<ConsumerNotifications<I, E::Checkpoint, E::Backend>, DispatchError>
+) -> ConsumerNotifications<I, E::Checkpoint, E::Backend>
 where
     I: IdTypes,
     E: CdcEvent,
@@ -925,7 +976,7 @@ where
             continue;
         };
 
-        let new_matched = matched_for_row(
+        let new_matched = match matched_for_row(
             pred,
             bitmap,
             &snapshot.predicates,
@@ -933,8 +984,21 @@ where
             RowKind::New,
             vm,
             db,
-        )?;
-        let old_matched = matched_for_row(
+        ) {
+            // The failure names only this predicate's bytecode and cells.
+            Err(error) => {
+                collect_stopped_subscriptions(
+                    &snapshot.predicates,
+                    pred_id,
+                    bitmap,
+                    &error,
+                    &mut reports.stopped,
+                );
+                continue;
+            }
+            Ok(verdict) => verdict,
+        };
+        let old_matched = match matched_for_row(
             pred,
             bitmap,
             &snapshot.predicates,
@@ -942,7 +1006,19 @@ where
             RowKind::Old,
             vm,
             db,
-        )?;
+        ) {
+            Err(error) => {
+                collect_stopped_subscriptions(
+                    &snapshot.predicates,
+                    pred_id,
+                    bitmap,
+                    &error,
+                    &mut reports.stopped,
+                );
+                continue;
+            }
+            Ok(verdict) => verdict,
+        };
 
         // A row version refused for some subscribers is reported for those,
         // and the transition is computed for the rest. A subscription refused
@@ -973,7 +1049,20 @@ where
 
         let new_served = new_matched.matched.without(&refused_here);
         let old_served = old_matched.matched.without(&refused_here);
-        let subset = projected_change(&pred.projection, event, db)?;
+        let subset = match projected_change(&pred.projection, event, db) {
+            // The projection belongs to the predicate, so the stop covers its consumers.
+            Err(error) => {
+                collect_stopped_subscriptions(
+                    &snapshot.predicates,
+                    pred_id,
+                    bitmap,
+                    &error,
+                    &mut reports.stopped,
+                );
+                continue;
+            }
+            Ok(subset) => subset,
+        };
         split_transition(&new_served, &old_served, |slot, set| {
             // A consumer removes a row of a subset by its old projected
             // values, and one whose projected values did not move holds
@@ -1001,11 +1090,11 @@ where
         });
     }
 
-    Ok(ConsumerNotifications::from_parts(
+    ConsumerNotifications::from_parts(
         resolve_ordinals(inserted_ordinals.finish(), consumer_dict),
         resolve_ordinals(deleted_ordinals.finish(), consumer_dict),
         resolve_ordinals(updated_ordinals.finish(), consumer_dict),
-    ))
+    )
 }
 
 /// Single-eval dispatch: evaluate one row_kind, return the matching
@@ -1019,7 +1108,7 @@ fn dispatch_single_eval_bitmap_with_stamps<I, E, DB>(
     arity: usize,
     db: &DB,
     accumulators: (&mut Vec<SubscriptionId>, &mut DispatchReports),
-) -> Result<RoaringBitmap, DispatchError>
+) -> RoaringBitmap
 where
     I: IdTypes,
     E: CdcEvent,
@@ -1055,7 +1144,7 @@ where
             extend_subscriptions(&snapshot.predicates, pred.id, consumers, stamps);
             Ok(())
         },
-    )?;
+    );
     for (pred_id, consumers, column) in &unanswered {
         collect_bound_subscriptions(
             &snapshot.predicates,
@@ -1066,7 +1155,7 @@ where
         );
     }
 
-    Ok(matching_ordinals.finish())
+    matching_ordinals.finish()
 }
 
 fn for_each_matching_predicate<I, E, F, DB>(
@@ -1075,8 +1164,7 @@ fn for_each_matching_predicate<I, E, F, DB>(
     context: &mut EvalContext<'_, E, DB>,
     reports: &mut DispatchReports,
     mut on_match: F,
-) -> Result<(), DispatchError>
-where
+) where
     I: IdTypes,
     E: CdcEvent,
     DB: DatabaseLike,
@@ -1100,7 +1188,7 @@ where
         // bitmap. Without the narrowing an insert would reach every subscriber
         // sharing the filter, which is the failure the staged refusal existed to
         // prevent.
-        let verdict = matched_for_row(
+        let verdict = match matched_for_row(
             pred,
             bitmap,
             store,
@@ -1108,7 +1196,14 @@ where
             context.row,
             context.vm,
             context.db,
-        )?;
+        ) {
+            // The failure names only this predicate's bytecode and cells.
+            Err(error) => {
+                collect_stopped_subscriptions(store, pred_id, bitmap, &error, &mut reports.stopped);
+                continue;
+            }
+            Ok(verdict) => verdict,
+        };
         if let Some((consumers, failure)) = verdict.refused {
             collect_bound_subscriptions(store, pred_id, &consumers, failure, &mut reports.refusals);
         }
@@ -1122,10 +1217,19 @@ where
             );
         }
         if let Some(reached) = verdict.matched.bitmap().filter(|set| !set.is_empty()) {
-            on_match(pred, reached)?;
+            if let Err(error) = on_match(pred, reached) {
+                // The verdict was reached, so only the subscribers it matched
+                // touched the failing spec.
+                collect_stopped_subscriptions(
+                    store,
+                    pred_id,
+                    reached,
+                    &error,
+                    &mut reports.stopped,
+                );
+            }
         }
     }
-    Ok(())
 }
 
 /// The delta shape an aggregate subscription folds, plus its group columns.
@@ -1208,7 +1312,7 @@ fn reported_subscriptions<B: crate::backend::Backend, T>(
     reported
 }
 
-pub(crate) struct AggregateComputation<B: crate::backend::Backend> {
+pub(crate) struct AggregateComputation<I: IdTypes, B: crate::backend::Backend> {
     pub deltas: Vec<AggregateDelta<B>>,
     pub missing_old: Vec<SubscriptionId>,
     pub group_key_failed: Vec<SubscriptionId>,
@@ -1224,6 +1328,8 @@ pub(crate) struct AggregateComputation<B: crate::backend::Backend> {
     /// error, while an absent cell is answerable by a read and so the
     /// subscription changes tier and gets a trigger.
     pub unanswered_filter: Vec<(SubscriptionId, crate::ColumnId)>,
+    /// Subscriptions that failed this event deterministically and were ended.
+    pub stopped: Vec<crate::types::StoppedSubscription<I>>,
 }
 
 type AggregateNet<B> = HashMap<
@@ -1342,6 +1448,79 @@ where
     Ok(AggregateGroup::Group(crate::GroupIdentity { key, values }))
 }
 
+/// The inputs one weighted row of an event brings to the aggregate fold
+/// over a table's matching predicates.
+struct AggregateFoldState<'a, I: IdTypes, E: CdcEvent, DB: DatabaseLike> {
+    event: &'a E,
+    row: RowKind,
+    weight: i64,
+    arity: usize,
+    db: &'a DB,
+    predicates: &'a PredicateStore<I, E::Backend>,
+    missing_old: &'a HashSet<SubscriptionId>,
+    group_key_failed: &'a mut HashSet<SubscriptionId>,
+    net: &'a mut AggregateNet<E::Backend>,
+}
+
+/// Fold the delta one aggregate predicate produces for one weighted row,
+/// and record its consumers when the group key cannot be encoded.
+fn fold_predicate_delta<I, E, DB>(
+    state: &mut AggregateFoldState<I, E, DB>,
+    pred: &Predicate<E::Backend>,
+    consumers: &RoaringBitmap,
+) -> Result<(), DispatchError>
+where
+    I: IdTypes,
+    E: CdcEvent,
+    DB: DatabaseLike,
+{
+    let Some((spec, groups)) = delta_spec_and_groups(&pred.projection) else {
+        return Ok(());
+    };
+    let mut decode_err: Option<crate::ValueError> = None;
+    let maybe_delta = agg_delta_for_row(spec, state.weight, |col| {
+        match probe_column_for_agg(state.event, state.row, col, state.arity, state.db) {
+            Ok(read) => read,
+            Err(error) => {
+                decode_err = Some(error);
+                AggCellRead::Missing
+            }
+        }
+    });
+    if let Some(error) = decode_err {
+        return Err(DispatchError::Value(error));
+    }
+    let group = match aggregate_group(
+        state.event,
+        state.row,
+        groups,
+        pred.group_key_encoder.as_ref(),
+        state.db,
+    )? {
+        AggregateGroup::Ungrouped => None,
+        AggregateGroup::Group(group) => Some(group),
+        AggregateGroup::Unencodable => {
+            extend_subscriptions(state.predicates, pred.id, consumers, state.group_key_failed);
+            return Ok(());
+        }
+    };
+
+    accumulate_aggregate_deltas(
+        &mut AggregateDeltaState {
+            store: state.predicates,
+            missing_old: state.missing_old,
+            net: &mut *state.net,
+        },
+        consumers,
+        pred.id,
+        group.as_ref(),
+        maybe_delta.as_ref(),
+        state.weight,
+    );
+
+    Ok(())
+}
+
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn compute_agg_deltas<I, E, DB>(
     event: &E,
@@ -1349,7 +1528,7 @@ pub(crate) fn compute_agg_deltas<I, E, DB>(
     vm: &mut Vm<E::Backend>,
     arity: usize,
     db: &DB,
-) -> Result<AggregateComputation<E::Backend>, DispatchError>
+) -> AggregateComputation<I, E::Backend>
 where
     I: IdTypes,
     E: CdcEvent,
@@ -1377,55 +1556,23 @@ where
             &mut EvalContext { event, row, vm, db },
             &mut reports,
             |pred, consumers| {
-                let Some((spec, groups)) = delta_spec_and_groups(&pred.projection) else {
-                    return Ok(());
-                };
-                let mut decode_err: Option<crate::ValueError> = None;
-                let maybe_delta =
-                    agg_delta_for_row(spec, weight, |col| {
-                        match probe_column_for_agg(event, row, col, arity, db) {
-                            Ok(read) => read,
-                            Err(error) => {
-                                decode_err = Some(error);
-                                AggCellRead::Missing
-                            }
-                        }
-                    });
-                if let Some(error) = decode_err {
-                    return Err(DispatchError::Value(error));
-                }
-                let group =
-                    match aggregate_group(event, row, groups, pred.group_key_encoder.as_ref(), db)?
-                    {
-                        AggregateGroup::Ungrouped => None,
-                        AggregateGroup::Group(group) => Some(group),
-                        AggregateGroup::Unencodable => {
-                            extend_subscriptions(
-                                &snapshot.predicates,
-                                pred.id,
-                                consumers,
-                                &mut group_key_failed,
-                            );
-                            return Ok(());
-                        }
-                    };
-
-                accumulate_aggregate_deltas(
-                    &mut AggregateDeltaState {
-                        store: &snapshot.predicates,
+                fold_predicate_delta(
+                    &mut AggregateFoldState {
+                        event,
+                        row,
+                        weight,
+                        arity,
+                        db,
+                        predicates: &snapshot.predicates,
                         missing_old: &missing_old,
+                        group_key_failed: &mut group_key_failed,
                         net: &mut net,
                     },
+                    pred,
                     consumers,
-                    pred.id,
-                    group.as_ref(),
-                    maybe_delta.as_ref(),
-                    weight,
-                );
-
-                Ok(())
+                )
             },
-        )?;
+        );
     }
 
     let mut deltas: Vec<AggregateDelta<E::Backend>> = net
@@ -1450,14 +1597,21 @@ where
     // event could only compute for one side of the transition is worse
     // than no delta, because the error never washes out.
     let unanswered_filter = reported_subscriptions(reports.unanswered, &mut deltas);
+    let bindings = &snapshot.predicates.bindings;
+    let stopped = stopped_subscriptions(reports.stopped, |_, subscription_id| {
+        bindings
+            .get(&subscription_id)
+            .map(|binding| binding.consumer_id)
+    });
 
-    Ok(AggregateComputation {
+    AggregateComputation {
         deltas,
         missing_old,
         group_key_failed,
         evaluation_refused,
         unanswered_filter,
-    })
+        stopped,
+    }
 }
 
 // Test body deferred to Phase 10 per docs/refactor-cdc-event-handoff.md.

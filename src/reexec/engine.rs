@@ -247,7 +247,7 @@ impl<I: IdTypes, C: crate::Checkpoint, B: Backend> Clone for ReExecutionTrigger<
     }
 }
 
-/// Everything one dispatched event produced across seven channels.
+/// Everything one dispatched event produced across eight channels.
 ///
 /// Every channel has to be drained because each tier has one fixed delivery
 /// shape, and ignoring one silently drops that tier's subscriptions.
@@ -259,6 +259,8 @@ impl<I: IdTypes, C: crate::Checkpoint, B: Backend> Clone for ReExecutionTrigger<
 /// - [`row_deltas`](Self::row_deltas): keyed row changes.
 /// - [`triggers`](Self::triggers): unresolved database reads.
 /// - [`transitions`](Self::transitions): identity-preserving tier changes.
+/// - [`stopped`](Self::stopped), subscriptions the engine stopped because
+///   their maintenance failed the event, with the error that stopped each.
 pub struct ReExecNotifications<I: IdTypes, B: Backend, C: crate::Checkpoint = crate::NoCheckpoint> {
     /// View-relative notifications from the core engine.
     pub engine: ConsumerNotifications<I, C, B>,
@@ -275,6 +277,11 @@ pub struct ReExecNotifications<I: IdTypes, B: Backend, C: crate::Checkpoint = cr
     pub triggers: Vec<ReExecutionTrigger<I, C, B>>,
     /// Subscriptions that changed maintenance tier.
     pub transitions: Vec<crate::MaintenanceTransition<B>>,
+    /// Subscriptions the engine stopped because their maintenance failed
+    /// the event deterministically, each with the error that stopped it.
+    /// A stopped subscription receives no further events and holds no
+    /// queued read any more.
+    pub stopped: Vec<crate::StoppedSubscription<I>>,
 }
 
 /// Everything one dispatched event produced in process, when the engine owns
@@ -296,6 +303,11 @@ pub struct Dispatched<I: IdTypes, B: Backend, C: crate::Checkpoint = crate::NoCh
     pub scalar_updates: Vec<ScalarUpdate<I, B, C>>,
     /// Subscriptions that changed maintenance tier.
     pub transitions: Vec<crate::MaintenanceTransition<B>>,
+    /// Subscriptions the engine stopped because their maintenance failed
+    /// the event deterministically, each with the error that stopped it.
+    /// A stopped subscription receives no further events and holds no
+    /// queued read any more, which is why no read of it follows here.
+    pub stopped: Vec<crate::StoppedSubscription<I>>,
     /// Depth of the read queue after this event.
     ///
     /// Not a completeness signal, and not a promise about which channels
