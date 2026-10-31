@@ -4285,8 +4285,9 @@ where
     /// # Errors
     ///
     /// Returns [`DispatchError`] for an unknown table id. A cell or predicate
-    /// failure is reported in [`ConsumerNotifications::stopped`] rather
-    /// than returned.
+    /// failure is reported in
+    /// [`ConsumerNotifications::stopped`](crate::ConsumerNotifications::stopped)
+    /// and not returned.
     pub fn match_rows(
         &mut self,
         event: &E,
