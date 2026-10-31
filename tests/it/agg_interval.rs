@@ -279,6 +279,201 @@ fn a_grouped_sum_keeps_one_total_per_group() {
     );
 }
 
+/// The mean's day remainder can run past the day, and the cascade carries a
+/// whole day into the clock, which PostgreSQL 16 and 18 answer alike.
+#[test]
+fn the_mean_cascades_the_day_remainder_into_the_clock() {
+    let (mut engine, shifts) = engine();
+    register(&mut engine, 1, "SELECT AVG(span) FROM shifts");
+    assert_eq!(
+        printed(&value(
+            &install(
+                &mut engine,
+                1,
+                vec![seed_row(Some("1 mon 6 days"), 1, 0, 0)]
+            )
+            .unwrap()
+        )),
+        "1 mon 6 days"
+    );
+    for (id, lsn) in [(2, 10), (3, 11), (4, 12), (5, 13), (6, 14)] {
+        assert!(engine
+            .aggregate_updates(&insert(shifts, id, "a", Some("0"), lsn))
+            .is_ok(),);
+    }
+    assert_eq!(
+        printed(&value(
+            &engine
+                .aggregate_updates(&insert(shifts, 7, "a", Some("0"), 15))
+                .unwrap()
+        )),
+        "5 days 03:25:42.832457"
+    );
+}
+
+/// A one-row mean over a clock past the double's exact integers reads its
+/// microseconds back unchanged, as PostgreSQL 16 and 18 both print it.
+#[test]
+fn a_huge_clock_keeps_its_own_mean() {
+    let (mut engine, _) = engine();
+    register(&mut engine, 1, "SELECT AVG(span) FROM shifts");
+    assert_eq!(
+        printed(&value(
+            &install(
+                &mut engine,
+                1,
+                vec![seed_row(Some("5000000 hours"), 1, 0, 0)]
+            )
+            .unwrap()
+        )),
+        "5000000:00:00"
+    );
+}
+
+/// A day total past the field's range stops maintenance, and PostgreSQL 16
+/// and 18 both raise `interval out of range` on the same rows.
+#[test]
+fn a_day_total_that_leaves_range_stops_maintenance() {
+    let (mut engine, shifts) = engine();
+    register(&mut engine, 1, "SELECT SUM(span) FROM shifts");
+    install(
+        &mut engine,
+        1,
+        vec![seed_row(Some("1500000000 days"), 1, 0, 0)],
+    )
+    .unwrap();
+    let transitions = engine
+        .aggregate_updates(&insert(shifts, 2, "a", Some("1500000000 days"), 10))
+        .unwrap()
+        .transitions;
+    assert!(
+        matches!(
+            transitions.first().map(|transition| &transition.reason),
+            Some(subql::MaintenanceStopReason::SumOutOfRange { .. })
+        ),
+        "{transitions:?}"
+    );
+}
+
+/// A clock total past the field's range stops maintenance, and PostgreSQL
+/// 16 and 18 both raise `interval out of range` on the same rows.
+#[test]
+fn a_clock_total_that_leaves_range_stops_maintenance() {
+    let (mut engine, shifts) = engine();
+    register(&mut engine, 1, "SELECT SUM(span) FROM shifts");
+    install(
+        &mut engine,
+        1,
+        vec![seed_row(Some("4611686018427387904 microseconds"), 1, 0, 0)],
+    )
+    .unwrap();
+    let transitions = engine
+        .aggregate_updates(&insert(
+            shifts,
+            2,
+            "a",
+            Some("4611686018427387904 microseconds"),
+            10,
+        ))
+        .unwrap()
+        .transitions;
+    assert!(
+        matches!(
+            transitions.first().map(|transition| &transition.reason),
+            Some(subql::MaintenanceStopReason::SumOutOfRange { .. })
+        ),
+        "{transitions:?}"
+    );
+}
+
+/// A net total holding the infinity's own fields is the infinity, which the
+/// engine cannot answer. PostgreSQL 16 answers a value and 18 raises on the
+/// same rows, so the stop serves the database's answer.
+#[test]
+fn a_total_holding_the_infinity_fields_stops_maintenance() {
+    let (mut engine, shifts) = engine();
+    register(&mut engine, 1, "SELECT SUM(span) FROM shifts");
+    install(&mut engine, 1, vec![seed_row(None, 0, 0, 0)]).unwrap();
+    for (id, span, lsn) in [
+        (1, "178956970 years 7 mons", 10),
+        (2, "2147483647 days", 11),
+    ] {
+        let updates = engine
+            .aggregate_updates(&insert(shifts, id, "a", Some(span), lsn))
+            .unwrap();
+        assert!(
+            updates.transitions.iter().all(|transition| {
+                !matches!(
+                    transition.reason,
+                    subql::MaintenanceStopReason::SumOutOfRange { .. }
+                )
+            }),
+            "{span} stays in range"
+        );
+    }
+    let transitions = engine
+        .aggregate_updates(&insert(
+            shifts,
+            3,
+            "a",
+            Some("9223372036854775807 microseconds"),
+            12,
+        ))
+        .unwrap()
+        .transitions;
+    assert!(
+        matches!(
+            transitions.first().map(|transition| &transition.reason),
+            Some(subql::MaintenanceStopReason::SumOutOfRange { .. })
+        ),
+        "{transitions:?}"
+    );
+}
+
+/// An install over no rows answers NULL for both functions, as PostgreSQL's
+/// `sum` and `avg` do over no rows.
+#[test]
+fn an_install_over_no_rows_answers_null() {
+    let (mut engine, _) = engine();
+    register(&mut engine, 1, "SELECT SUM(span) FROM shifts");
+    register(&mut engine, 2, "SELECT AVG(span) FROM shifts");
+    let updates = install(&mut engine, 1, vec![seed_row(None, 0, 0, 0)]).unwrap();
+    assert!(matches!(&value(&updates), AggValue::Sum(None)));
+    let updates = install(&mut engine, 2, vec![seed_row(None, 0, 0, 0)]).unwrap();
+    assert!(matches!(&value(&updates), AggValue::Avg(None)));
+}
+
+/// A grouped install whose seed holds the infinity's own fields refuses to
+/// maintain the total. PostgreSQL 16's seed read reports exactly that
+/// value on such rows, and the engine cannot carry it.
+#[test]
+fn a_grouped_install_whose_total_leaves_range_stops() {
+    let (mut engine, _) = engine();
+    register(
+        &mut engine,
+        1,
+        "SELECT crew, SUM(span) FROM shifts GROUP BY crew",
+    );
+    assert_eq!(
+        install(
+            &mut engine,
+            1,
+            vec![vec![
+                Value::String("a".into()),
+                Value::Interval(interval(
+                    "178956970 years 7 mons 2147483647 days 9223372036854775807 microseconds",
+                ),),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(1),
+            ]]
+        )
+        .err(),
+        Some(AggregateInstallError::SumOutOfRange(1))
+    );
+}
+
 /// What stays a read: the variance family, `HAVING` over an interval
 /// aggregate, and every interval aggregate on an engine without the type.
 #[test]
@@ -310,7 +505,8 @@ fn what_is_not_maintained_is_read() {
         .is_some());
 }
 
-/// The replay detector folds an interval `SUM` from its retained rows and
+/// The replay detector folds an interval `SUM` from its retained rows,
+/// empties it on a truncate as PostgreSQL's empty `sum` answers, and
 /// carries it through a checkpoint.
 #[test]
 fn the_replay_detector_folds_an_interval_sum() {
@@ -345,6 +541,9 @@ fn the_replay_detector_folds_an_interval_sum() {
         sum(&detector),
         Some(NumericValue::Interval(interval("1 mon")))
     );
+    let truncate = TestEvent::<Postgres>::truncate(shifts);
+    assert!(detector.apply_transaction(&[truncate], &catalog).unwrap());
+    assert_eq!(sum(&detector), None);
 
     let bytes = detector.checkpoint().unwrap();
     let restored: ReplayDetector<Postgres> =

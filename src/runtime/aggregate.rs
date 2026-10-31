@@ -820,18 +820,6 @@ impl Total {
             }
         }
     }
-
-    /// The interval mean, which `add` has already checked has an answer.
-    fn interval_mean(&self) -> Option<crate::NumericValue> {
-        let Self::Interval(total) = self else {
-            return None;
-        };
-        total
-            .mean()
-            .ok()
-            .flatten()
-            .map(crate::NumericValue::Interval)
-    }
 }
 
 /// Digits `value` carries ahead of the decimal point.
@@ -1162,7 +1150,12 @@ impl AggAccumulator {
         }
         let double = || crate::NumericValue::Double(self.sum / self.contributions as f64);
         match (&self.total, self.mean_rule) {
-            (Total::Interval(_), _) => self.total.interval_mean(),
+            // `add` has already checked the total has an answer.
+            (Total::Interval(total), _) => total
+                .mean()
+                .ok()
+                .flatten()
+                .map(crate::NumericValue::Interval),
             // The full-statistics spread retains the double sum beside `SUM(real)`.
             (Total::Single(total, _), _) => {
                 let mut wide = *total;
@@ -2388,6 +2381,42 @@ mod tests {
             accumulator.value(),
             accumulator.value_as(HavingFunction::Avg),
             "a total of 9 and a mean of 3 are not the same value"
+        );
+    }
+
+    /// A fold that left the interval total's range keeps the refusal in its
+    /// snapshot, so a restore of it refuses too.
+    #[test]
+    fn an_interval_snapshot_out_of_range_refuses_to_restore() {
+        let rule = FoldRule {
+            total: crate::backend::SumRule::Interval,
+            ..RULE
+        };
+        let spec = AggSpec::Sum { column: 0 };
+        let mut accumulator = AggAccumulator::from_spec(&spec, rule);
+        let ceiling = AggDelta::Totalled {
+            value: super::TotalDelta::Interval(crate::backend::IntervalSum::of(
+                crate::backend::Interval::parse("2147483647 days")
+                    .expect("the days fit the ported range"),
+                1,
+            )),
+            count_delta: 1,
+        };
+        assert!(accumulator.apply(&ceiling).is_ok(), "the ceiling fits");
+        let one_more = AggDelta::Totalled {
+            value: super::TotalDelta::Interval(crate::backend::IntervalSum::of(
+                crate::backend::Interval::parse("1 days").expect("a day parses"),
+                1,
+            )),
+            count_delta: 1,
+        };
+        assert!(
+            accumulator.apply(&one_more).is_err(),
+            "one day past the days' ceiling leaves the range"
+        );
+        assert_eq!(
+            AggAccumulator::from_snapshot(&accumulator.snapshot(), &spec, rule).err(),
+            Some("interval total out of range")
         );
     }
 }
