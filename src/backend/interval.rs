@@ -155,10 +155,10 @@ impl Interval {
             return None;
         }
         if !self.is_finite() {
-            return match factor.partial_cmp(&0.0)? {
-                Ordering::Equal => None,
-                Ordering::Less => self.checked_neg(),
-                Ordering::Greater => Some(self),
+            return match (factor == 0.0, factor < 0.0) {
+                (true, _) => None,
+                (false, true) => self.checked_neg(),
+                (false, false) => Some(self),
             };
         }
         if factor.is_infinite() {
@@ -322,7 +322,13 @@ pub fn shift_timestamp(
             year += month / 12 - 1;
             month = month % 12 + 12;
         }
-        let month = u32::try_from(month).map_err(|_| TimestampShift::OutOfRange)?;
+        // The division above normalises `month` to 1..=12.
+        debug_assert!((1..=12).contains(&month), "the division normalises `month`");
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "the debug assert bounds `month` to 1..=12"
+        )]
+        let month = month as u32;
         let last = days_in_month(year, month);
         let date = chrono::NaiveDate::from_ymd_opt(year, month, at.day().min(last))
             .ok_or_else(|| past_chrono((1..=294_276).contains(&year)))?;
@@ -371,21 +377,26 @@ pub fn timestamp_difference(
     later: chrono::NaiveDateTime,
     earlier: chrono::NaiveDateTime,
 ) -> Option<Interval> {
-    let time = pg_timestamp(later)?.checked_sub(pg_timestamp(earlier)?)?;
+    // `chrono` holds 262145 years either way, so the difference fits an
+    // `i64` of microseconds.
+    let time = pg_timestamp(later)? - pg_timestamp(earlier)?;
+    // Division truncates toward zero, so the days and the clock that remain
+    // share the difference's sign, and nothing carries over.
     let whole_days = time / USECS_PER_DAY;
-    let mut time = time - whole_days * USECS_PER_DAY;
-    let mut days = i32::try_from(whole_days).ok()?;
-    if days > 0 && time < 0 {
-        time += USECS_PER_DAY;
-        days -= 1;
-    } else if days < 0 && time > 0 {
-        time -= USECS_PER_DAY;
-        days += 1;
-    }
+    // The difference spans at most 97466824 days, under `i32`'s reach.
+    debug_assert!(
+        (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&whole_days),
+        "a difference of timestamps fits whole `i32` days"
+    );
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the debug assert bounds `whole_days`"
+    )]
+    let days = whole_days as i32;
     Some(Interval {
         months: 0,
         days,
-        microseconds: time,
+        microseconds: time - whole_days * USECS_PER_DAY,
     })
 }
 
@@ -413,8 +424,20 @@ pub fn shift_time(
         clock + i128::from(span.microseconds)
     };
     let micros = moved.rem_euclid(i128::from(USECS_PER_DAY));
-    let seconds = u32::try_from(micros / 1_000_000).ok()?;
-    let nanos = u32::try_from(micros % 1_000_000).ok()? * 1_000;
+    // `rem_euclid` keeps `micros` under one day, so the clock split fits.
+    debug_assert!(
+        micros < i128::from(USECS_PER_DAY),
+        "rem_euclid keeps `micros` under one day"
+    );
+    #[expect(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "the debug assert bounds `micros` under one day"
+    )]
+    let (seconds, nanos) = (
+        (micros / 1_000_000) as u32,
+        (micros % 1_000_000) as u32 * 1_000,
+    );
     chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos)
 }
 
@@ -725,6 +748,22 @@ mod tests {
             microseconds: i64::MAX,
         };
         assert_eq!(clock.divided_by(0.5), None);
+
+        assert_eq!(
+            interval("infinity").divided_by(0.5),
+            Some(interval("infinity"))
+        );
+        assert_eq!(
+            interval("infinity").divided_by(-0.5),
+            Some(interval("-infinity"))
+        );
+        assert_eq!(
+            interval("-infinity").divided_by(0.5),
+            Some(interval("-infinity"))
+        );
+        assert_eq!(interval("infinity").divided_by(f64::INFINITY), None);
+        assert_eq!(interval("infinity").divided_by(f64::NEG_INFINITY), None);
+        assert_eq!(interval("1 day").divided_by(f64::NAN), None);
     }
 
     fn fold(sum: &mut IntervalSum, text: &str, weight: i64) {
@@ -886,7 +925,13 @@ mod tests {
             ("01:00:00", -0.5, Some("-00:30:00")),
             ("1 mon", f64::NAN, None),
             ("1 day", f64::INFINITY, Some("infinity")),
+            ("infinity", 2.0, Some("infinity")),
             ("infinity", -2.0, Some("-infinity")),
+            ("-infinity", 2.0, Some("-infinity")),
+            ("-infinity", -2.0, Some("infinity")),
+            ("1 day", f64::NEG_INFINITY, Some("-infinity")),
+            ("-1 day", f64::INFINITY, Some("-infinity")),
+            ("-1 day", f64::NEG_INFINITY, Some("infinity")),
             ("infinity", 0.0, None),
             ("0", f64::INFINITY, None),
         ] {
@@ -901,8 +946,8 @@ mod tests {
         }
     }
 
-    /// `+`, `-` and unary `-` as PostgreSQL answers them, overflow and
-    /// cancelling infinities raising.
+    /// `+`, `-` and unary `-` as PostgreSQL answers them, with overflow
+    /// raising.
     #[test]
     fn addition_and_negation_follow_postgres() {
         assert_eq!(
@@ -917,6 +962,28 @@ mod tests {
             None
         );
         assert_eq!(
+            interval("2147483647 mons").checked_add(interval("1 mon")),
+            None
+        );
+        assert_eq!(
+            interval("9223372036854775806 usec").checked_add(interval("2 usec")),
+            None
+        );
+        assert_eq!(
+            interval("-2147483648 mons").checked_sub(interval("1 mon")),
+            None
+        );
+        assert_eq!(
+            interval("-2147483648 days").checked_sub(interval("1 day")),
+            None
+        );
+        assert_eq!(
+            interval("-9223372036854775807 usec").checked_sub(interval("2 usec")),
+            None
+        );
+        assert_eq!(interval("-2147483648 mons").checked_neg(), None);
+        assert_eq!(interval("-9223372036854775808 usec").checked_neg(), None);
+        assert_eq!(
             interval("1 mon -2 days 03:00")
                 .checked_neg()
                 .unwrap()
@@ -924,20 +991,70 @@ mod tests {
             "-1 mons +2 days -03:00:00"
         );
         assert_eq!(
-            interval("infinity").checked_add(interval("-infinity")),
-            None
-        );
-        assert_eq!(interval("infinity").checked_sub(interval("infinity")), None);
-        assert_eq!(
-            interval("1 day").checked_sub(interval("-infinity")),
-            Some(interval("infinity"))
-        );
-        assert_eq!(
             interval("1 day")
                 .checked_sub(interval("02:00"))
                 .unwrap()
                 .to_string(),
             "1 day -02:00:00"
+        );
+    }
+
+    /// An infinity absorbs a finite operand, and opposite infinities cancel
+    /// into PostgreSQL's `interval out of range`.
+    #[test]
+    fn infinities_add_as_postgres_adds_them() {
+        assert_eq!(
+            interval("infinity").checked_add(interval("-infinity")),
+            None
+        );
+        assert_eq!(interval("infinity").checked_sub(interval("infinity")), None);
+        assert_eq!(
+            interval("-infinity").checked_sub(interval("-infinity")),
+            None
+        );
+        assert_eq!(
+            interval("infinity").checked_sub(interval("-infinity")),
+            Some(interval("infinity"))
+        );
+        assert_eq!(
+            interval("infinity").checked_add(interval("infinity")),
+            Some(interval("infinity"))
+        );
+        assert_eq!(
+            interval("infinity").checked_neg(),
+            Some(interval("-infinity"))
+        );
+        assert_eq!(
+            interval("-infinity").checked_neg(),
+            Some(interval("infinity"))
+        );
+        assert_eq!(
+            interval("1 day").checked_sub(interval("-infinity")),
+            Some(interval("infinity"))
+        );
+        assert_eq!(
+            interval("infinity").checked_add(interval("1 day")),
+            Some(interval("infinity"))
+        );
+        assert_eq!(
+            interval("1 day").checked_add(interval("infinity")),
+            Some(interval("infinity"))
+        );
+        assert_eq!(
+            interval("-1 day").checked_add(interval("-infinity")),
+            Some(interval("-infinity"))
+        );
+        assert_eq!(
+            interval("infinity").checked_sub(interval("1 day")),
+            Some(interval("infinity"))
+        );
+        assert_eq!(
+            interval("1 day").checked_sub(interval("infinity")),
+            Some(interval("-infinity"))
+        );
+        assert_eq!(
+            interval("-1 day").checked_sub(interval("infinity")),
+            Some(interval("-infinity"))
         );
     }
 
@@ -1023,6 +1140,16 @@ mod tests {
             Err(TimestampShift::OutOfRange),
             "4714-11-24 BC is PostgreSQL's first timestamp"
         );
+        assert_eq!(
+            shift_timestamp(before_the_first, interval("-1 mon")),
+            Err(TimestampShift::OutOfRange),
+            "a month before the first timestamp leaves PostgreSQL's range"
+        );
+        assert_eq!(
+            shift_timestamp(before_the_first, interval("-1 day")),
+            Err(TimestampShift::OutOfRange),
+            "a day before the first timestamp leaves PostgreSQL's range"
+        );
     }
 
     /// `timestamp - timestamp` carries whole days into the days field, and a
@@ -1039,6 +1166,33 @@ mod tests {
         assert_eq!(
             between("2024-01-01", "2024-03-01 00:00:01").as_deref(),
             Some("-60 days -00:00:01")
+        );
+        // A timestamp outside PostgreSQL's range, and the difference between
+        // its first and `chrono`'s last.
+        let first = chrono::NaiveDate::from_ymd_opt(-4713, 11, 24)
+            .unwrap()
+            .and_time(chrono::NaiveTime::MIN);
+        let before = chrono::NaiveDate::from_ymd_opt(-4714, 11, 24)
+            .unwrap()
+            .and_time(chrono::NaiveTime::MIN);
+        let last = chrono::NaiveDate::from_ymd_opt(262_142, 12, 31)
+            .unwrap()
+            .and_hms_opt(23, 59, 59)
+            .unwrap()
+            + chrono::TimeDelta::microseconds(999_999);
+        assert_eq!(timestamp_difference(before, first), None);
+        assert_eq!(timestamp_difference(first, before), None);
+        assert_eq!(
+            timestamp_difference(last, first)
+                .map(|i| i.to_string())
+                .as_deref(),
+            Some("97466824 days 23:59:59.999999")
+        );
+        assert_eq!(
+            timestamp_difference(first, last)
+                .map(|i| i.to_string())
+                .as_deref(),
+            Some("-97466824 days -23:59:59.999999")
         );
         let clock = |at: &str, span: &str, subtract: bool| {
             shift_time(

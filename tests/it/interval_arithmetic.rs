@@ -157,6 +157,10 @@ fn arithmetic_answers_as_postgres_answers() {
             "zoned + interval '90 minutes' = '2024-03-01 01:30:01+00'",
         ),
         (
+            "zoned + (- interval '90 minutes') = '2024-02-29 22:30:00+00'",
+            "zoned + (- interval '90 minutes') = '2024-02-29 22:30:01+00'",
+        ),
+        (
             "zoned - '2024-01-31 12:00:00+05' = '29 days 17:00:00'",
             "zoned - '2024-01-31 12:00:00+05' = '29 days 17:00:01'",
         ),
@@ -234,6 +238,8 @@ fn a_result_postgres_raises_on_is_refused() {
                 "start + interval '2147483647 mons' > '2024-01-01 00:00:00'",
                 "span / (units - 3) > '1 day'",
                 "span * 1e10 > '1 day'",
+                "clock + interval 'infinity' > '00:00:00'",
+                "clock - interval 'infinity' > '00:00:00'",
             ]
         ),
         [
@@ -241,7 +247,13 @@ fn a_result_postgres_raises_on_is_refused() {
                 operation: ArithmeticOp::Add
             },
             EvaluationRefusal::DatetimeOutOfRange {
+                operation: ArithmeticOp::Add
+            },
+            EvaluationRefusal::DatetimeOutOfRange {
                 operation: ArithmeticOp::Multiply
+            },
+            EvaluationRefusal::DatetimeOutOfRange {
+                operation: ArithmeticOp::Subtract
             },
             EvaluationRefusal::DivisionByZero {
                 operation: ArithmeticOp::Divide
@@ -276,6 +288,16 @@ fn a_timestamp_past_the_last_chrono_year_is_refused() {
             },
         ]
     );
+    let late_zoned = Shift {
+        zoned: "262142-12-31 23:59:59",
+        ..SHIFT
+    };
+    assert_eq!(
+        refusals(&late_zoned, &["zoned + interval '1 hour' IS NOT NULL"]),
+        [EvaluationRefusal::DatetimeUnrepresentable {
+            operation: ArithmeticOp::Add
+        }]
+    );
 }
 
 /// What stays a read: a `timestamptz` moved by months, days or an interval
@@ -286,6 +308,7 @@ fn what_postgres_or_the_time_zone_decides_is_read() {
     for predicate in [
         "zoned + span > '2024-01-01 00:00:00+00'",
         "zoned + interval '1 day' > '2024-01-01 00:00:00+00'",
+        "zoned + (+ interval '90 minutes') > '2024-01-01 00:00:00+00'",
         "zoned - interval '1 mon' > '2024-01-01 00:00:00+00'",
         "day + '1 day' > '2024-01-01'",
         "clock - '01:00' > '00:00'",
@@ -295,6 +318,7 @@ fn what_postgres_or_the_time_zone_decides_is_read() {
         "2 / span > '1 day'",
         "start - zoned > '1 day'",
         "start + day > '2024-01-01 00:00:00'",
+        "factor > (1 + 'a') / 2",
     ] {
         let registered =
             register::<Postgres>(DDL, &format!("SELECT * FROM shifts WHERE {predicate}"));
