@@ -13,6 +13,7 @@ use proptest::collection::vec;
 use proptest::prelude::any;
 use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
 use subql::test_harnesses::predicate_grammar::{self, subql_selects, t, Case, Engine};
+use subql::test_harnesses::temporal_grammar;
 
 /// Where a failing byte string is recorded, apart from the shipped sweep's
 /// file so neither replays the other's seeds.
@@ -139,6 +140,124 @@ fn generated_filters_agree_with_postgres() {
     assert!(
         compared.saturating_mul(5) >= cases(),
         "{compared} of {} generated filters were served and compared",
+        cases()
+    );
+}
+
+/// What PostgreSQL answers for a temporal case.
+enum Answer {
+    /// It keeps the row or not.
+    Kept(bool),
+    /// It cannot run the statement over any row: it has no operator for the
+    /// operands, or a literal is not of its kind.
+    Unresolved(String),
+    /// It raised on this row's values, which the order it evaluates the
+    /// filter in decides, so the case is not compared.
+    Raised,
+}
+
+#[derive(diesel::QueryableByName)]
+struct Kept {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    kept: i64,
+}
+
+fn postgres_answers(
+    connection: &mut diesel::PgConnection,
+    case: &temporal_grammar::Case,
+) -> Answer {
+    diesel::sql_query("DELETE FROM tt")
+        .execute(connection)
+        .expect("the case table empties");
+    diesel::sql_query(case.row.insert_sql())
+        .execute(connection)
+        .expect("the pool's row stores");
+    let counted = diesel::sql_query(format!(
+        "SELECT COUNT(*) AS kept FROM tt WHERE {}",
+        case.filter.render()
+    ))
+    .get_result::<Kept>(connection);
+    match counted {
+        Ok(Kept { kept }) => Answer::Kept(kept == 1),
+        Err(diesel::result::Error::DatabaseError(_, info)) => {
+            let message = info.message();
+            if [
+                "operator does not exist",
+                "operator is not unique",
+                "invalid input syntax",
+                "could not determine",
+                "is of type",
+                "must be type",
+            ]
+            .iter()
+            .any(|unresolved| message.contains(unresolved))
+            {
+                Answer::Unresolved(message.to_owned())
+            } else {
+                Answer::Raised
+            }
+        }
+        Err(error) => panic!("the count runs: {error}"),
+    }
+}
+
+/// PostgreSQL's date, time and interval arithmetic, in a session time zone
+/// with daylight saving so that serving a move the zone decides diverges.
+/// A filter PostgreSQL cannot resolve that subql serves diverges too.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn generated_temporal_filters_agree_with_postgres() {
+    let db = crate::common::pg_database();
+    let mut connection = db.connect();
+    for statement in [
+        "SET TIME ZONE 'Europe/Rome'",
+        "DROP TABLE IF EXISTS tt",
+        temporal_grammar::DDL,
+    ] {
+        diesel::sql_query(statement)
+            .execute(&mut connection)
+            .expect("the session and case table are set up");
+    }
+    let catalog = temporal_grammar::catalog();
+    let mut runner = TestRunner::new(Config {
+        cases: cases(),
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(REGRESSIONS))),
+        ..Config::default()
+    });
+    let connection = RefCell::new(connection);
+    let compared = Cell::new(0u32);
+    let outcome = runner.run(&vec(any::<u8>(), 64..512), |bytes| {
+        let Ok(case) = temporal_grammar::Case::arbitrary(&mut arbitrary::Unstructured::new(&bytes))
+        else {
+            return Ok(());
+        };
+        let Some(served) = temporal_grammar::subql_selects(&case, catalog.clone()) else {
+            return Ok(());
+        };
+        match postgres_answers(&mut connection.borrow_mut(), &case) {
+            Answer::Kept(kept) if kept == served => {
+                compared.set(compared.get() + 1);
+                Ok(())
+            }
+            Answer::Raised => Ok(()),
+            Answer::Kept(kept) => Err(TestCaseError::fail(format!(
+                "subql serves this filter with a different answer: served {served}, \
+                 PostgreSQL keeps {kept}\n{}",
+                case.reproduction()
+            ))),
+            Answer::Unresolved(message) => Err(TestCaseError::fail(format!(
+                "subql serves a filter PostgreSQL cannot run ({message}):\n{}",
+                case.reproduction()
+            ))),
+        }
+    });
+    if let Err(failure) = outcome {
+        panic!("{failure}");
+    }
+    assert!(
+        compared.get().saturating_mul(5) >= cases(),
+        "{} of {} generated filters were served and compared",
+        compared.get(),
         cases()
     );
 }
