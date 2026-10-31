@@ -218,6 +218,8 @@ impl Cell {
             Some(NumericValue::Integer(n)) => Self::Int(*n),
             Some(NumericValue::Double(x)) => Self::Real(*x),
             Some(NumericValue::Decimal(d)) => Self::Real(d.to_string().parse().unwrap_or(f64::NAN)),
+            // The SQLite model has no interval type to answer with.
+            Some(NumericValue::Interval(_)) => Self::Null,
         }
     }
 

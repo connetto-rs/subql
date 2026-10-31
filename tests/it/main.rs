@@ -421,6 +421,8 @@ mod semantics_missing_cell;
 
 mod semantics_interval;
 
+mod agg_interval;
+
 mod null_safe_equality;
 
 mod truth_tests;
