@@ -6,7 +6,7 @@ use bigdecimal::BigDecimal;
 use chrono::TimeZone;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
-use subql::backend::{Postgres, Value};
+use subql::backend::{Interval, Postgres, Value};
 use subql::testing::TestEvent;
 use subql::{
     catalog_helpers, AggValue, DefaultIds, NumericValue, ReplayAnswer, ReplayDetector, ReplayError,
@@ -303,6 +303,61 @@ fn rows_tier_round_trips_every_scalar_family() {
     twin.apply_transaction(&[event], &db)
         .expect("the update applies to the twin");
     assert_eq!(restored.answer(), twin.answer());
+}
+
+/// An interval column takes the rows tier through a checkpoint and a
+/// restore, and an update to a span still settles on the restored state.
+#[test]
+fn rows_tier_round_trips_an_interval_column() {
+    let db = parse("CREATE TABLE shifts (id INT PRIMARY KEY, span INTERVAL);");
+    let shifts = table_of(&db, "shifts");
+    let sql = "SELECT * FROM shifts";
+    let engine = engine_of(db.clone());
+    let detector = detector_of(&engine, sql, shifts, vec![shift_row_a(), shift_row_b()]);
+    assert_eq!(
+        detector.answer(),
+        &ReplayAnswer::Rows(vec![(shift_row_b(), 1), (shift_row_a(), 1)]),
+        "the answer holds both rows whatever their order"
+    );
+
+    let bytes = detector.checkpoint().expect("the checkpoint encodes");
+    let restored = restored_of(&engine, sql, &bytes);
+    assert_eq!(
+        restored.answer(),
+        detector.answer(),
+        "restore answers what the detector answered"
+    );
+
+    let mut twin = detector_of(&engine, sql, shifts, vec![shift_row_a(), shift_row_b()]);
+    let event = update(shifts, shift_row_a(), shift_row_a_edited());
+    let mut restored = restored;
+    restored
+        .apply_transaction(core::slice::from_ref(&event), &db)
+        .expect("the update applies to the restored detector");
+    twin.apply_transaction(&[event], &db)
+        .expect("the update applies to the twin");
+    assert_eq!(restored.answer(), twin.answer());
+}
+
+fn shift_row_a() -> Vec<Value<Postgres>> {
+    vec![
+        Value::Int(1),
+        Value::Interval(Interval::parse("1 mon").expect("PostgreSQL reads this interval")),
+    ]
+}
+
+fn shift_row_a_edited() -> Vec<Value<Postgres>> {
+    vec![
+        Value::Int(1),
+        Value::Interval(Interval::parse("30 days").expect("PostgreSQL reads this interval")),
+    ]
+}
+
+fn shift_row_b() -> Vec<Value<Postgres>> {
+    vec![
+        Value::Int(2),
+        Value::Interval(Interval::parse("30 days").expect("PostgreSQL reads this interval")),
+    ]
 }
 
 #[test]

@@ -126,20 +126,11 @@ impl<'db, DB: DatabaseLike> PgAdapter<'db, DB> {
     /// The scalar family of the target column, the dispatch key for
     /// families Postgres will not assignment-cast from a text bind, or
     /// `None` for a declared type that maps to no supported scalar.
-    ///
-    /// The catalog's [`crate::backend::ScalarKind`] classifies every family
-    /// but the interval, which the declared type names alone.
     fn scalar_family_of(&self, column: &DB::Column) -> Option<ScalarFamily> {
-        let data_type = column.data_type(self.catalog);
         crate::catalog_helpers::classify_scalar_kind::<crate::backend::Postgres>(
-            &data_type.name(self.catalog),
+            &column.data_type(self.catalog).name(self.catalog),
         )
         .and_then(|kind| kind.family())
-        .or_else(|| {
-            data_type
-                .scalar_family(self.catalog)
-                .filter(|family| *family == ScalarFamily::Interval)
-        })
     }
 
     /// The declared SQL type name of the target column, verbatim from the

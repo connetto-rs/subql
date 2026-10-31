@@ -472,6 +472,35 @@ mod scalar_kind_serde_tests {
         assert!(postcard::from_bytes::<ScalarKind<TestCustom>>(&[0, 17]).is_err());
     }
 
+    /// An interval names the interval kind, and the exact group value of a
+    /// kind answers only a value that names that kind back.
+    #[test]
+    fn an_interval_value_names_its_kind_and_answers_only_for_it() {
+        use super::{decode_exact_group_value, Value};
+        use crate::backend::{Interval, Postgres, ValueKind};
+
+        let span = Interval::parse("1 mon").expect("PostgreSQL reads this interval");
+        let value: Value<Postgres> = Value::Interval(span);
+        assert_eq!(
+            value.scalar_kind(),
+            Some(ValueKind::Builtin(ScalarFamily::Interval)),
+            "a span names the interval kind"
+        );
+        assert_eq!(
+            decode_exact_group_value::<Postgres>(
+                ValueKind::Builtin(ScalarFamily::Interval),
+                value.clone()
+            ),
+            Some(Value::Interval(span)),
+            "a span answers for the interval kind"
+        );
+        assert_eq!(
+            decode_exact_group_value::<Postgres>(ValueKind::Builtin(ScalarFamily::Int), value),
+            None,
+            "and refuses to answer for another"
+        );
+    }
+
     /// A comparison's persisted bytes, pinned because the compiled program
     /// carries them and a reader refuses only a version it was told about.
     ///

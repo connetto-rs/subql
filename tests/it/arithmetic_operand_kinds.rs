@@ -15,8 +15,8 @@ use subql::compiler::vm::refusal::{ArithmeticOp, EvaluationRefusal, IntegerOverf
 use subql::compiler::SqlLiteralParse;
 use subql::testing::TestEvent;
 use subql::{
-    catalog_helpers, ConsumerNotifications, DefaultIds, RegisterError, SubscriptionEngine,
-    SubscriptionRequest,
+    catalog_helpers, ConsumerNotifications, DefaultIds, NotServed, RegisterError,
+    SubscriptionEngine, SubscriptionRequest,
 };
 
 /// Register `predicate` over `t` and insert `row`.
@@ -156,6 +156,33 @@ fn a_promoted_integer_the_backend_cannot_widen_beside_is_refused() {
             "{predicate}"
         );
         assert!(notifications.inserted().is_empty(), "{predicate}");
+    }
+}
+
+/// An arithmetic that names two literal kinds in its nested operands has no
+/// kind to read them at, so the engine records the subscription as one no
+/// tier serves in process, whatever side of the outer arithmetic the
+/// mismatched pair sits on.
+#[test]
+fn an_arithmetic_naming_two_literal_kinds_is_refused() {
+    let db = ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE t (id INT PRIMARY KEY, n BIGINT)")
+        .expect("DDL parses");
+    let mut engine: SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB> =
+        SubscriptionEngine::new(db, PostgreSqlDialect {});
+    for predicate in ["id = (1 + 'x') + 2", "id = 2 + (1 + 'x')"] {
+        let registered = engine
+            .register(SubscriptionRequest::new(
+                1,
+                format!("SELECT * FROM t WHERE {predicate}"),
+            ))
+            .expect("a database tier can still serve it, so the refusal is recorded");
+        assert!(
+            matches!(
+                registered.not_served_because,
+                Some(NotServed::UnsupportedSql(_))
+            ),
+            "{predicate}: {registered:?}"
+        );
     }
 }
 

@@ -687,9 +687,12 @@ mod tests {
             |text| crate::backend::Interval::parse(text).expect("PostgreSQL reads this interval");
         let mut map: HashMap<TermKey<Postgres>, u32> = HashMap::new();
         map.insert(TermKey::Interval(interval("1 mon")), 1);
-        let TermLookup::Key(key) = TermLookup::of(Value::Interval(interval("30 days"))) else {
-            panic!("an interval is a key");
-        };
+        let value: Value<Postgres> = Value::Interval(interval("30 days"));
+        assert!(
+            matches!(TermLookup::of(value), TermLookup::Key(TermKey::Interval(_))),
+            "an interval row is keyed by its span"
+        );
+        let key = TermKey::Interval(interval("30 days"));
         assert_eq!(map.get(&key), Some(&1));
         assert!(hashes_alike(
             &key,

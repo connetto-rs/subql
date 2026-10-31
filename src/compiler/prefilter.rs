@@ -626,4 +626,39 @@ mod tests {
             Some(PlannerValue::Int(1))
         );
     }
+
+    /// A literal that reads at the column's kind keeps a key only when the
+    /// payload has one, so a bytea equality reaches the scan set rather
+    /// than an index nothing can probe.
+    #[test]
+    fn a_readable_literal_keeps_a_key_only_when_it_has_one() {
+        use sql_traits::structs::ParserDB;
+        use sqlparser::dialect::PostgreSqlDialect;
+
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE bins (id INT PRIMARY KEY, n INT, b BYTEA);",
+        )
+        .unwrap();
+        let table = catalog_helpers::table_id::<Postgres, _>(&db, "bins").unwrap();
+        let nums = catalog_helpers::column_id::<Postgres, _>(&db, table, "n").unwrap();
+        let bins = catalog_helpers::column_id::<Postgres, _>(&db, table, "b").unwrap();
+        let dialect = PostgreSqlDialect {};
+        let literal = |sql: &str| {
+            sqlparser::parser::Parser::new(&dialect)
+                .try_with_sql(sql)
+                .unwrap()
+                .parse_expr()
+                .unwrap()
+        };
+        assert_eq!(
+            literal_index_key::<Postgres, _>(&literal("7"), table, nums, &db),
+            Some(PlannerValue::Int(7)),
+            "an integer literal keeps its key"
+        );
+        assert_eq!(
+            literal_index_key::<Postgres, _>(&literal("X'deadbeef'"), table, bins, &db),
+            None,
+            "a bytea literal reads but has no index key"
+        );
+    }
 }

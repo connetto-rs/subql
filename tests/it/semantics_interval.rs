@@ -85,13 +85,21 @@ fn engine() -> (PgEngine, subql::TableId) {
     )
 }
 
-/// Text that PostgreSQL would refuse as an interval, or a number where an
+/// Text that PostgreSQL would refuse as an interval, a field list or a
+/// value PostgreSQL's grammar has no production for, or a number where an
 /// interval is compared, refuses the predicate rather than registering one
 /// that could never match.
 #[test]
 fn an_unreadable_interval_literal_is_refused() {
     let (mut engine, _) = engine();
-    for predicate in ["span = '1 fortnight'", "span = 3600"] {
+    for predicate in [
+        "span = '1 fortnight'",
+        "span = 3600",
+        "span = interval '1' week",
+        "span = interval '1' hour(2)",
+        "span = interval x hour",
+        "span IN (interval '1' week)",
+    ] {
         assert!(
             engine
                 .register(subql::SubscriptionRequest::new(

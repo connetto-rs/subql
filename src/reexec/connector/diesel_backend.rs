@@ -392,3 +392,48 @@ pub fn boxed_mysql_read_query_owned<C: crate::backend::MySqlTableNameCase>(
     }
     Ok(boxed)
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+
+    use super::{boxed_read_query, ReadQuery, Value};
+    use crate::backend::{Interval, MySql, Postgres, SQLite};
+    use diesel::result::Error;
+
+    /// The generic re-execution read carries no interval bind, so a query
+    /// that binds an interval refuses at construction on every diesel
+    /// backend, never at the connection. The PostgreSQL page read alone
+    /// takes the interval-native query builder beside it.
+    #[test]
+    fn a_generic_read_query_refuses_an_interval_bind() {
+        let span = Interval::parse("1 day").expect("PostgreSQL reads this interval");
+        let postgres =
+            ReadQuery::<Postgres>::owned(String::from("SELECT 1"), vec![Value::Interval(span)]);
+        assert!(
+            matches!(
+                boxed_read_query::<diesel::pg::Pg, Postgres>(&postgres),
+                Err(Error::QueryBuilderError(_))
+            ),
+            "the generic read refuses an interval bind"
+        );
+        let mysql =
+            ReadQuery::<MySql>::owned(String::from("SELECT 1"), vec![Value::Interval(span)]);
+        assert!(
+            matches!(
+                boxed_read_query::<diesel::mysql::Mysql, MySql>(&mysql),
+                Err(Error::QueryBuilderError(_))
+            ),
+            "the generic read refuses an interval bind"
+        );
+        let sqlite =
+            ReadQuery::<SQLite>::owned(String::from("SELECT 1"), vec![Value::Interval(span)]);
+        assert!(
+            matches!(
+                boxed_read_query::<diesel::sqlite::Sqlite, SQLite>(&sqlite),
+                Err(Error::QueryBuilderError(_))
+            ),
+            "the generic read refuses an interval bind"
+        );
+    }
+}

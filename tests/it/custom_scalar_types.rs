@@ -14,7 +14,9 @@ use sqlparser::ast::Value as SqlValue;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::Pg18;
 use subql::backend::Postgres;
-use subql::backend::{Carried, CustomScalars, ScalarFamily, ScalarKind, ScalarKindOf, Value};
+use subql::backend::{
+    Carried, CustomScalars, Interval, ScalarFamily, ScalarKind, ScalarKindOf, Value,
+};
 use subql::backend::{ValueKind, ValueKindOf};
 use subql::compiler::vm::refusal::IntegerOverflow;
 use subql::compiler::SqlLiteralParse;
@@ -30,13 +32,15 @@ enum Mood {
     Sad,
 }
 
-/// The two types this backend adds.
+/// The three types this backend adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 enum MyKind {
     /// Carried as text.
     Mood,
     /// Carried as an integer.
     Build,
+    /// Carried as an interval.
+    Tenure,
 }
 
 /// A decoded value of either.
@@ -44,6 +48,7 @@ enum MyKind {
 enum MyValue {
     Mood(Mood),
     Build(u32),
+    Tenure(Interval),
 }
 
 #[derive(Debug)]
@@ -58,6 +63,7 @@ impl CustomScalars for MyScalars {
         match declared_type.to_ascii_lowercase().as_str() {
             "mood" => Some(MyKind::Mood),
             "build" => Some(MyKind::Build),
+            "tenure" => Some(MyKind::Tenure),
             _ => None,
         }
     }
@@ -66,6 +72,7 @@ impl CustomScalars for MyScalars {
         match kind {
             MyKind::Mood => ScalarFamily::String,
             MyKind::Build => ScalarFamily::Int,
+            MyKind::Tenure => ScalarFamily::Interval,
         }
     }
 
@@ -79,6 +86,7 @@ impl CustomScalars for MyScalars {
                 _ => None,
             },
             (MyKind::Build, Carried::Int(n)) => u32::try_from(*n).ok().map(MyValue::Build),
+            (MyKind::Tenure, Carried::Interval(span)) => Some(MyValue::Tenure(*span)),
             _ => None,
         }
     }
@@ -93,6 +101,7 @@ impl CustomScalars for MyScalars {
         match value {
             MyValue::Mood(_) => MyKind::Mood,
             MyValue::Build(_) => MyKind::Build,
+            MyValue::Tenure(_) => MyKind::Tenure,
         }
     }
 }
@@ -195,6 +204,21 @@ fn a_wire_cell_decodes_through_the_carrier_and_the_conversion() {
             Value::Int(1234)
         });
     assert_eq!(decoded, Ok(Value::Custom(MyValue::Build(1234))));
+
+    let span = Interval::parse("1 mon").expect("PostgreSQL reads this interval");
+    let decoded = subql::backend::decode_cell::<Custom, _>(
+        2,
+        ScalarKind::Custom(MyKind::Tenure),
+        |carrier| {
+            assert_eq!(
+                carrier.family(),
+                ScalarFamily::Interval,
+                "a tenure travels as an interval"
+            );
+            Value::Interval(span)
+        },
+    );
+    assert_eq!(decoded, Ok(Value::Custom(MyValue::Tenure(span))));
 }
 
 /// The two failures stay apart: a carrier that could not be read is reported

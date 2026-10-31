@@ -301,8 +301,13 @@ mod tests {
             .unwrap()
             .parse_expr()
             .unwrap();
-        let sqlparser::ast::Expr::Interval(interval) = expr else {
-            panic!("{sql} is not an interval literal");
+        let interval = match expr {
+            sqlparser::ast::Expr::Interval(interval) => interval,
+            other => {
+                return Err(RegisterError::TypeError(format!(
+                    "{sql} is not an interval literal, it reads as {other}"
+                )))
+            }
         };
         super::interval_literal(&interval).map(|value| value.to_string())
     }
@@ -333,7 +338,9 @@ mod tests {
         }
     }
 
-    /// What PostgreSQL's grammar or `interval_in` refuses is refused.
+    /// What PostgreSQL's grammar or `interval_in` refuses is refused,
+    /// including a value that is not a literal at all and an expression
+    /// that is not an interval.
     #[test]
     fn a_typed_interval_postgres_refuses_is_refused() {
         for sql in [
@@ -341,6 +348,8 @@ mod tests {
             "interval '1' hour(2)",
             "interval '1 fortnight'",
             "interval 5 hour",
+            "interval x hour",
+            "1 + 1",
         ] {
             assert!(
                 matches!(typed_interval(sql), Err(RegisterError::TypeError(_))),

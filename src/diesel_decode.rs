@@ -441,12 +441,13 @@ mod tests {
     #[test]
     fn a_type_with_no_value_variant_is_refused_by_oid() {
         let refusal = pg_canonical(Some(&[0, 0, 0, 0]), 1001);
-        let Err(RegisterError::UnsupportedSql(message)) = refusal else {
-            panic!("bytea[] (OID 1001) should be refused, got {refusal:?}");
-        };
         assert!(
-            message.contains("OID 1001"),
-            "the refusal of bytea[] should name its OID, got {message:?}"
+            matches!(
+                &refusal,
+                Err(RegisterError::UnsupportedSql(message))
+                    if message.contains("OID 1001")
+            ),
+            "bytea[] (OID 1001) should be refused naming its OID, got {refusal:?}"
         );
     }
 
