@@ -25,7 +25,7 @@ use crate::{IdTypes, ReadTier, StorageError, SubscriptionId, TableId};
 /// Magic bytes for the re-read file, distinct from a shard's.
 const MAGIC: [u8; 5] = *b"SUBQR";
 
-const VERSION: u16 = 5;
+const VERSION: u16 = 6;
 
 /// Header length in bytes.
 const HEADER_LEN: usize = 15;
@@ -253,6 +253,9 @@ pub struct InProcessEntry<I: IdTypes, B: Backend> {
     /// The statement it was registered with.
     #[serde(with = "bound_query_wire")]
     pub source_query: crate::reexec::BoundQuery<B>,
+    /// Whether each database read runs under the individual consumer's
+    /// database identity.
+    pub database_reads_per_consumer: bool,
 }
 
 impl<I: IdTypes, B: Backend> Clone for InProcessEntry<I, B> {
@@ -262,6 +265,7 @@ impl<I: IdTypes, B: Backend> Clone for InProcessEntry<I, B> {
             consumer_id: self.consumer_id,
             scope: self.scope,
             source_query: self.source_query.clone(),
+            database_reads_per_consumer: self.database_reads_per_consumer,
         }
     }
 }
@@ -348,7 +352,16 @@ mod tests {
 
     fn payload_with_binds(binds: Vec<Value<Postgres>>) -> ReadsPayload<DefaultIds, Postgres> {
         ReadsPayload {
-            in_process: Vec::new(),
+            in_process: alloc::vec![InProcessEntry::<DefaultIds, Postgres> {
+                subscription_id: 8,
+                consumer_id: 4,
+                scope: crate::SubscriptionScope::Durable,
+                source_query: crate::reexec::BoundQuery::new(
+                    String::from("SELECT COUNT(*) FROM orders"),
+                    Vec::new(),
+                ),
+                database_reads_per_consumer: true,
+            }],
             entries: alloc::vec![ReadEntry::<DefaultIds, Postgres> {
                 subscription_id: 7,
                 consumer_id: 3,
@@ -390,6 +403,18 @@ mod tests {
                         && left.source_query == right.source_query
                         && left.tables == right.tables
                         && left.tier == right.tier
+                        && left.database_reads_per_consumer == right.database_reads_per_consumer
+                })
+            && left.in_process.len() == right.in_process.len()
+            && left
+                .in_process
+                .iter()
+                .zip(&right.in_process)
+                .all(|(left, right)| {
+                    left.subscription_id == right.subscription_id
+                        && left.consumer_id == right.consumer_id
+                        && left.scope == right.scope
+                        && left.source_query == right.source_query
                         && left.database_reads_per_consumer == right.database_reads_per_consumer
                 })
     }
@@ -548,6 +573,68 @@ mod tests {
         assert!(
             alloc::format!("{refused}").contains("version 99"),
             "the refusal names the version it found, got {refused}"
+        );
+    }
+
+    /// The in-process entry as an old writer held it, without the read-mode
+    /// field.
+    #[derive(Debug, Serialize)]
+    #[serde(bound = "")]
+    struct InProcessEntryWithoutReadMode<I: IdTypes, B: Backend> {
+        subscription_id: SubscriptionId,
+        consumer_id: I::ConsumerId,
+        scope: crate::SubscriptionScope<I>,
+        #[serde(with = "bound_query_wire")]
+        source_query: crate::reexec::BoundQuery<B>,
+    }
+
+    /// A payload an old writer stored, holding the old entry.
+    #[derive(Debug, Serialize)]
+    #[serde(bound = "")]
+    struct ReadsPayloadWithoutReadMode<I: IdTypes, B: Backend> {
+        entries: Vec<ReadEntry<I, B>>,
+        in_process: Vec<InProcessEntryWithoutReadMode<I, B>>,
+        created_at_unix_ms: u64,
+    }
+
+    /// An in-process entry written before the read-mode field existed is
+    /// refused with the versions named, as the file's version check refuses
+    /// every older file.
+    #[test]
+    fn an_entry_written_before_the_read_mode_field_is_refused() {
+        let old = ReadsPayloadWithoutReadMode::<DefaultIds, Postgres> {
+            entries: Vec::new(),
+            in_process: alloc::vec![InProcessEntryWithoutReadMode::<DefaultIds, Postgres> {
+                subscription_id: 8,
+                consumer_id: 4,
+                scope: crate::SubscriptionScope::Durable,
+                source_query: crate::reexec::BoundQuery::new(
+                    String::from("SELECT COUNT(*) FROM orders"),
+                    Vec::new(),
+                ),
+            }],
+            created_at_unix_ms: 42,
+        };
+        let body = crate::persistence::codec::serialize(&old).expect("serialize");
+        let len = u32::try_from(body.len()).expect("the test body is small");
+        let mut bytes = Vec::with_capacity(HEADER_LEN + body.len());
+        bytes.extend_from_slice(&MAGIC);
+        // The version the file carried before the field, one under this
+        // build's.
+        bytes.extend_from_slice(&5u16.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&len.to_le_bytes());
+        bytes.extend_from_slice(&body);
+        let refused =
+            deserialize::<DefaultIds, Postgres>(&bytes).expect_err("the version is checked");
+        let message = alloc::format!("{refused}");
+        assert!(
+            message.contains("version 5"),
+            "the refusal names the version it found, got {message}"
+        );
+        assert!(
+            message.contains("writes 6"),
+            "the refusal names the version this build writes, got {message}"
         );
     }
 
