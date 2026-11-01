@@ -403,3 +403,25 @@ fn an_unencodable_runtime_group_demotes_without_folding() {
         subql::reexec::ReExecutionRead::Subscription
     ));
 }
+
+#[test]
+fn a_grouped_query_naming_a_missing_column_is_refused_with_its_name() {
+    for sql in [
+        "SELECT region, COUNT(*) FROM orders GROUP BY nope",
+        "SELECT nope, COUNT(*) FROM orders GROUP BY region",
+        "SELECT nope, MIN(amount) FROM orders GROUP BY region",
+    ] {
+        let (mut engine, orders): (Engine, _) = postgres_engine(DDL);
+        let error = engine
+            .register(SubscriptionRequest::new(7u64, sql))
+            .expect_err(sql);
+        assert!(
+            matches!(
+                &error,
+                subql::RegisterError::UnknownColumn { table_id, column }
+                    if *table_id == orders && column == "nope"
+            ),
+            "{sql}: {error:?}"
+        );
+    }
+}

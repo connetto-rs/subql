@@ -949,35 +949,9 @@ where
         let plan = self.resolve(spec)?;
         let plan_signature = plan_signature_bytes(&plan, spec, self.division_increment, budget)?;
         let (bags, arity) = validate_inputs(&self.database, &plan.deps, &plan.pks, tables, budget)?;
-        let term_subjects = term_subjects(spec, &plan.term_plans)?;
-        let grants = grant_sets(&term_subjects, &plan.term_plans, &bags, &plan.deps)?;
         let fingerprints = fingerprints_of(&self.database, &plan.deps)?;
-        let mut detector = ReplayDetector {
-            plan: Arc::new(ReplayPlan {
-                backend: core::any::type_name::<E::Backend>().to_string(),
-                fingerprints,
-                plan_signature,
-                program: plan.program,
-                table: plan.table,
-                deps: plan.deps,
-                pks: plan.pks,
-                arity,
-                term_plans: plan.term_plans,
-                term_subjects,
-                tier: plan.tier,
-                extreme_comparison: plan.extreme_comparison,
-                increment: self.division_increment,
-            }),
-            bags,
-            grants: Arc::new(grants),
-            fold: None,
-            groups: RedBlackTreeMap::new_sync(),
-            extreme: None,
-            extreme_groups: RedBlackTreeMap::new_sync(),
-            answer: Arc::new(ReplayAnswer::Scalar(ReplayValue::Folded(
-                AggValue::CountStar(0),
-            ))),
-        };
+        let mut detector =
+            self.unfolded_detector(spec, plan, fingerprints, plan_signature, bags, arity)?;
         detector.seed_folds(&self.database)?;
         detector.recompute_answer(&self.database)?;
         Ok(detector)
@@ -1046,11 +1020,28 @@ where
                 operator.len(),
             )?);
         }
+        let mut detector =
+            self.unfolded_detector(spec, plan, fingerprints, plan_signature, bags, arity)?;
+        detector.restore_state(&self.database, wire)?;
+        Ok(detector)
+    }
+
+    /// A detector over `bags` holding no fold, group or extreme yet, which
+    /// the caller then seeds from the rows or restores from saved state.
+    fn unfolded_detector(
+        &self,
+        spec: &SubscriptionRequest<I, E::Backend>,
+        plan: ResolvedPlan<E::Backend>,
+        fingerprints: Vec<WireFp>,
+        plan_signature: Vec<u8>,
+        bags: Vec<InputBag<E::Backend>>,
+        arity: Vec<usize>,
+    ) -> Result<ReplayDetector<E::Backend>, ReplayError> {
         let term_subjects = term_subjects(spec, &plan.term_plans)?;
         let grants = grant_sets(&term_subjects, &plan.term_plans, &bags, &plan.deps)?;
-        let mut detector = ReplayDetector {
+        Ok(ReplayDetector {
             plan: Arc::new(ReplayPlan {
-                backend,
+                backend: core::any::type_name::<E::Backend>().to_string(),
                 fingerprints,
                 plan_signature,
                 program: plan.program,
@@ -1073,9 +1064,7 @@ where
             answer: Arc::new(ReplayAnswer::Scalar(ReplayValue::Folded(
                 AggValue::CountStar(0),
             ))),
-        };
-        detector.restore_state(&self.database, wire)?;
-        Ok(detector)
+        })
     }
 
     fn resolve(

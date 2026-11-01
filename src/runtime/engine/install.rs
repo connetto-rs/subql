@@ -1,7 +1,5 @@
 //! [`crate::Install`] implementations: how each read tier's database result
 //! enters the engine.
-//!
-//! Split from `engine.rs` for size only: every impl was moved verbatim.
 use super::{
     CdcEvent, DatabaseLike, IdTypes, SqlLiteralParse, SubscriptionEngine, SubscriptionId, Vec,
 };
@@ -21,6 +19,44 @@ where
             Some(fence) => self.latest_fence.record(fence),
             None => self.latest_fence.now(),
         }
+    }
+}
+
+/// The answer a grouped-scalar install gives: every group whose value moved,
+/// and a read for every group the install could not settle alone.
+fn grouped_scalar_output<I: IdTypes, B: crate::backend::Backend, C: crate::Checkpoint>(
+    subscription_id: SubscriptionId,
+    consumer: I::ConsumerId,
+    grouped: crate::reexec::maintain::GroupedMaintenance<B, C>,
+) -> crate::AggregateMaintenanceOutput<I, B, C> {
+    crate::AggregateMaintenanceOutput {
+        updates: grouped
+            .changes
+            .into_iter()
+            .map(|(group, change)| crate::AggregateValueUpdate {
+                subscription: subscription_id,
+                consumer,
+                group: Some(group),
+                change,
+            })
+            .collect(),
+        triggers: grouped
+            .reads
+            .into_iter()
+            .map(|read| crate::reexec::ReExecutionTrigger {
+                subscription_id,
+                consumer_id: consumer,
+                read: crate::reexec::ReExecutionRead::GroupedScalar {
+                    group: read.group,
+                    query: read.query,
+                    column_kinds: read.column_kinds,
+                },
+                checkpoint: read.checkpoint,
+            })
+            .collect(),
+        transitions: Vec::new(),
+        evaluation_failures: Vec::new(),
+        stopped: Vec::new(),
     }
 }
 
@@ -183,35 +219,7 @@ where
                 None,
             );
         }
-        Ok(crate::AggregateMaintenanceOutput {
-            updates: grouped
-                .changes
-                .into_iter()
-                .map(|(group, change)| crate::AggregateValueUpdate {
-                    subscription: subscription_id,
-                    consumer,
-                    group: Some(group),
-                    change,
-                })
-                .collect(),
-            triggers: grouped
-                .reads
-                .into_iter()
-                .map(|read| crate::reexec::ReExecutionTrigger {
-                    subscription_id,
-                    consumer_id: consumer,
-                    read: crate::reexec::ReExecutionRead::GroupedScalar {
-                        group: read.group,
-                        query: read.query,
-                        column_kinds: read.column_kinds,
-                    },
-                    checkpoint: read.checkpoint,
-                })
-                .collect(),
-            transitions: Vec::new(),
-            evaluation_failures: Vec::new(),
-            stopped: Vec::new(),
-        })
+        Ok(grouped_scalar_output(subscription_id, consumer, grouped))
     }
 }
 
@@ -267,35 +275,7 @@ where
             }
             Err(error) => return Err(error),
         };
-        Ok(crate::AggregateMaintenanceOutput {
-            updates: grouped
-                .changes
-                .into_iter()
-                .map(|(group, change)| crate::AggregateValueUpdate {
-                    subscription: subscription_id,
-                    consumer,
-                    group: Some(group),
-                    change,
-                })
-                .collect(),
-            triggers: grouped
-                .reads
-                .into_iter()
-                .map(|read| crate::reexec::ReExecutionTrigger {
-                    subscription_id,
-                    consumer_id: consumer,
-                    read: crate::reexec::ReExecutionRead::GroupedScalar {
-                        group: read.group,
-                        query: read.query,
-                        column_kinds: read.column_kinds,
-                    },
-                    checkpoint: read.checkpoint,
-                })
-                .collect(),
-            transitions: Vec::new(),
-            evaluation_failures: Vec::new(),
-            stopped: Vec::new(),
-        })
+        Ok(grouped_scalar_output(subscription_id, consumer, grouped))
     }
 }
 

@@ -812,12 +812,7 @@ pub(crate) fn group_columns<B: crate::backend::Backend, DB: DatabaseLike>(
                     .to_string(),
             ));
         };
-        let column = written_column::<B, DB>(database, table_id, name).ok_or_else(|| {
-            RegisterError::UnknownColumn {
-                table_id,
-                column: name.value.clone(),
-            }
-        })?;
+        let column = written_or_unknown::<B, DB>(name, table_id, database)?;
         if columns.contains(&column) {
             return Err(RegisterError::UnsupportedSql(
                 "GROUP BY names the same column twice".to_string(),
@@ -881,13 +876,7 @@ fn grouped_projection<B: crate::backend::Backend, DB: DatabaseLike>(
                         UNSUPPORTED_PROJECTION.to_string(),
                     ));
                 };
-                let column =
-                    written_column::<B, DB>(database, table_id, name).ok_or_else(|| {
-                        RegisterError::UnknownColumn {
-                            table_id,
-                            column: name.value.clone(),
-                        }
-                    })?;
+                let column = written_or_unknown::<B, DB>(name, table_id, database)?;
                 if !groups.contains(&column) {
                     return Err(RegisterError::UnsupportedSql(alloc::format!(
                         "{name} is projected but not grouped by, so its value differs between \
@@ -1197,12 +1186,7 @@ pub(crate) fn extract_grouped_extreme<B: crate::backend::Backend, DB: DatabaseLi
                 let Some(name) = ident_name(expr) else {
                     return Ok(None);
                 };
-                let Some(column) = written_column::<B, DB>(database, table_id, name) else {
-                    return Err(RegisterError::UnknownColumn {
-                        table_id,
-                        column: name.value.clone(),
-                    });
-                };
+                let column = written_or_unknown::<B, DB>(name, table_id, database)?;
                 if !groups.contains(&column) {
                     return Ok(None);
                 }

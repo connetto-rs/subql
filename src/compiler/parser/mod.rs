@@ -500,27 +500,7 @@ where
     B: Backend + SqlLiteralParse,
     DB: DatabaseLike,
 {
-    let pq = parse_query_front_half::<B, DB>(sql, dialect, database, binds, None)?;
-
-    let (program, terms) = compile_where_clause(
-        pq.where_clause.as_ref(),
-        pq.table_id,
-        database,
-        dialect,
-        increment,
-    )?;
-
-    let prefilter_plan =
-        build_prefilter_plan::<B, DB>(pq.where_clause.as_ref(), pq.table_id, database);
-
-    Ok(CompiledQuery {
-        table_id: pq.table_id,
-        program,
-        normalized: pq.normalized,
-        prefilter_plan,
-        projection: pq.projection,
-        terms,
-    })
+    compile_bound(sql, dialect, database, binds, increment, None)
 }
 
 /// Compile bind-resolved query interest intersected with the table's read rule.
@@ -537,7 +517,24 @@ where
     B: Backend + SqlLiteralParse,
     DB: DatabaseLike,
 {
-    let pq = parse_query_front_half::<B, DB>(sql, dialect, database, binds, Some(read_rule))?;
+    compile_bound(sql, dialect, database, binds, increment, Some(read_rule))
+}
+
+/// Compile bind-resolved query interest, intersected with `read_rule` when
+/// one is given.
+fn compile_bound<B, DB>(
+    sql: &str,
+    dialect: &B::Dialect,
+    database: &DB,
+    binds: &[Value<B>],
+    increment: Option<crate::backend::DivisionPrecisionIncrement>,
+    read_rule: Option<&Expr>,
+) -> Result<CompiledQuery<B>, RegisterError>
+where
+    B: Backend + SqlLiteralParse,
+    DB: DatabaseLike,
+{
+    let pq = parse_query_front_half::<B, DB>(sql, dialect, database, binds, read_rule)?;
     let (program, terms) = compile_where_clause(
         pq.where_clause.as_ref(),
         pq.table_id,
@@ -571,11 +568,7 @@ where
     B: Backend + SqlLiteralParse,
     DB: DatabaseLike,
 {
-    let pq = parse_query_front_half::<B, DB>(sql, dialect, database, binds, Some(read_rule))?;
-    let hash_input = projection_hash_input(&pq.normalized, &pq.projection);
-    let hash = canonicalize::hash_sql(&hash_input);
-
-    Ok((pq.table_id, hash))
+    hash_bound(sql, dialect, database, binds, Some(read_rule))
 }
 
 /// Compile one statement's WHERE clause, absent clauses included, into
@@ -960,11 +953,25 @@ where
     B: Backend + SqlLiteralParse,
     DB: DatabaseLike,
 {
-    let pq = parse_query_front_half::<B, DB>(sql, dialect, database, binds, None)?;
-    let hash_input = projection_hash_input(&pq.normalized, &pq.projection);
-    let hash = canonicalize::hash_sql(&hash_input);
+    hash_bound(sql, dialect, database, binds, None)
+}
 
-    Ok((pq.table_id, hash))
+/// Hash bind-resolved query interest, intersected with `read_rule` when one
+/// is given.
+fn hash_bound<B, DB>(
+    sql: &str,
+    dialect: &B::Dialect,
+    database: &DB,
+    binds: &[Value<B>],
+    read_rule: Option<&Expr>,
+) -> Result<(TableId, PredicateHash), RegisterError>
+where
+    B: Backend + SqlLiteralParse,
+    DB: DatabaseLike,
+{
+    let pq = parse_query_front_half::<B, DB>(sql, dialect, database, binds, read_rule)?;
+    let hash_input = projection_hash_input(&pq.normalized, &pq.projection);
+    Ok((pq.table_id, canonicalize::hash_sql(&hash_input)))
 }
 
 /// Lightweight parse path that extracts `(TableId, PredicateHash)` from SQL
