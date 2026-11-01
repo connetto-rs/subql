@@ -10,6 +10,7 @@
 
 use crate::common;
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use diesel::{sql_query, Connection, PgConnection, QueryableByName, RunQueryDsl};
@@ -207,7 +208,82 @@ fn a_fresh_source_delivers_the_tables_relation_once() {
             !matches!(first, SourceItem::Event(_) | SourceItem::Commit(_)),
             "the first item is the table's relation, got {first:?}"
         );
+        let event = next_row(&mut source, "the insert").await;
+        assert_eq!(event.kind(), EventKind::Insert);
+        next_commit(&mut source, "the insert's commit").await;
+        // The consumer acknowledges nothing, so every later peek re-reads
+        // the same transaction, and nothing of it arrives a second time.
+        let second = tokio::time::timeout(Duration::from_millis(500), source.next_item()).await;
+        assert!(
+            second.is_err(),
+            "a peek that re-reads the unacknowledged transaction delivers nothing twice, \
+             got {second:?}"
+        );
         drop(source);
+    });
+    common::drop_slot(&mut setup, &slot);
+}
+
+/// A consumer that drops the source leaves the slot's work unacknowledged,
+/// and the polling task that kept peering it exits when the next new change
+/// reaches its dead channel, rather than peering for the life of the slot.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_dropped_source_stops_its_task_on_the_next_new_change() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    let mut dml = db.connect();
+    let slot = db.slot("subql_polling_dropped");
+    let publication = "subql_polling_dropped_pub";
+    sql_query(PG_DDL)
+        .execute(&mut setup)
+        .expect("create orders");
+    sql_query("ALTER TABLE orders REPLICA IDENTITY FULL")
+        .execute(&mut setup)
+        .expect("REPLICA IDENTITY FULL");
+    sql_query("CREATE TABLE items (id INT PRIMARY KEY, amount INT)")
+        .execute(&mut setup)
+        .expect("create items");
+    sql_query("ALTER TABLE items REPLICA IDENTITY FULL")
+        .execute(&mut setup)
+        .expect("REPLICA IDENTITY FULL");
+    common::create_publication(&mut setup, publication, "orders, items");
+    common::create_pgoutput_slot(&mut setup, &slot);
+
+    common::multi_thread_rt().block_on(async {
+        let catalog = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE orders (id INT PRIMARY KEY, price FLOAT);\
+             CREATE TABLE items (id INT PRIMARY KEY, amount INT);",
+        )
+        .expect("parse DDL");
+        let mut source = PollingPgCdcSource::connect(config(db.url(), &slot, publication), catalog)
+            .await
+            .expect("connect polling source");
+        let exited = source.task_exited_handle();
+        sql_query("INSERT INTO orders VALUES (1, 5.0)")
+            .execute(&mut dml)
+            .expect("insert");
+        let first = next_item(&mut source, "the table's relation").await;
+        assert!(
+            matches!(first, SourceItem::Relation(_)),
+            "the fresh slot states its table first, got {first:?}"
+        );
+        // Dropped with the insert still in the slot, as a crash drops it.
+        drop(source);
+        // A change nobody is reading from arrives, and the task's next send
+        // to the dead channel is what ends it.
+        sql_query("INSERT INTO items VALUES (1, 10)")
+            .execute(&mut dml)
+            .expect("insert items");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !exited.load(Ordering::Relaxed) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the task exits when its consumer is gone"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     });
     common::drop_slot(&mut setup, &slot);
 }

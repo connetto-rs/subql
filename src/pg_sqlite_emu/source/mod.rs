@@ -919,6 +919,43 @@ mod tests {
         assert_eq!(ev.table_id(src.pg_catalog()), table_id);
     }
 
+    /// A truncate of a table a drain has already announced does not re-state
+    /// the definition, so a consumer that overwrites its view on receipt sees
+    /// it once, from the first frame that needed it.
+    #[test]
+    fn a_truncate_does_not_reannounce_an_already_announced_table() {
+        let mut src = build_source();
+        sql_query("INSERT INTO orders (id, amount, status) VALUES (9, 500, 'paid')")
+            .execute(src.connection())
+            .unwrap();
+        // The insert's drain announces the table.
+        assert!(
+            matches!(src.poll_next_item().unwrap(), Some(SourceItem::Relation(_))),
+            "the insert's drain states the table first"
+        );
+        assert!(
+            src.poll_next_item()
+                .unwrap()
+                .and_then(SourceItem::into_event)
+                .is_some(),
+            "the insert follows its table's relation"
+        );
+        assert!(
+            matches!(src.poll_next_item().unwrap(), Some(SourceItem::Commit(_))),
+            "the insert's transaction ends in a commit"
+        );
+        let table_id =
+            catalog_helpers::table_id::<crate::backend::Postgres, _>(src.pg_catalog(), "orders")
+                .expect("orders id");
+        src.inject_truncate(table_id).expect("truncate");
+        let ev = src
+            .poll_next_item()
+            .unwrap()
+            .and_then(SourceItem::into_event)
+            .expect("the truncate arrives without a second relation");
+        assert_eq!(ev.kind(), crate::EventKind::Truncate);
+    }
+
     /// Every drain is one transaction, and its rows order after every row of
     /// the drains before it and among themselves in their order, and each drain
     /// names a transaction id of its own, from 3 upward.
