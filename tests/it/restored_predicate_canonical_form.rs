@@ -134,3 +134,17 @@ fn saved_spellings_that_now_read_alike_both_come_back() {
     assert_eq!(told, vec![1, 2], "both restored subscriptions still match");
     assert_ne!(first, second);
 }
+
+/// A saved text the current canonicalizer refuses still restores its subscription.
+#[test]
+fn a_saved_text_the_canonicalizer_refuses_still_restores() {
+    let store = TempStore::new();
+    let mut engine = store.open(catalog());
+    register(&mut engine, FILTER);
+    engine.snapshot_table(orders()).unwrap();
+    drop(engine);
+    respell_saved_predicate(&store, &[(1, "not a predicate (")]);
+
+    let mut engine = store.open(catalog());
+    assert_eq!(engine.consumers(&paid_order()).unwrap().inserted(), &[1]);
+}

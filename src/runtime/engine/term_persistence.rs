@@ -1203,22 +1203,24 @@ mod tests {
         assert_no_state_restored(&engine);
     }
 
-    /// Saved spellings that now read alike stay apart when they carry term seeds, since each
-    /// seed is numbered by its own predicate's slots.
-    #[test]
-    fn respelled_term_predicates_keep_their_own_slots() {
+    /// Restores a predicate on `id` respelled as the predicate on `amount` saved under `holder`,
+    /// both with term seeds, and checks each still reads its own column. Each seed is numbered by
+    /// its own predicate's slots, so the two must stay apart.
+    fn assert_respelled_term_predicates_keep_their_own_slots(holder: u128) {
         const ID: ColumnId = 0;
         const ON_ID: u128 = 0x0200;
         let mut on_id = term_predicate(ON_ID, vec![vec![ID]], vec![]);
         on_id.normalized_sql = "5 = amount".to_string();
         let mut second = binding(ON_ID, 8);
         second.subscription_id = 2;
+        let mut first_seed = seed_record(0, grant(42, 5));
+        first_seed.predicate_hash = holder;
         let payload = shard(
-            vec![term_predicate(TERM_HASH, vec![vec![AMOUNT]], vec![]), on_id],
-            vec![binding(TERM_HASH, CONSUMER), second],
+            vec![term_predicate(holder, vec![vec![AMOUNT]], vec![]), on_id],
+            vec![binding(holder, CONSUMER), second],
             vec![CONSUMER, 8],
             vec![
-                seed_record(0, grant(42, 5)),
+                first_seed,
                 TermSeedData {
                     predicate_hash: ON_ID,
                     consumer_id: 8,
@@ -1241,5 +1243,22 @@ mod tests {
         };
         assert_eq!(told(101, 5), vec![CONSUMER]);
         assert_eq!(told(7, 1), vec![8], "the id seed still reads the id column");
+    }
+
+    #[test]
+    fn respelled_term_predicates_keep_their_own_slots() {
+        assert_respelled_term_predicates_keep_their_own_slots(TERM_HASH);
+    }
+
+    #[test]
+    fn a_respelled_term_predicate_stays_apart_from_one_saved_under_its_current_hash() {
+        let normalized = crate::compiler::normalize_sql(
+            "SELECT * FROM t WHERE amount = 5",
+            &PostgreSqlDialect {},
+        )
+        .expect("the predicate canonicalizes");
+        assert_respelled_term_predicates_keep_their_own_slots(crate::compiler::hash_sql(
+            &crate::compiler::parser::projection_hash_input(&normalized, &QueryProjection::Rows),
+        ));
     }
 }
