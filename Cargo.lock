@@ -3834,7 +3834,7 @@ dependencies = [
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#963e08927b84130173929281a5c682f309af7d6d"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#b800d154ae5ba932d29ac0e81212bb0ffe71474f"
 dependencies = [
  "sql-traits",
  "sqlparser",
@@ -3845,7 +3845,7 @@ dependencies = [
 [[package]]
 name = "pg_walstream"
 version = "0.9.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#2b35e0ee44f57342e483e0f3af1c9719340eeeab"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#f706d1f2985a5a2736388bf1f1b739da4ee7d226"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -4286,7 +4286,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.3",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -4324,7 +4324,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4590,7 +4590,7 @@ dependencies = [
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#40437eb2be811ff0fdad0a86a77848925288abda"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#9a5a932e6ac46eddd9ba553db62ba9c3892052bb"
 dependencies = [
  "openfga-client",
  "prost",
@@ -4605,7 +4605,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#40437eb2be811ff0fdad0a86a77848925288abda"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#9a5a932e6ac46eddd9ba553db62ba9c3892052bb"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -5184,7 +5184,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#d3043e70b328ac0823ae6772b4ad2e771b46ccc0"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#cc0b24d6d08e224ed9ac5021b6c18c29bb9cc4f5"
 dependencies = [
  "geometric-traits",
  "serde",
@@ -5226,7 +5226,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.63.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#7812d864aa107178d2650f94382361da52166eb8"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#c9d2612306e0884063762e3b78be443e8a297c38"
 dependencies = [
  "log",
  "recursive",
@@ -5247,7 +5247,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#a467e8703c714595902a896c5e8b317eec848f78"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#6caa0cec7051bb14da114f5730b1dea6b59f95e8"
 dependencies = [
  "sqlparser",
  "thiserror 2.0.21",
@@ -5256,7 +5256,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.6.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#7812d864aa107178d2650f94382361da52166eb8"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#c9d2612306e0884063762e3b78be443e8a297c38"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5493,7 +5493,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
