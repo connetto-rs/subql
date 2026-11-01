@@ -360,4 +360,61 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn mysql_and_sqlite_keep_a_valid_uuid_as_its_text() {
+        const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+        let valid = SqlValue::SingleQuotedString(UUID.to_string());
+        let invalid = SqlValue::SingleQuotedString("not-a-uuid".to_string());
+        assert_eq!(
+            <MySql>::parse_literal(&valid, ScalarFamily::Uuid.into()).unwrap(),
+            Value::Uuid(UUID.to_string())
+        );
+        assert_eq!(
+            SQLite::parse_literal(&valid, ScalarFamily::Uuid.into()).unwrap(),
+            Value::Uuid(UUID.to_string())
+        );
+        assert!(matches!(
+            <MySql>::parse_literal(&invalid, ScalarFamily::Uuid.into()),
+            Err(RegisterError::TypeError(_))
+        ));
+        assert!(matches!(
+            SQLite::parse_literal(&invalid, ScalarFamily::Uuid.into()),
+            Err(RegisterError::TypeError(_))
+        ));
+    }
+
+    #[test]
+    fn mysql_json_literals_keep_the_family_they_target() {
+        let sql = SqlValue::SingleQuotedString(r#"{"k":1}"#.to_string());
+        let document = serde_json::json!({"k": 1});
+        assert_eq!(
+            <MySql>::parse_literal(&sql, ScalarFamily::Json.into()).unwrap(),
+            Value::Json(document.clone())
+        );
+        assert_eq!(
+            <MySql>::parse_literal(&sql, ScalarFamily::Jsonb.into()).unwrap(),
+            Value::Jsonb(document)
+        );
+    }
+
+    #[test]
+    fn sqlite_json_literals_keep_their_text_once_it_parses() {
+        use crate::backend::SqliteJson;
+        let text = r#"{"k": 1}"#;
+        let sql = SqlValue::SingleQuotedString(text.to_string());
+        assert_eq!(
+            SQLite::parse_literal(&sql, ScalarFamily::Json.into()).unwrap(),
+            Value::Json(SqliteJson::text(text.to_string()))
+        );
+        assert_eq!(
+            SQLite::parse_literal(&sql, ScalarFamily::Jsonb.into()).unwrap(),
+            Value::Jsonb(SqliteJson::text(text.to_string()))
+        );
+        let broken = SqlValue::SingleQuotedString("{".to_string());
+        assert!(matches!(
+            SQLite::parse_literal(&broken, ScalarFamily::Json.into()),
+            Err(RegisterError::TypeError(_))
+        ));
+    }
 }
