@@ -5,7 +5,10 @@
 //! its tier. The registration metadata that change reads has to come back
 //! with the store, or the first event the stream cannot answer fails the
 //! dispatch.
-#![allow(clippy::unwrap_used)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "a setup step that fails leaves nothing for the test to say"
+)]
 
 use diesel::connection::SimpleConnection;
 use diesel::{Connection as _, SqliteConnection};

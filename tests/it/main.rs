@@ -32,6 +32,7 @@ mod agg_sum_nullability;
 
 mod aggregate_bootstrap;
 
+#[cfg(feature = "executor-diesel")]
 mod aggregate_restart_maintenance;
 
 mod aggregate_totals;
