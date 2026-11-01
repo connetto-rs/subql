@@ -272,9 +272,11 @@ impl IntegerThreshold {
 
 #[cfg(test)]
 mod tests {
-    use super::{NumericThreshold, SumOutOfRange};
+    use super::{GroupHaving, NumericThreshold, SumOutOfRange};
     use crate::backend::{Backend, MySql, Postgres, SQLite};
-    use crate::NumericValue;
+    use crate::compiler::sql_shape::{AggSpec, HavingFunction};
+    use crate::runtime::aggregate::{AggAccumulator, AggDelta, FoldRule, TotalDelta};
+    use crate::{AggHaving, HavingOp, HavingSubject, NumericValue};
     use bigdecimal::BigDecimal;
     use core::cmp::Ordering;
 
@@ -356,6 +358,64 @@ mod tests {
                 .expect("a floating literal")
                 .number::<MySql>(&value),
             Err(SumOutOfRange)
+        );
+    }
+
+    /// Registration never builds a HAVING over an interval total, but the
+    /// condition is refused in-process rather than answered, since a numeric
+    /// threshold does not compare with one.
+    const INTERVAL_RULE: FoldRule = FoldRule {
+        total: crate::backend::SumRule::Interval,
+        mean: crate::backend::MeanRule::Exact,
+        quotient: crate::compiler::bytecode::Quotient::FromTheOperands,
+        variance_seed: crate::backend::VarianceSeed::EnginesOwn,
+        float_overflow: crate::backend::FloatSumOverflow::Raises,
+    };
+
+    fn having_condition(function: HavingFunction) -> GroupHaving {
+        GroupHaving::new::<Postgres>(&AggHaving {
+            subject: HavingSubject::Aggregate(function),
+            op: HavingOp::Gt,
+            threshold: "1".to_string(),
+        })
+        .expect("the numeric threshold parses")
+    }
+
+    #[test]
+    fn an_interval_total_is_not_compared_in_process() {
+        assert!(
+            !having_condition(HavingFunction::Sum).comparisons_served::<Postgres>(INTERVAL_RULE)
+        );
+        assert!(
+            !having_condition(HavingFunction::Avg).comparisons_served::<Postgres>(INTERVAL_RULE)
+        );
+        let mut accumulator = AggAccumulator::from_spec(&AggSpec::Sum { column: 0 }, INTERVAL_RULE);
+        accumulator
+            .apply(&AggDelta::Totalled {
+                value: TotalDelta::Interval(crate::backend::IntervalSum::of(
+                    crate::backend::Interval::parse("1 mon").expect("a month parses"),
+                    1,
+                )),
+                count_delta: 1,
+            })
+            .expect("a month fits the ported range");
+        assert_eq!(
+            having_condition(HavingFunction::Sum).passes::<Postgres>(0, &accumulator),
+            Ok(false),
+        );
+    }
+
+    /// A numeric threshold never compares with an interval value.
+    #[test]
+    fn a_numeric_threshold_does_not_compare_an_interval() {
+        let value = NumericValue::Interval(
+            crate::backend::Interval::parse("1 mon").expect("a month parses"),
+        );
+        assert_eq!(
+            NumericThreshold::new::<Postgres>("1")
+                .expect("the literal parses")
+                .number::<Postgres>(&value),
+            Ok(None),
         );
     }
 }

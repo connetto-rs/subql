@@ -1106,3 +1106,19 @@ pub fn engine_model_sqlite(data: &[u8]) -> EngineModelCoverage {
     }
     run.coverage
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Cell, NumericValue};
+
+    /// The SQLite model has no interval answer, so one reads as NULL.
+    #[test]
+    fn an_interval_answer_reads_as_null() {
+        assert!(matches!(
+            Cell::of_numeric(Some(&NumericValue::Interval(
+                crate::backend::Interval::parse("1 mon").expect("a month parses")
+            ))),
+            Cell::Null,
+        ));
+    }
+}

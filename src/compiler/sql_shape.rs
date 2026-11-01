@@ -1421,7 +1421,7 @@ pub(crate) fn render_aggregate_bootstrap<B: crate::backend::Backend, DB: Databas
             database, table_id, *column,
         )?);
     }
-    let mut components = seed_components::<B>(spec, widened, total_rule, &arg, dialect, &sum)?;
+    let mut components = seed_components::<B>(spec, widened, total_rule, &arg, &sum)?;
     if widened && single_total {
         components.push(sum_at_double_width(&arg)?);
     }
@@ -1470,7 +1470,6 @@ fn seed_components<B: crate::backend::Backend>(
     widened: bool,
     total_rule: crate::backend::SumRule,
     arg: &FunctionArgExpr,
-    dialect: &dyn sqlparser::dialect::Dialect,
     sum: &dyn Fn() -> Option<Expr>,
 ) -> Option<Vec<Expr>> {
     let count = || agg_call("COUNT", arg.clone());
@@ -1483,7 +1482,11 @@ fn seed_components<B: crate::backend::Backend>(
         AggSpec::Sum { .. } | AggSpec::Avg { .. }
             if matches!(total_rule, crate::backend::SumRule::Interval) =>
         {
-            interval_seed_components(arg, dialect)?
+            // A `*` argument names no column to seed from.
+            let FunctionArgExpr::Expr(column) = arg else {
+                return None;
+            };
+            interval_seed_components(column)
         }
         // `SUM` and `AVG` read the same pair: the total and how many rows
         // contributed to it. `AVG` divides by that count and `SUM` reports
@@ -1527,32 +1530,61 @@ pub(crate) fn aggregate_bootstrap_kinds(
 }
 
 /// `SUM` and `COUNT` of the finite intervals, then the count of each
-/// infinity, the four numbers an interval total is seeded from.
-///
-/// Finiteness is read through the printed text, which is `infinity` or
-/// `-infinity` under every `IntervalStyle` on PostgreSQL 17 and later and
-/// never on 16, where `isfinite(interval)` does not exist.
-fn interval_seed_components(
-    arg: &FunctionArgExpr,
-    dialect: &dyn sqlparser::dialect::Dialect,
-) -> Option<Vec<Expr>> {
-    let column = arg.to_string();
-    let finite = alloc::format!("({column})::text NOT IN ('infinity', '-infinity')");
-    [
-        alloc::format!("SUM({column}) FILTER (WHERE {finite})"),
-        alloc::format!("COUNT({column}) FILTER (WHERE {finite})"),
-        alloc::format!("COUNT({column}) FILTER (WHERE ({column})::text = 'infinity')"),
-        alloc::format!("COUNT({column}) FILTER (WHERE ({column})::text = '-infinity')"),
+/// infinity, the four components an interval total seeds from. Finiteness is
+/// read through the printed text, as `isfinite(interval)` does not exist on
+/// 16.
+fn interval_seed_components(column: &Expr) -> Vec<Expr> {
+    let text = Expr::Cast {
+        kind: sqlparser::ast::CastKind::DoubleColon,
+        expr: alloc::boxed::Box::new(Expr::Nested(alloc::boxed::Box::new(column.clone()))),
+        data_type: sqlparser::ast::DataType::Text,
+        format: None,
+    };
+    let finite = || Expr::In {
+        expr: alloc::boxed::Box::new(text.clone()),
+        target: InTarget::List(alloc::vec![
+            Expr::Value(
+                sqlparser::ast::Value::SingleQuotedString("infinity".to_string()).with_empty_span(),
+            ),
+            Expr::Value(
+                sqlparser::ast::Value::SingleQuotedString("-infinity".to_string())
+                    .with_empty_span(),
+            ),
+        ]),
+        negated: true,
+        global: false,
+    };
+    let equal_to = |spelled: &str| Expr::BinaryOp {
+        left: alloc::boxed::Box::new(text.clone()),
+        op: BinaryOperator::Eq,
+        right: alloc::boxed::Box::new(Expr::Value(
+            sqlparser::ast::Value::SingleQuotedString(spelled.to_string()).with_empty_span(),
+        )),
+    };
+    alloc::vec![
+        filtered_agg("SUM", column, finite()),
+        filtered_agg("COUNT", column, finite()),
+        filtered_agg("COUNT", column, equal_to("infinity")),
+        filtered_agg("COUNT", column, equal_to("-infinity")),
     ]
-    .iter()
-    .map(|text| {
-        sqlparser::parser::Parser::new(dialect)
-            .try_with_sql(text)
-            .ok()?
-            .parse_expr()
-            .ok()
+}
+
+/// `NAME(column) FILTER (WHERE cond)`, the interval seed's one aggregate shape.
+fn filtered_agg(name: &str, column: &Expr, filter: Expr) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName::from(alloc::vec![Ident::new(name)]),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: alloc::vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(column.clone(),))],
+            clauses: Vec::new(),
+        }),
+        filter: Some(alloc::boxed::Box::new(filter)),
+        null_treatment: None,
+        over: None,
+        within_group: Vec::new(),
     })
-    .collect()
 }
 
 /// The kind a `SUM` over a column accumulating under `rule` decodes in.
@@ -3338,5 +3370,28 @@ mod written_column_tests {
             super::extract_projection::<crate::backend::Postgres, _>(&textual, docs, &db).is_err(),
             "a TEXT column cannot be summed"
         );
+    }
+}
+
+#[cfg(test)]
+mod interval_seed_tests {
+    use super::{AggSpec, FunctionArgExpr};
+
+    /// A `*` argument names no column, so the interval seed renders nothing
+    /// rather than a statement over no column.
+    #[test]
+    fn a_wildcard_argument_renders_no_interval_seed() {
+        let numeric_sum = || Some(super::Expr::value(sqlparser::ast::Value::Null));
+        let seed = |rule| {
+            super::seed_components::<crate::backend::Postgres>(
+                &AggSpec::Sum { column: 0 },
+                false,
+                rule,
+                &FunctionArgExpr::Wildcard,
+                &numeric_sum,
+            )
+        };
+        assert!(seed(crate::backend::SumRule::Interval).is_none());
+        assert!(seed(crate::backend::SumRule::Double).is_some());
     }
 }

@@ -474,6 +474,116 @@ fn a_grouped_install_whose_total_leaves_range_stops() {
     );
 }
 
+/// A stream cell of a family the interval total cannot hold has no answer,
+/// so the stop serves the database's `interval out of range`.
+#[test]
+fn a_drifted_cell_stops_an_interval_total() {
+    let (mut engine, shifts) = engine();
+    register(&mut engine, 1, "SELECT SUM(span) FROM shifts");
+    install(&mut engine, 1, vec![seed_row(Some("1 mon"), 1, 0, 0)]).unwrap();
+    let drifted = TestEvent::insert(
+        shifts,
+        vec![Value::Int(1), Value::String("a".into()), Value::Int(5)],
+    )
+    .with_pk_columns([0u16])
+    .with_checkpoint(PgLsn(10));
+    let transitions = engine.aggregate_updates(&drifted).unwrap().transitions;
+    assert!(
+        matches!(
+            transitions.first().map(|transition| &transition.reason),
+            Some(subql::MaintenanceStopReason::SumOutOfRange { .. })
+        ),
+        "{transitions:?}"
+    );
+}
+
+/// A stream cell of a family the decimal total cannot hold has no answer,
+/// so the stop serves the database's own out-of-range.
+#[test]
+fn a_drifted_cell_stops_a_decimal_total() {
+    let database = ParserDB::parse::<PostgreSqlDialect>(
+        "CREATE TABLE ledger (id INT PRIMARY KEY, amount NUMERIC);",
+    )
+    .unwrap();
+    let ledger = catalog_helpers::table_id::<Postgres, _>(&database, "ledger").unwrap();
+    let mut engine: Engine = SubscriptionEngine::new(database, PostgreSqlDialect {});
+    engine
+        .register(SubscriptionRequest::new(
+            1,
+            "SELECT SUM(amount) FROM ledger",
+        ))
+        .unwrap()
+        .served()
+        .expect("a decimal sum is maintained")
+        .aggregate_bootstrap
+        .clone()
+        .expect("an aggregate carries its seed query");
+    install(
+        &mut engine,
+        1,
+        vec![vec![
+            Value::Decimal(bigdecimal::BigDecimal::from(10)),
+            Value::Int(1),
+        ]],
+    )
+    .unwrap();
+    let drifted = TestEvent::insert(
+        ledger,
+        vec![Value::Int(1), Value::Interval(interval("1 mon"))],
+    )
+    .with_pk_columns([0u16])
+    .with_checkpoint(PgLsn(10));
+    let transitions = engine.aggregate_updates(&drifted).unwrap().transitions;
+    assert!(
+        matches!(
+            transitions.first().map(|transition| &transition.reason),
+            Some(subql::MaintenanceStopReason::SumOutOfRange { .. })
+        ),
+        "{transitions:?}"
+    );
+}
+
+/// A `COUNT` over an interval column folds the count alone, and the count
+/// answers as an integer whatever type the total would hold.
+#[test]
+fn a_count_over_an_interval_column_counts_only() {
+    let (mut engine, shifts) = engine();
+    let bootstrap = register(
+        &mut engine,
+        1,
+        "SELECT crew, COUNT(span) FROM shifts GROUP BY crew",
+    );
+    assert_eq!(
+        bootstrap.kinds,
+        vec![ScalarFamily::String, ScalarFamily::Int, ScalarFamily::Int],
+        "the crew, the count and the row count"
+    );
+    let mut opening = install(
+        &mut engine,
+        1,
+        vec![
+            vec![Value::String("a".into()), Value::Int(1), Value::Int(1)],
+            vec![Value::String("b".into()), Value::Int(2), Value::Int(2)],
+        ],
+    )
+    .unwrap();
+    opening.sort_by_key(|update| printed(&update.folded_value().unwrap()));
+    assert_eq!(
+        opening
+            .iter()
+            .map(|u| printed(&u.folded_value().unwrap()))
+            .collect::<Vec<_>>(),
+        ["1", "2"]
+    );
+    let updates = engine
+        .aggregate_updates(&insert(shifts, 4, "a", Some("1 mon"), 10))
+        .unwrap();
+    assert_eq!(
+        updates[0].change,
+        AggregateValueChange::Set(AggregateResultValue::Folded(AggValue::CountColumn(2)))
+    );
+}
+
 /// What stays a read: the variance family, `HAVING` over an interval
 /// aggregate, and every interval aggregate on an engine without the type.
 #[test]

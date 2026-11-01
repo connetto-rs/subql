@@ -203,7 +203,7 @@ impl Interval {
     /// rounds it.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "C's `(int)` casts of remainders the debug assertions bound"
+        reason = "C's `(int)` casts of remainders under 30 in magnitude"
     )]
     #[expect(
         clippy::suboptimal_flops,
@@ -217,7 +217,7 @@ impl Interval {
         let mut day = fits_i32(scale(f64::from(self.days)))?;
         let month_remainder_days =
             ts_round((scale(f64::from(self.months)) - f64::from(month)) * DAYS_PER_MONTH);
-        debug_assert!(month_remainder_days.abs() < DAYS_PER_MONTH + 1.0);
+        // C's `(int)` cast, truncating toward zero, of a value under 30 in magnitude.
         let whole_remainder_days = month_remainder_days as i32;
         let mut sec_remainder = ts_round(
             (scale(f64::from(self.days)) - f64::from(day) + month_remainder_days
@@ -225,8 +225,9 @@ impl Interval {
                 * SECS_PER_DAY,
         );
         if sec_remainder.abs() >= SECS_PER_DAY {
-            debug_assert!(sec_remainder.abs() < 4.0 * SECS_PER_DAY);
+            // Truncating toward zero as C does, of a value under four days in magnitude.
             let whole_days = (sec_remainder / SECS_PER_DAY) as i32;
+            // The carry can push the day field past its range, as the field's ceiling refuses.
             day = day.checked_add(whole_days)?;
             sec_remainder -= f64::from(whole_days) * SECS_PER_DAY;
         }
@@ -766,6 +767,38 @@ mod tests {
         assert_eq!(interval("1 day").divided_by(f64::NAN), None);
     }
 
+    /// A quotient whose day field crosses the field's range is refused.
+    #[test]
+    fn a_quotient_past_the_days_field_is_refused() {
+        let both_max = Interval {
+            months: i32::MAX,
+            days: i32::MAX,
+            microseconds: 0,
+        };
+        assert_eq!(both_max.divided_by(1.0 + 1e-11), None);
+    }
+
+    /// A carry of one whole day can push the day field past its range, and
+    /// the refusal is the ported out-of-range.
+    #[test]
+    fn a_carry_past_the_days_field_is_refused() {
+        let near_bound = Interval {
+            months: 1_932_735_283,
+            days: 1_932_735_283,
+            microseconds: 0,
+        };
+        assert_eq!(near_bound.divided_by(0.9), None);
+        let inside = Interval {
+            months: 1_932_735_283,
+            days: 1_932_735_262,
+            microseconds: 0,
+        };
+        assert!(
+            inside.divided_by(0.9).is_some(),
+            "one less carry day lands the field exactly on its ceiling"
+        );
+    }
+
     fn fold(sum: &mut IntervalSum, text: &str, weight: i64) {
         sum.merge(IntervalSum::of(interval(text), weight));
     }
@@ -777,6 +810,7 @@ mod tests {
     fn a_sum_is_its_net_total_when_that_fits() {
         let mut sum = IntervalSum::default();
         assert_eq!(sum.sum(), Ok(None));
+        assert_eq!(sum.mean(), Ok(None), "a mean over no rows answers NULL");
         for text in ["1 mon", "1 day", "1 sec"] {
             fold(&mut sum, text, 1);
         }
