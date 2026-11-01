@@ -76,6 +76,7 @@ pub mod oid {
     pub const TIME: u32 = 1083;
     pub const TIMESTAMP: u32 = 1114;
     pub const TIMESTAMPTZ: u32 = 1184;
+    pub const INTERVAL: u32 = 1186;
     pub const NUMERIC: u32 = 1700;
     pub const UUID: u32 = 2950;
     pub const JSONB: u32 = 3802;
@@ -284,11 +285,23 @@ pub fn pg_canonical(bytes: Option<&[u8]>, type_oid: u32) -> Result<Canonical, Re
         oid::JSONB => Canonical::Jsonb(pg_from_sql::<sql_types::Jsonb, serde_json::Value>(
             b, type_oid, "jsonb",
         )?),
+        oid::INTERVAL => {
+            let interval = pg_from_sql::<sql_types::Interval, diesel::pg::data_types::PgInterval>(
+                b, type_oid, "interval",
+            )?;
+            Canonical::Interval(crate::backend::Interval::from(
+                sql_scalar_text::PgInterval {
+                    months: interval.months,
+                    days: interval.days,
+                    microseconds: interval.microseconds,
+                },
+            ))
+        }
         other => {
             return Err(RegisterError::UnsupportedSql(format!(
                 "unsupported diesel bind type (Postgres OID {other}); SubQL reads the scalar \
-                 types its own `Value` carries, so an array, a range, an interval, or a \
-                 user-declared enum, domain or composite has no `Value` variant to become"
+                 types its own `Value` carries, so an array, a range, or a user-declared enum, \
+                 domain or composite has no `Value` variant to become"
             )))
         }
     };
@@ -422,22 +435,49 @@ mod tests {
     }
 
     /// A type with no `Value` variant to become is refused by OID, and the
-    /// refusal names the OID so the caller can look it up. Both examples are
-    /// types diesel itself can read: `interval` has a `FromSql` impl and
-    /// `bytea[]` is the array of a type subql does read, so what is missing is
-    /// subql's payload, not diesel's reader.
+    /// refusal names the OID so the caller can look it up. The example is a
+    /// type diesel itself can read, the array of a type subql does read, so
+    /// what is missing is subql's payload, not diesel's reader.
     #[test]
     fn a_type_with_no_value_variant_is_refused_by_oid() {
-        for (type_oid, what) in [(1186_u32, "interval"), (1001, "bytea[]")] {
-            let refusal = pg_canonical(Some(&[0, 0, 0, 0]), type_oid);
-            let Err(RegisterError::UnsupportedSql(message)) = refusal else {
-                panic!("{what} (OID {type_oid}) should be refused, got {refusal:?}");
-            };
-            assert!(
-                message.contains(&alloc::format!("OID {type_oid}")),
-                "the refusal of {what} should name its OID, got {message:?}"
-            );
-        }
+        let refusal = pg_canonical(Some(&[0, 0, 0, 0]), 1001);
+        assert!(
+            matches!(
+                &refusal,
+                Err(RegisterError::UnsupportedSql(message))
+                    if message.contains("OID 1001")
+            ),
+            "bytea[] (OID 1001) should be refused naming its OID, got {refusal:?}"
+        );
+    }
+
+    /// An interval's binary form is microseconds, days and months, read
+    /// apart rather than folded into one span. PostgreSQL spells it as an
+    /// interval, and the engines without the type as the text it prints. A
+    /// value too short to hold the three is refused.
+    #[test]
+    fn decode_interval_keeps_its_three_fields() {
+        let mut bytes = 14_706_789_000_i64.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&(-3_i32).to_be_bytes());
+        bytes.extend_from_slice(&14_i32.to_be_bytes());
+        let interval =
+            crate::backend::Interval::parse("1 year 2 mons -3 days +04:05:06.789").unwrap();
+        let canonical = pg_canonical(Some(&bytes), oid::INTERVAL).unwrap();
+        assert_eq!(canonical, Canonical::Interval(interval));
+        assert_eq!(
+            Postgres::value_from_canonical(canonical.clone()),
+            Value::Interval(interval)
+        );
+        let printed = String::from("1 year 2 mons -3 days +04:05:06.789");
+        assert_eq!(
+            <crate::backend::MySql>::value_from_canonical(canonical.clone()),
+            Value::String(printed.clone())
+        );
+        assert_eq!(
+            crate::backend::SQLite::value_from_canonical(canonical),
+            Value::String(printed)
+        );
+        assert!(pg_canonical(Some(&bytes[..4]), oid::INTERVAL).is_err());
     }
 
     /// Every arm's decode, pinned across the value range and the boundaries
@@ -635,6 +675,8 @@ pub enum Canonical {
     Json(serde_json::Value),
     /// A binary JSON document.
     Jsonb(serde_json::Value),
+    /// A PostgreSQL interval.
+    Interval(crate::backend::Interval),
 }
 
 /// Read one column of a returned row, without choosing who spells it.
@@ -685,6 +727,7 @@ impl SpellCanonical for Postgres {
             Canonical::Decimal(d) => Value::Decimal(d),
             Canonical::Json(j) => Value::Json(j),
             Canonical::Jsonb(j) => Value::Jsonb(j),
+            Canonical::Interval(i) => Value::Interval(i),
         }
     }
 }
@@ -708,6 +751,8 @@ impl<C: crate::backend::MySqlTableNameCase> SpellCanonical for crate::backend::M
             // MySQL stores a UUID as CHAR(36) or BINARY(16), never natively, so
             // the backend spells it as the text it carries on the wire.
             Canonical::Uuid(u) => Value::Uuid(u.to_string()),
+            // MySQL has no interval type, so a column holding one holds its text.
+            Canonical::Interval(i) => Value::String(i.to_string()),
         }
     }
 }
@@ -731,6 +776,8 @@ impl SpellCanonical for crate::backend::SQLite {
             Canonical::Decimal(d) => Value::Decimal(d),
             Canonical::Json(j) => Value::Json(j.into()),
             Canonical::Jsonb(j) => Value::Jsonb(j.into()),
+            // SQLite stores an interval as the text PostgreSQL prints.
+            Canonical::Interval(i) => Value::String(i.to_string()),
         }
     }
 }

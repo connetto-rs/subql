@@ -84,6 +84,61 @@ pub fn parse_custom_literal<B: SqlLiteralParse>(
         })
 }
 
+/// Read PostgreSQL's typed literal `interval '…' [fields] [(precision)]`,
+/// which reads its text under the fields it names, so `interval '90' minute`
+/// is an hour and a half.
+///
+/// # Errors
+///
+/// [`RegisterError::TypeError`] for text PostgreSQL refuses, for a field
+/// list its grammar has no production for, or for a value that is not a
+/// quoted string.
+pub(crate) fn interval_literal(
+    interval: &sqlparser::ast::Interval,
+) -> Result<crate::backend::Interval, RegisterError> {
+    use sql_scalar_text::{IntervalFields, IntervalTypmod};
+    use sqlparser::ast::DateTimeField as Field;
+
+    let refused = || RegisterError::TypeError(format!("cannot read {interval} as an interval"));
+    let sqlparser::ast::Expr::Value(value) = interval.value.as_ref() else {
+        return Err(refused());
+    };
+    let text = parse_helpers::quoted_string(&value.value).ok_or_else(refused)?;
+    let fields = match (&interval.leading_field, &interval.last_field) {
+        (None, None) => None,
+        (Some(Field::Year), None) => Some(IntervalFields::Year),
+        (Some(Field::Month), None) => Some(IntervalFields::Month),
+        (Some(Field::Day), None) => Some(IntervalFields::Day),
+        (Some(Field::Hour), None) => Some(IntervalFields::Hour),
+        (Some(Field::Minute), None) => Some(IntervalFields::Minute),
+        (Some(Field::Second), None) => Some(IntervalFields::Second),
+        (Some(Field::Year), Some(Field::Month)) => Some(IntervalFields::YearToMonth),
+        (Some(Field::Day), Some(Field::Hour)) => Some(IntervalFields::DayToHour),
+        (Some(Field::Day), Some(Field::Minute)) => Some(IntervalFields::DayToMinute),
+        (Some(Field::Day), Some(Field::Second)) => Some(IntervalFields::DayToSecond),
+        (Some(Field::Hour), Some(Field::Minute)) => Some(IntervalFields::HourToMinute),
+        (Some(Field::Hour), Some(Field::Second)) => Some(IntervalFields::HourToSecond),
+        (Some(Field::Minute), Some(Field::Second)) => Some(IntervalFields::MinuteToSecond),
+        _ => return Err(refused()),
+    };
+    // `SECOND(p)` alone carries its precision as the leading one.
+    let precision = match (fields, interval.leading_precision) {
+        (Some(IntervalFields::Second), Some(precision))
+            if interval.fractional_seconds_precision.is_none() =>
+        {
+            Some(precision)
+        }
+        (_, None) => interval.fractional_seconds_precision,
+        (_, Some(_)) => return Err(refused()),
+    };
+    // PostgreSQL clamps a precision above six, so any wider one reads as six.
+    let precision = precision.map(|precision| u8::try_from(precision).unwrap_or(u8::MAX));
+    let typmod = IntervalTypmod::new(fields, precision).ok_or_else(refused)?;
+    sql_scalar_text::parse_interval_typmod(text, typmod)
+        .map(crate::backend::Interval::from)
+        .ok_or_else(refused)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -240,5 +295,69 @@ mod tests {
             Postgres::<Pg18>::parse_literal(&with_offset, ScalarFamily::Timestamp.into()),
             Err(RegisterError::TypeError(_))
         ));
+    }
+
+    fn typed_interval(sql: &str) -> Result<alloc::string::String, RegisterError> {
+        use alloc::string::ToString;
+        let dialect = sqlparser::dialect::PostgreSqlDialect {};
+        let expr = sqlparser::parser::Parser::new(&dialect)
+            .try_with_sql(sql)
+            .unwrap()
+            .parse_expr()
+            .unwrap();
+        let interval = match expr {
+            sqlparser::ast::Expr::Interval(interval) => interval,
+            other => {
+                return Err(RegisterError::TypeError(format!(
+                    "{sql} is not an interval literal, it reads as {other}"
+                )))
+            }
+        };
+        super::interval_literal(&interval).map(|value| value.to_string())
+    }
+
+    /// Each field list PostgreSQL's grammar has reads its text as
+    /// `interval_in` does under that typmod, as PostgreSQL 16 answers it.
+    #[test]
+    fn a_typed_interval_reads_under_the_fields_it_names() {
+        for (sql, printed) in [
+            ("interval '1 day 02:03:04.5'", "1 day 02:03:04.5"),
+            ("interval '3' year", "3 years"),
+            ("interval '1-2' year", "1 year"),
+            ("interval '14' month", "1 year 2 mons"),
+            ("interval '3' day", "3 days"),
+            ("interval '90' hour", "90:00:00"),
+            ("interval '90' minute", "01:30:00"),
+            ("interval '1.5' second", "00:00:01.5"),
+            ("interval '1.2345' second(2)", "00:00:01.23"),
+            ("interval '1-2' year to month", "1 year 2 mons"),
+            ("interval '1 2' day to hour", "1 day 02:00:00"),
+            ("interval '1 2:03' day to minute", "1 day 02:03:00"),
+            ("interval '1 2:03:04.5' day to second(0)", "1 day 02:03:05"),
+            ("interval '2:03:04' hour to minute", "02:03:00"),
+            ("interval '2:03:04.5' hour to second", "02:03:04.5"),
+            ("interval '3:04.5' minute to second(0)", "00:03:05"),
+        ] {
+            assert_eq!(typed_interval(sql).unwrap(), printed, "{sql}");
+        }
+    }
+
+    /// What PostgreSQL's grammar or `interval_in` refuses is refused,
+    /// including a value that is not a literal at all and an expression
+    /// that is not an interval.
+    #[test]
+    fn a_typed_interval_postgres_refuses_is_refused() {
+        for sql in [
+            "interval '1' hour(2)",
+            "interval '1 fortnight'",
+            "interval 5 hour",
+            "interval x hour",
+            "1 + 1",
+        ] {
+            assert!(
+                matches!(typed_interval(sql), Err(RegisterError::TypeError(_))),
+                "{sql}"
+            );
+        }
     }
 }

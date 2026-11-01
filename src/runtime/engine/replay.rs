@@ -235,6 +235,7 @@ impl<B: Backend> Hash for RowView<'_, B> {
                 Value::Time(value) => value.hash(state),
                 Value::Decimal(value) => value.hash(state),
                 Value::Custom(value) => value.hash(state),
+                Value::Interval(value) => value.hash(state),
                 Value::Float(value) => {
                     if let Some(value) = (value as &dyn Any).downcast_ref::<f64>() {
                         canonical_float_bits(*value).hash(state);

@@ -99,13 +99,15 @@ fn row_cell<B: Backend>(value: &Value<B>) -> RowCell<'static> {
 
         Value::Bool(value) => RowCell::Bool(value.scalar_truth()),
         Value::Int(value) => RowCell::Integer(Cow::Owned(value.scalar_text().into_owned())),
-        // A float and a JSON document have no column kind on the other side,
-        // and a custom type has no spelling this side can prove matches the
-        // loading SQL (R1), so all of them read as undecodable rather than as
-        // a rendered value.
-        Value::Float(_) | Value::Json(_) | Value::Jsonb(_) | Value::Custom(_) => {
-            RowCell::Undecodable
-        }
+        // A float, a JSON document and an interval have no column kind on the
+        // other side, and a custom type has no spelling this side can prove
+        // matches the loading SQL (R1), so all of them read as undecodable
+        // rather than as a rendered value.
+        Value::Float(_)
+        | Value::Json(_)
+        | Value::Jsonb(_)
+        | Value::Custom(_)
+        | Value::Interval(_) => RowCell::Undecodable,
         Value::String(value) => RowCell::Text(Cow::Owned(value.as_ref().to_string())),
         Value::Bytes(value) => RowCell::Bytea(Cow::Owned(value.as_ref().to_vec())),
         Value::Uuid(value) => RowCell::Uuid(Cow::Owned(value.scalar_text().into_owned())),

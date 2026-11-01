@@ -101,7 +101,8 @@ fn comparison_target<B: Backend, DB: DatabaseLike>(
 /// comparison reads, `inherited`. A result of another kind is refused to a
 /// read, since `r > (1 / 2)` divides integers to `0` where reading them at the
 /// float column's kind gives `0.5`. With no literal naming a kind either, the
-/// operands are read at `inherited`.
+/// operands are read at `inherited`. Arithmetic over an interval is read from
+/// the database, since its operands are of other kinds.
 fn arithmetic_target<B: Backend, DB: DatabaseLike>(
     op: &BinaryOperator,
     left: &Expr,
@@ -111,23 +112,30 @@ fn arithmetic_target<B: Backend, DB: DatabaseLike>(
     database: &DB,
     depth: usize,
 ) -> Result<ValueKindOf<B>, RegisterError> {
-    if let Some(kind) = nested_column_scalar_of::<B, DB>(left, table_id, database, depth)
+    let kind = if let Some(kind) = nested_column_scalar_of::<B, DB>(left, table_id, database, depth)
         .or_else(|| nested_column_scalar_of::<B, DB>(right, table_id, database, depth))
     {
-        return Ok(kind);
+        kind
+    } else {
+        let operands = agreeing_kind::<B>(
+            literal_kind::<B>(left, depth)?,
+            literal_kind::<B>(right, depth)?,
+        )?;
+        match operands {
+            Some(kind) if quotient_kind::<B>(op, Some(kind)) == Some(inherited) => kind,
+            Some(_) => return Err(RegisterError::UnsupportedSql(
+                "arithmetic over literals is served where it answers the kind it is compared with"
+                    .to_string(),
+            )),
+            None => inherited,
+        }
+    };
+    if kind == ScalarFamily::Interval.into() {
+        return Err(RegisterError::UnsupportedSql(
+            "arithmetic over an interval is read from the database".to_string(),
+        ));
     }
-    let operands = agreeing_kind::<B>(
-        literal_kind::<B>(left, depth)?,
-        literal_kind::<B>(right, depth)?,
-    )?;
-    match operands {
-        Some(kind) if quotient_kind::<B>(op, Some(kind)) == Some(inherited) => Ok(kind),
-        Some(_) => Err(RegisterError::UnsupportedSql(
-            "arithmetic over literals is served where it answers the kind it is compared with"
-                .to_string(),
-        )),
-        None => Ok(inherited),
-    }
+    Ok(kind)
 }
 
 /// The kind the literals in `expr` name, looking through arithmetic and
@@ -149,6 +157,7 @@ fn literal_kind<B: Backend>(
             SqlValue::Boolean(_) => Some(ScalarFamily::Bool.into()),
             _ => None,
         },
+        Expr::Interval(_) => Some(ScalarFamily::Interval.into()),
         Expr::BinaryOp { left, op, right } => {
             let operand = agreeing_kind::<B>(
                 literal_kind::<B>(left, depth + 1)?,
@@ -757,6 +766,15 @@ where
             out.push(Instruction::PushLiteral(value));
         }
 
+        // PostgreSQL's typed interval literal, read where an interval is.
+        Expr::Interval(interval) => {
+            if !B::HAS_INTERVAL || target_kind != ScalarFamily::Interval.into() {
+                return Err(unsupported_expression(expr));
+            }
+            let value = crate::compiler::literals::interval_literal(interval)?;
+            out.push(Instruction::PushLiteral(Value::Interval(value)));
+        }
+
         // `GLOBAL` makes a distributed ClickHouse query evaluate the right-hand
         // side once on the initiator and broadcast it, a meaning no backend
         // here has.
@@ -779,15 +797,23 @@ where
             let mut literals: Vec<Value<B>> = Vec::with_capacity(list.len());
             for item in list {
                 refuse_literal_foreign_to_coalesce::<B, DB>(expr, item, table_id, database)?;
-                if let Expr::Value(val) = item {
-                    literals.push(B::parse_literal(&val.value, list_target)?);
-                } else {
-                    return Err(RegisterError::UnsupportedSql(
-                        "IN requires a literal list - SubQL only supports IN with literals like IN ('a', 'b', 'c'), \
-                         not column references or computed expressions. \
-                         For anything else, run this as a regular SQL query in your database."
-                            .to_string(),
-                    ));
+                match item {
+                    Expr::Value(val) => literals.push(B::parse_literal(&val.value, list_target)?),
+                    Expr::Interval(interval)
+                        if B::HAS_INTERVAL && list_target == ScalarFamily::Interval.into() =>
+                    {
+                        literals.push(Value::Interval(
+                            crate::compiler::literals::interval_literal(interval)?,
+                        ));
+                    }
+                    _ => {
+                        return Err(RegisterError::UnsupportedSql(
+                            "IN requires a literal list - SubQL only supports IN with literals like IN ('a', 'b', 'c'), \
+                             not column references or computed expressions. \
+                             For anything else, run this as a regular SQL query in your database."
+                                .to_string(),
+                        ));
+                    }
                 }
             }
 

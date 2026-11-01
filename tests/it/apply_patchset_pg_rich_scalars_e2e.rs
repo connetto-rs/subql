@@ -19,12 +19,12 @@ use subql::{DefaultIds, PgChangeEvent, SubscriptionEngine};
 
 const DDL: &str = "CREATE TABLE rich (id INT PRIMARY KEY, amount NUMERIC(12,3), \
                    at TIMESTAMP, at_tz TIMESTAMPTZ, on_day DATE, at_time TIME, \
-                   doc JSON, docb JSONB);";
+                   doc JSON, docb JSONB, span INTERVAL);";
 const PG_DDL: &str = "CREATE TABLE rich (id INT PRIMARY KEY, amount NUMERIC(12,3), \
                       at TIMESTAMP, at_tz TIMESTAMPTZ, on_day DATE, at_time TIME, \
-                      doc JSON, docb JSONB)";
+                      doc JSON, docb JSONB, span INTERVAL)";
 
-const COLUMNS: [(&str, &str); 8] = [
+const COLUMNS: [(&str, &str); 9] = [
     ("id", ""),
     ("amount", ""),
     ("at", ""),
@@ -33,6 +33,7 @@ const COLUMNS: [(&str, &str); 8] = [
     ("at_time", ""),
     ("doc", ""),
     ("docb", ""),
+    ("span", ""),
 ];
 
 #[derive(QueryableByName, Debug, PartialEq)]
@@ -53,6 +54,8 @@ struct RichRow {
     doc: serde_json::Value,
     #[diesel(sql_type = diesel::sql_types::Jsonb)]
     docb: serde_json::Value,
+    #[diesel(sql_type = diesel::sql_types::Interval)]
+    span: diesel::pg::data_types::PgInterval,
 }
 
 #[test]
@@ -90,6 +93,8 @@ fn apply_patchset_binds_every_rich_scalar_natively() {
             .set(6, r#"{"b":1,"a":2}"#)
             .unwrap()
             .set(7, r#"{"b":1,"a":2}"#)
+            .unwrap()
+            .set(8, "1 year 2 mons -3 days +04:05:06.789")
             .unwrap(),
     );
 
@@ -100,7 +105,7 @@ fn apply_patchset_binds_every_rich_scalar_natively() {
     assert_eq!(n, 1, "one row inserted");
 
     let row: RichRow = sql_query(
-        "SELECT id, amount, at, at_tz, on_day, at_time, doc, docb FROM rich WHERE id = 1",
+        "SELECT id, amount, at, at_tz, on_day, at_time, doc, docb, span FROM rich WHERE id = 1",
     )
     .get_result(&mut conn)
     .expect("load");
@@ -118,6 +123,7 @@ fn apply_patchset_binds_every_rich_scalar_natively() {
             // `serde_json` parse, not the wire order.
             doc: serde_json::json!({"b": 1, "a": 2}),
             docb: serde_json::json!({"a": 2, "b": 1}),
+            span: diesel::pg::data_types::PgInterval::new(14_706_789_000, -3, 14),
         }
     );
     let doc_text: JsonText = sql_query("SELECT doc::text AS t FROM rich WHERE id = 1")

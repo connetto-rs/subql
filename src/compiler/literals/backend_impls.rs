@@ -7,8 +7,9 @@
 
 use super::parse_helpers::{
     err_shape, parse_date_literal, parse_decimal_literal, parse_f64_literal, parse_hex_bytes,
-    parse_i64_literal, parse_json, parse_time_literal, parse_timestamp_literal,
-    parse_timestamp_tz_literal, parse_uuid, parse_uuid_as_string, quoted_string,
+    parse_i64_literal, parse_interval_literal, parse_json, parse_time_literal,
+    parse_timestamp_literal, parse_timestamp_tz_literal, parse_uuid, parse_uuid_as_string,
+    quoted_string,
 };
 use super::{parse_custom_literal, SqlLiteralParse};
 use crate::backend::{
@@ -59,6 +60,9 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> SqlLiteralParse for Postg
             (ScalarFamily::Time, _) => quoted_string(sql)
                 .ok_or_else(|| err_shape(sql, target))
                 .and_then(|s| parse_time_literal(s, sql).map(Value::Time)),
+            (ScalarFamily::Interval, _) => quoted_string(sql)
+                .ok_or_else(|| err_shape(sql, target))
+                .and_then(|s| parse_interval_literal(s, sql).map(Value::Interval)),
             (ScalarFamily::Decimal, SqlValue::Number(n, _)) => {
                 Ok(Value::Decimal(parse_decimal_literal(n, sql)?))
             }

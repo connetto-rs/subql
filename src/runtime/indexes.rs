@@ -34,6 +34,8 @@ pub enum IndexableCell {
     Int(i64),
     Float(u64), // f64::to_bits()
     String(Arc<str>),
+    /// An interval's span in microseconds.
+    Interval(i128),
 }
 
 impl IndexableCell {
@@ -57,6 +59,7 @@ impl IndexableCell {
             PlannerValue::Int(i) => Self::Int(*i),
             PlannerValue::Float(bits) => Self::Float(*bits),
             PlannerValue::String(s) => Self::String(Arc::clone(s)),
+            PlannerValue::Interval(span) => Self::Interval(*span),
         }
     }
 }

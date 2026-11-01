@@ -511,6 +511,13 @@ pub trait Backend: 'static {
     /// reads the word as a column name instead.
     const READS_IS_UNKNOWN: bool;
 
+    /// Whether this engine has PostgreSQL's `interval`, compared by span.
+    ///
+    /// Required, and per backend, because only one engine has the type. A
+    /// column declared `INTERVAL` elsewhere holds whatever text was stored and
+    /// compares as that text, so it classifies as no builtin and re-executes.
+    const HAS_INTERVAL: bool;
+
     /// Whether a `BETWEEN` whose bound has the type `NULL`, a bare `NULL` or
     /// arithmetic over one, compares all three operands as doubles.
     ///

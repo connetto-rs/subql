@@ -43,6 +43,9 @@ pub enum PlannerValue {
     Int(i64),
     Float(u64), // f64::to_bits()
     String(Arc<str>),
+    /// An interval's span in microseconds, so every spelling of one span
+    /// files and probes under one key.
+    Interval(i128),
 }
 
 impl PlannerValue {
@@ -72,6 +75,7 @@ impl PlannerValue {
             Value::String(x) => (x as &dyn Any)
                 .downcast_ref::<alloc::string::String>()
                 .map(|s| Self::String(Arc::from(s.as_str()))),
+            Value::Interval(x) => Some(Self::Interval(x.span_microseconds())),
             _ => None,
         }
     }
@@ -294,14 +298,14 @@ fn analyze_in_list<B: SqlLiteralParse, DB: DatabaseLike>(
 
     for item in list {
         match item {
-            Expr::Value(v) => {
+            Expr::Value(_) | Expr::Interval(_) => {
                 if let Some(value) = literal_index_key::<B, DB>(item, table_id, column_id, database)
                 {
                     disjuncts.push(Analysis::indexed_atom(PlannerAtom::Equality {
                         column_id,
                         value,
                     }));
-                } else if !matches!(v.value, SqlValue::Null) {
+                } else if !matches!(item, Expr::Value(v) if matches!(v.value, SqlValue::Null)) {
                     // NULL in IN-list cannot make expression TRUE by
                     // itself, but other unsupported literal forms
                     // might.
@@ -528,10 +532,18 @@ fn literal_index_key<B: SqlLiteralParse, DB: DatabaseLike>(
     column_id: ColumnId,
     database: &DB,
 ) -> Option<PlannerValue> {
-    let Expr::Value(value) = expr else {
-        return None;
-    };
     let kind = catalog_helpers::column_scalar_kind::<B, DB>(database, table_id, column_id)?;
+    let value = match expr {
+        Expr::Value(value) => &value.value,
+        Expr::Interval(interval)
+            if kind.family() == Some(crate::backend::ScalarFamily::Interval) =>
+        {
+            return PlannerValue::from_value(&Value::<B>::Interval(
+                crate::compiler::literals::interval_literal(interval).ok()?,
+            ));
+        }
+        _ => return None,
+    };
     // The equality index is probed by exact key, so a column whose
     // comparison is not byte-exact cannot be indexed by one: a `char(n)`
     // cell carries padding the comparison ignores, and a case-insensitive
@@ -545,7 +557,7 @@ fn literal_index_key<B: SqlLiteralParse, DB: DatabaseLike>(
             return None;
         }
     }
-    PlannerValue::from_value(&B::parse_literal(&value.value, kind.value_kind()).ok()?)
+    PlannerValue::from_value(&B::parse_literal(value, kind.value_kind()).ok()?)
 }
 
 /// An integer bound for a range atom. Range entries hold `i64` bounds and
@@ -563,7 +575,7 @@ fn literal_int_from_expr(expr: &Expr) -> Option<i64> {
 }
 
 const fn is_literal(expr: &Expr) -> bool {
-    matches!(expr, Expr::Value(_))
+    matches!(expr, Expr::Value(_) | Expr::Interval(_))
 }
 
 #[cfg(test)]
@@ -612,6 +624,41 @@ mod tests {
         assert_eq!(
             PlannerValue::from_value(&Value::<SQLite>::Bool(1)),
             Some(PlannerValue::Int(1))
+        );
+    }
+
+    /// A literal that reads at the column's kind keeps a key only when the
+    /// payload has one, so a bytea equality reaches the scan set rather
+    /// than an index nothing can probe.
+    #[test]
+    fn a_readable_literal_keeps_a_key_only_when_it_has_one() {
+        use sql_traits::structs::ParserDB;
+        use sqlparser::dialect::PostgreSqlDialect;
+
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE bins (id INT PRIMARY KEY, n INT, b BYTEA);",
+        )
+        .unwrap();
+        let table = catalog_helpers::table_id::<Postgres, _>(&db, "bins").unwrap();
+        let nums = catalog_helpers::column_id::<Postgres, _>(&db, table, "n").unwrap();
+        let bins = catalog_helpers::column_id::<Postgres, _>(&db, table, "b").unwrap();
+        let dialect = PostgreSqlDialect {};
+        let literal = |sql: &str| {
+            sqlparser::parser::Parser::new(&dialect)
+                .try_with_sql(sql)
+                .unwrap()
+                .parse_expr()
+                .unwrap()
+        };
+        assert_eq!(
+            literal_index_key::<Postgres, _>(&literal("7"), table, nums, &db),
+            Some(PlannerValue::Int(7)),
+            "an integer literal keeps its key"
+        );
+        assert_eq!(
+            literal_index_key::<Postgres, _>(&literal("X'deadbeef'"), table, bins, &db),
+            None,
+            "a bytea literal reads but has no index key"
         );
     }
 }
