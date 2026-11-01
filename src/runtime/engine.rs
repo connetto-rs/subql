@@ -5345,12 +5345,103 @@ where
         }
     }
 
+    /// The payload with every predicate filed under the hash the current canonicalizer gives it,
+    /// or `None` when every saved hash is already current.
+    ///
+    /// A shard written under an older canonicalizer keeps hashes a new registration no longer
+    /// computes, so the same query would bind a second subscription instead of finding the
+    /// restored one. Saved spellings that now read alike merge onto one predicate, except one
+    /// with membership terms, whose seeds are numbered by its own bytecode's slots.
+    #[cfg(feature = "std")]
+    fn recanonicalized(&self, payload: &ShardPayload<I>) -> Option<ShardPayload<I>> {
+        let mut moved: HashMap<u128, (u128, String)> = HashMap::new();
+        for predicate in &payload.predicates {
+            if moved.contains_key(&predicate.hash) {
+                continue;
+            }
+            // Canonical text reads back as an expression, so it fits any one-table statement.
+            let Ok(normalized) = canonicalize::normalize_sql(
+                &format!("SELECT * FROM t WHERE {}", predicate.normalized_sql),
+                &self.dialect,
+            ) else {
+                continue;
+            };
+            let hash = canonicalize::hash_sql(&crate::compiler::parser::projection_hash_input(
+                &normalized,
+                &predicate.projection,
+            ));
+            if hash != predicate.hash {
+                moved.insert(predicate.hash, (hash, normalized));
+            }
+        }
+        if moved.is_empty() {
+            return None;
+        }
+
+        // A bound term always has a seed, while its movement is optional.
+        let has_terms = |hash: u128| {
+            payload
+                .term_seeds
+                .iter()
+                .any(|seed| seed.predicate_hash == hash)
+                || payload
+                    .predicates
+                    .iter()
+                    .any(|predicate| predicate.hash == hash && !predicate.term_movements.is_empty())
+        };
+        let mut targets: HashMap<u128, u128> = payload
+            .predicates
+            .iter()
+            .filter(|predicate| !moved.contains_key(&predicate.hash))
+            .map(|predicate| (predicate.hash, predicate.hash))
+            .collect();
+        let mut sources: Vec<u128> = moved.keys().copied().collect();
+        sources.sort_unstable();
+        for source in sources {
+            let target = moved[&source].0;
+            match targets.get(&target) {
+                None => {
+                    targets.insert(target, source);
+                }
+                Some(&holder) if !has_terms(holder) && !has_terms(source) => {}
+                Some(_) => {
+                    moved.remove(&source);
+                    targets.insert(source, source);
+                }
+            }
+        }
+
+        let mut rehashed = payload.clone();
+        rehashed.predicates.retain_mut(|predicate| {
+            let Some((hash, normalized)) = moved.get(&predicate.hash) else {
+                return true;
+            };
+            let kept = targets.get(hash) == Some(&predicate.hash);
+            predicate.hash = *hash;
+            predicate.normalized_sql.clone_from(normalized);
+            kept
+        });
+        for binding in &mut rehashed.bindings {
+            if let Some((hash, _)) = moved.get(&binding.predicate_hash) {
+                binding.predicate_hash = *hash;
+            }
+        }
+        for seed in &mut rehashed.term_seeds {
+            if let Some((hash, _)) = moved.get(&seed.predicate_hash) {
+                seed.predicate_hash = *hash;
+            }
+        }
+        Some(rehashed)
+    }
+
     #[cfg(feature = "std")]
     fn rebuild_and_replace_table_state(
         &mut self,
         table_id: TableId,
         payload: &ShardPayload<I>,
     ) -> Result<(), RebuildPayloadError> {
+        let recanonicalized = self.recanonicalized(payload);
+        let payload = recanonicalized.as_ref().unwrap_or(payload);
         let (consumer_dict, entries) = self.rebuild_entries_from_payload(table_id, payload)?;
         let mut partition = TablePartition::new(table_id);
         partition.mutate(|txn| {

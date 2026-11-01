@@ -257,6 +257,8 @@ mod in_process_persistence;
 mod match_one_consumer;
 mod merge_jobs;
 mod read_fence;
+#[cfg(feature = "std")]
+mod restored_predicate_canonical_form;
 
 // Docker-backed check that a Postgres read's fence holds exactly what its
 // snapshot saw. Tests are #[ignore]d; run with --ignored.

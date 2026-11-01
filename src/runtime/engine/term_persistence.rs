@@ -1202,4 +1202,44 @@ mod tests {
         );
         assert_no_state_restored(&engine);
     }
+
+    /// Saved spellings that now read alike stay apart when they carry term seeds, since each
+    /// seed is numbered by its own predicate's slots.
+    #[test]
+    fn respelled_term_predicates_keep_their_own_slots() {
+        const ID: ColumnId = 0;
+        const ON_ID: u128 = 0x0200;
+        let mut on_id = term_predicate(ON_ID, vec![vec![ID]], vec![]);
+        on_id.normalized_sql = "5 = amount".to_string();
+        let mut second = binding(ON_ID, 8);
+        second.subscription_id = 2;
+        let payload = shard(
+            vec![term_predicate(TERM_HASH, vec![vec![AMOUNT]], vec![]), on_id],
+            vec![binding(TERM_HASH, CONSUMER), second],
+            vec![CONSUMER, 8],
+            vec![
+                seed_record(0, grant(42, 5)),
+                TermSeedData {
+                    predicate_hash: ON_ID,
+                    consumer_id: 8,
+                    slot: 0,
+                    seed: grant(43, 7),
+                },
+            ],
+        );
+        let mut engine = engine();
+        engine
+            .rebuild_and_replace_table_state(ORDERS, &payload)
+            .expect("both spellings restore");
+
+        let mut told = |id, amount| {
+            engine
+                .consumers(&TestEvent::insert(ORDERS, order_row(id, amount)))
+                .expect("the row dispatches")
+                .inserted()
+                .to_vec()
+        };
+        assert_eq!(told(101, 5), vec![CONSUMER]);
+        assert_eq!(told(7, 1), vec![8], "the id seed still reads the id column");
+    }
 }
