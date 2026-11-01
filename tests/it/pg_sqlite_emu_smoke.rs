@@ -31,6 +31,12 @@ fn insert_round_trips_through_the_emulator() {
         catalog_helpers::table_id::<subql::backend::Postgres, _>(source.pg_catalog(), "orders")
             .expect("orders resolves");
 
+    let relation = source
+        .poll_next_item()
+        .expect("poll succeeds")
+        .and_then(SourceItem::into_relation)
+        .expect("the table's relation leads the stream");
+    assert_eq!(relation.table(), "orders");
     let event = source
         .poll_next_item()
         .expect("poll succeeds")

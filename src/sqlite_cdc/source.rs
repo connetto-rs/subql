@@ -134,6 +134,7 @@ impl<DB: DatabaseLike> SqliteCdcSource<DB> {
 impl<DB: DatabaseLike> crate::CdcSource for SqliteCdcSource<DB> {
     type Event = SqliteChangesetEvent;
     type Commit = core::convert::Infallible;
+    type Relation = core::convert::Infallible;
     type Error = SqliteCdcError;
 
     fn next_item(

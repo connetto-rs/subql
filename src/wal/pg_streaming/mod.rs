@@ -6,9 +6,10 @@
 //! [`crate::PgChangeEvent`] through the [`crate::CdcSource`] trait,
 //! placed in commit order by its transaction's commit position and its
 //! ordinal in that transaction, and then the transaction's
-//! [`crate::PgCommit`]. Acks flow back so the slot's
-//! `confirmed_flush_lsn` moves to the end of each commit the consumer
-//! has acknowledged, and no further.
+//! [`crate::PgCommit`]. A relation message surfaces as a
+//! [`crate::PgRelation`] at the place it decodes. Acks flow back so the
+//! slot's `confirmed_flush_lsn` moves to the end of each commit the
+//! consumer has acknowledged, and no further.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -23,7 +24,7 @@ use sql_traits::prelude::DatabaseLike;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    PgChangeEvent, PgCommit, PgOutputOrder, PgSourceItem, ReleaseQueue, SourceItem,
+    PgChangeEvent, PgCommit, PgOutputOrder, PgRelation, PgSourceItem, ReleaseQueue, SourceItem,
     TransactionOrderError,
 };
 use crate::{PgCommitPosition, PgLsn};
@@ -301,21 +302,21 @@ impl PgStreamingCdcSource {
 impl crate::CdcSource for PgStreamingCdcSource {
     type Event = PgChangeEvent;
     type Commit = PgCommit;
+    type Relation = PgRelation;
     type Error = PgStreamingError;
 
     async fn next_item(&mut self) -> Result<Option<PgSourceItem>, Self::Error> {
         loop {
-            if let Some(row) = self.delivery.next_row() {
-                self.events_received += 1;
-                return Ok(Some(SourceItem::Event(row)));
-            }
-            if let Some((commit, released)) = self.delivery.next_commit() {
+            if let Some((item, released)) = self.delivery.next_item() {
                 if !self.terminal {
                     if let Some(end) = released {
                         self.publish_applied(end);
                     }
                 }
-                return Ok(Some(SourceItem::Commit(commit)));
+                if matches!(item, SourceItem::Event(_)) {
+                    self.events_received += 1;
+                }
+                return Ok(Some(item));
             }
             if self.terminal {
                 return Err(PgStreamingError::SourceClosed);
@@ -347,13 +348,12 @@ impl crate::CdcSource for PgStreamingCdcSource {
     }
 }
 
-/// Row delivery for the source. The transaction frame, the resume filter,
-/// the staged fanout of one decoded event, and the commits the slot still
+/// Item delivery for the source. The transaction frame, the resume filter,
+/// the staged items of one decoded event, and the commits the slot still
 /// holds.
 struct Delivery {
     order: PgOutputOrder,
-    rows: VecDeque<PgChangeEvent>,
-    commit: Option<PgCommit>,
+    items: VecDeque<PgSourceItem>,
     releases: ReleaseQueue,
     start: Option<PgCommitPosition>,
 }
@@ -362,43 +362,43 @@ impl Delivery {
     const fn new(start: Option<PgCommitPosition>) -> Self {
         Self {
             order: PgOutputOrder::new(),
-            rows: VecDeque::new(),
-            commit: None,
+            items: VecDeque::new(),
             releases: ReleaseQueue::new(),
             start,
         }
     }
 
     /// Place `change` in the transaction frame and stage its fanout, the
-    /// rows first and a commit ending a transaction after them.
+    /// items first and a commit ending a transaction after them.
     fn stage(&mut self, change: pg_walstream::ChangeEvent) -> Result<(), TransactionOrderError> {
-        self.order
-            .apply(change, &mut self.rows)
-            .map(|committed| self.commit = committed)
+        let commit = self.order.apply(change, &mut self.items)?;
+        self.items.extend(commit.map(SourceItem::Commit));
+        Ok(())
     }
 
-    /// The next staged row past the resume filter, if any.
-    fn next_row(&mut self) -> Option<PgChangeEvent> {
-        while let Some(row) = self.rows.pop_front() {
-            if self.unseen(row.position()) {
-                return Some(row);
+    /// The next staged item past the resume filter, alongside the flush
+    /// end its delivery releases when the item is a commit.
+    ///
+    /// A relation always passes. The resume filter applies to commit
+    /// positions, and a relation carries a message LSN instead, which a
+    /// reconnected consumer may not hold yet.
+    fn next_item(&mut self) -> Option<(PgSourceItem, Option<PgLsn>)> {
+        while let Some(item) = self.items.pop_front() {
+            match item {
+                SourceItem::Event(ref row) if self.unseen(row.position()) => {
+                    return Some((item, None));
+                }
+                SourceItem::Relation(_) => return Some((item, None)),
+                SourceItem::Commit(ref commit) if self.unseen(commit.position()) => {
+                    self.releases.committed(*commit);
+                    // The consumer may have acknowledged past this commit
+                    // before it was returned.
+                    return Some((SourceItem::Commit(*commit), self.releases.release()));
+                }
+                _ => {}
             }
         }
         None
-    }
-
-    /// The staged commit, if any, registered with the release queue when
-    /// past the resume filter, alongside the flush end its delivery
-    /// releases.
-    fn next_commit(&mut self) -> Option<(PgCommit, Option<PgLsn>)> {
-        let commit = self.commit.take()?;
-        if !self.unseen(commit.position()) {
-            return None;
-        }
-        self.releases.committed(commit);
-        // The consumer may have acknowledged past this commit before it
-        // was returned.
-        Some((commit, self.releases.release()))
     }
 
     /// Record the consumer's acknowledgement, returning the flush end it

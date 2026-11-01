@@ -17,7 +17,9 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
-use sqlparser::ast::{BinaryOperator, Expr, Ident, InTarget, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Ident, InTarget, SelectItem, SetExpr, Statement, TableFactor,
+};
 use sqlparser::dialect::Dialect;
 
 /// Column alias the re-execution query projects its scalar result under, so the
@@ -51,7 +53,8 @@ pub struct TotalPlan<B: Backend> {
     /// Every column of every one of those tables: a computed projection can
     /// depend on any of them, so narrowing this would mean guessing.
     pub dependency_columns: Vec<ColumnId>,
-    /// The executable query re-read without rewriting.
+    /// The executable query re-read, a lone wildcard projection over one
+    /// table already named as the catalog's columns.
     pub read_query: crate::reexec::BoundQuery<B>,
 }
 
@@ -197,7 +200,7 @@ where
 {
     use core::ops::ControlFlow;
 
-    let statement =
+    let mut statement =
         crate::compiler::sql_shape::parse_single_statement(query.sql(), dialect as &dyn Dialect)?;
     if !matches!(statement, Statement::Query(_)) {
         return Err(RegisterError::UnsupportedSql(
@@ -249,10 +252,15 @@ where
         }
     }
 
+    let expanded = expand_wildcard_projection::<B, DB>(&mut statement, dialect, database);
     Ok(QueryPlan::Total(TotalPlan {
         tables,
         dependency_columns,
-        read_query: query.clone(),
+        read_query: if expanded {
+            crate::reexec::BoundQuery::new(statement.to_string(), query.binds().to_vec())
+        } else {
+            query.clone()
+        },
     }))
 }
 
@@ -701,8 +709,10 @@ pub struct KeyedPlan {
     /// column created as `"OrderId"` is not found, and the subscription
     /// registers cleanly and then fails on every change.
     pub key_idents: Vec<Ident>,
-    /// The statement as parsed, so a scoped read can be built by adding a
-    /// predicate to its WHERE rather than by rebuilding the query from parts.
+    /// The statement as planned, a lone wildcard projection over the table
+    /// already named as the catalog's columns, so a scoped read can be built
+    /// by adding a predicate to its WHERE rather than by rebuilding the
+    /// query from parts.
     pub statement: Statement,
     /// Every column of the table: a filter the engine could not compile may
     /// read any of them, so narrowing this would mean guessing which UPDATEs
@@ -732,7 +742,7 @@ where
     B: Backend + SqlLiteralParse,
     DB: DatabaseLike,
 {
-    let statement =
+    let mut statement =
         crate::compiler::sql_shape::parse_single_statement(sql, dialect as &dyn Dialect)?;
     // Succeeds only for a clause-free single-table SELECT, which is exactly the
     // shape whose rows can be asked about individually.
@@ -800,6 +810,10 @@ where
         .filter_map(|o| ColumnId::try_from(o).ok())
         .collect();
 
+    // The projection is a wildcard or the table's own columns, so the
+    // rewrite keeps the key's positions valid.
+    expand_wildcard_projection::<B, DB>(&mut statement, dialect, database);
+
     Ok(QueryPlan::Keyed(alloc::boxed::Box::new(KeyedPlan {
         table,
         key_positions,
@@ -860,6 +874,74 @@ fn statement_reads_more_than(
         core::ops::ControlFlow::<()>::Continue(())
     });
     other
+}
+
+/// Replace a lone wildcard projection over a single table with the table's
+/// catalog columns, so a re-read returns the catalog's columns, quoted, in
+/// catalog order, and a column the server adds under the table afterwards
+/// cannot widen the rows the re-read delivers.
+///
+/// Rewrites only the shape a wildcard answers unambiguously. A plain
+/// wildcard over `t`, and a qualified wildcard naming `t`, when `t` is the
+/// statement's only table. A derived table, a join, a computed projection
+/// alongside the wildcard, or a qualifier naming nothing the statement reads
+/// is left as written. Returns whether the statement was rewritten.
+fn expand_wildcard_projection<B, DB>(
+    statement: &mut Statement,
+    dialect: &B::Dialect,
+    database: &DB,
+) -> bool
+where
+    B: Backend + SqlLiteralParse,
+    DB: DatabaseLike,
+{
+    let Some(select) = crate::compiler::sql_shape::select_mut(statement) else {
+        return false;
+    };
+    if select.from.len() != 1 || !select.from[0].joins.is_empty() || select.projection.len() != 1 {
+        return false;
+    }
+    let TableFactor::Table { name, .. } = &select.from[0].relation else {
+        return false;
+    };
+    let Ok(table_name) = crate::compiler::parser::SqlTableName::from_object_name(name) else {
+        return false;
+    };
+    let Ok(table) = crate::table_resolution::resolve_table_reference::<B, DB>(
+        table_name.qualified.as_deref(),
+        &table_name.unqualified,
+        database,
+    ) else {
+        return false;
+    };
+    let item = &select.projection[0];
+    if !matches!(item, SelectItem::Wildcard(_))
+        && !crate::compiler::sql_shape::wildcard_of_read_table::<B, DB>(
+            item, select, table, database,
+        )
+    {
+        return false;
+    }
+    let Ok(arity) = crate::catalog_helpers::table_arity(database, table) else {
+        return false;
+    };
+    let mut columns = Vec::with_capacity(arity);
+    for ordinal in 0..arity {
+        let Ok(column) = ColumnId::try_from(ordinal) else {
+            continue;
+        };
+        let Some(column_name) = crate::catalog_helpers::column_name(database, table, column) else {
+            return false;
+        };
+        columns.push(SelectItem::UnnamedExpr(Expr::Identifier(
+            crate::compiler::quoted_ident(dialect as &dyn Dialect, &column_name),
+        )));
+    }
+    if columns.len() != arity {
+        return false;
+    }
+    select.projection = columns;
+    true
 }
 
 /// Where in the projection each primary key column lands under the engine's

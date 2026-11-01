@@ -54,6 +54,9 @@
 //!
 //! source.execute_sql("INSERT INTO orders (id, amount, status) VALUES (1, 250, 'paid')")?;
 //!
+//! let relation = source.poll_next_item()?.and_then(SourceItem::into_relation).expect("the table's relation leads the stream");
+//! assert_eq!(relation.table(), "orders");
+//!
 //! let event = source.poll_next_item()?.and_then(SourceItem::into_event).expect("insert reaches the queue");
 //! let notifs = engine.consumers(&event)?;
 //! assert_eq!(notifs.inserted(), &[1]);

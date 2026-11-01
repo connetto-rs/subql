@@ -12,7 +12,7 @@ use core::time::Duration;
 
 use pg_walstream::{parse_lsn, Lsn, PgOutputDecoder, PgReplicationConnection};
 
-use crate::wal::{PgChangeEvent, PgOutputOrder, PgSourceItem, ReleaseQueue, SourceItem};
+use crate::wal::{PgOutputOrder, PgSourceItem, ReleaseQueue, SourceItem};
 use crate::PgCommitPosition;
 
 use super::helpers::{hex_decode, render_lsn, sql_string_literal};
@@ -52,10 +52,13 @@ pub(super) fn polling_loop(
 
     let mut decoder = PgOutputDecoder::with_protocol_version(1);
     let mut order = PgOutputOrder::new();
-    let mut rows: Vec<PgChangeEvent> = Vec::new();
+    let mut items: Vec<PgSourceItem> = Vec::new();
     let mut releases = ReleaseQueue::new();
     // A peek re-reads every unacknowledged transaction at the same positions.
     let mut last_delivered: Option<PgCommitPosition> = None;
+    // A peek re-reads every unacknowledged relation at the same message LSN,
+    // which is strictly increasing in WAL order.
+    let mut last_relation_lsn: Option<u64> = None;
     let unseen = |last: Option<PgCommitPosition>, position| last.is_none_or(|last| position > last);
     let slot = sql_string_literal(&slot_name);
     let publication = sql_string_literal(&publication_name);
@@ -154,7 +157,7 @@ pub(super) fn polling_loop(
                     return;
                 }
             };
-            let committed = match order.apply(change, &mut rows) {
+            let committed = match order.apply(change, &mut items) {
                 Ok(committed) => committed,
                 Err(e) => {
                     let _ = event_tx.blocking_send(Err(e.into()));
@@ -165,19 +168,37 @@ pub(super) fn polling_loop(
                 clippy::iter_with_drain,
                 reason = "the buffer is reused for every message"
             )]
-            for ev in rows.drain(..) {
-                if !unseen(last_delivered, ev.position()) {
-                    continue;
-                }
-                last_delivered = Some(ev.position());
-                events_received.fetch_add(1, Ordering::Relaxed);
-                total_drained_events.fetch_add(1, Ordering::Relaxed);
-                if !drain_counted {
-                    drain_counted = true;
-                    non_empty_drains.fetch_add(1, Ordering::Relaxed);
-                }
-                if event_tx.blocking_send(Ok(SourceItem::Event(ev))).is_err() {
-                    return;
+            for item in items.drain(..) {
+                match item {
+                    SourceItem::Event(ev) => {
+                        if !unseen(last_delivered, ev.position()) {
+                            continue;
+                        }
+                        last_delivered = Some(ev.position());
+                        events_received.fetch_add(1, Ordering::Relaxed);
+                        total_drained_events.fetch_add(1, Ordering::Relaxed);
+                        if !drain_counted {
+                            drain_counted = true;
+                            non_empty_drains.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if event_tx.blocking_send(Ok(SourceItem::Event(ev))).is_err() {
+                            return;
+                        }
+                    }
+                    SourceItem::Relation(relation) => {
+                        if relation.lsn().0 <= last_relation_lsn.unwrap_or(0) {
+                            continue;
+                        }
+                        last_relation_lsn = Some(relation.lsn().0);
+                        if event_tx
+                            .blocking_send(Ok(SourceItem::Relation(relation)))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    // The commit comes back from `apply`, not the buffer.
+                    SourceItem::Commit(_) => {}
                 }
             }
             if let Some(commit) =

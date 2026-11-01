@@ -221,9 +221,15 @@ mod real_source {
 
     fn drain_one(source: &mut PgSqliteEmuSource) -> PgChangeEvent {
         use subql::SourceItem;
-        let ev = source
-            .poll_next_item()
-            .expect("poll succeeds")
+        // The table's relation may lead the fresh source's first drain.
+        let mut item = source.poll_next_item().expect("poll succeeds");
+        while item
+            .as_ref()
+            .is_some_and(|item| matches!(item, SourceItem::Relation(_)))
+        {
+            item = source.poll_next_item().expect("poll succeeds");
+        }
+        let ev = item
             .and_then(SourceItem::into_event)
             .expect("expected an event on the queue");
         assert!(

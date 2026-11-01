@@ -100,7 +100,7 @@ fn async_keyed_event_scopes_registration_binds() {
     assert_eq!(queries.len(), 1);
     assert_eq!(
         queries[0].sql(),
-        "SELECT * FROM orders WHERE (lower(status) = $1) AND \"id\" IN (1)"
+        "SELECT \"id\", \"price\", \"quantity\", \"status\" FROM orders WHERE (lower(status) = $1) AND \"id\" IN (1)"
     );
     assert_eq!(queries[0].binds(), &[Value::String("paid".into())]);
     drop(queries);
@@ -215,7 +215,7 @@ fn async_whole_event_forwards_registration_binds() {
     assert_eq!(queries.len(), 1);
     assert_eq!(
         queries[0].sql(),
-        "SELECT * FROM orders ORDER BY id DESC LIMIT $1"
+        "SELECT \"id\", \"price\", \"quantity\", \"status\" FROM orders ORDER BY id DESC LIMIT $1"
     );
     assert_eq!(queries[0].binds(), &[Value::Int(3)]);
     drop(queries);

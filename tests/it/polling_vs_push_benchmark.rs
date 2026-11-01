@@ -204,6 +204,8 @@ where
                         return;
                     }
                 }
+                // A relation carries no row latency sample.
+                SourceItem::Relation(_) => {}
             }
         }
     });

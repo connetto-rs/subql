@@ -158,7 +158,10 @@ fn fixed_tiers_report_exact_executable_queries() {
     let Tier::KeyedRows { query, .. } = keyed.tier else {
         panic!("expected keyed tier")
     };
-    assert_eq!(query.sql(), keyed_sql);
+    assert_eq!(
+        query.sql(),
+        "SELECT \"id\", \"price\", \"status\" FROM orders WHERE lower(status) = $1"
+    );
     assert_eq!(query.binds(), std::slice::from_ref(&bind));
 
     let whole_sql = "SELECT * FROM orders WHERE lower(status) = $1 \
@@ -169,8 +172,47 @@ fn fixed_tiers_report_exact_executable_queries() {
     let Tier::WholeRows { query, .. } = whole.tier else {
         panic!("expected whole tier")
     };
-    assert_eq!(query.sql(), whole_sql);
+    assert_eq!(
+        query.sql(),
+        "SELECT \"id\", \"price\", \"status\" FROM orders WHERE lower(status) = $1 \
+         AND id IN (SELECT id FROM managers)"
+    );
     assert_eq!(query.binds(), &[bind]);
+}
+
+/// A set expression has no top-level select to name columns from, and a
+/// derived table's columns are its inner projection's rather than the
+/// catalog's, so both re-read the statement as written. The lowercase
+/// spelling is the proof it is the caller's string and not a re-rendering.
+#[test]
+fn a_set_expression_and_a_derived_table_reread_as_written() {
+    let mut engine = engine();
+
+    let union_sql = "select id from orders union all select id from managers";
+    let whole = engine
+        .register(SubscriptionRequest::new(15u64, union_sql))
+        .expect("a set expression registers on the whole-re-read tier");
+    let Tier::WholeRows { query, .. } = whole.tier else {
+        panic!("expected a whole re-read, got {:?}", whole.tier);
+    };
+    assert_eq!(
+        query.sql(),
+        union_sql,
+        "a set expression has no top-level wildcard to name"
+    );
+
+    let derived_sql = "select * from (select id, price from orders) s";
+    let whole = engine
+        .register(SubscriptionRequest::new(16u64, derived_sql))
+        .expect("a derived-table wildcard registers on the whole-re-read tier");
+    let Tier::WholeRows { query, .. } = whole.tier else {
+        panic!("expected a whole re-read, got {:?}", whole.tier);
+    };
+    assert_eq!(
+        query.sql(),
+        derived_sql,
+        "a derived table's columns are the inner projection's, not the catalog's"
+    );
 }
 
 #[test]
@@ -187,8 +229,15 @@ fn current_fixed_read_is_available_by_subscription_identity() {
     let (whole, _) = register(&mut engine, 12, whole_sql);
     for (subscription_id, sql) in [
         (scalar, "SELECT MIN(price) AS v FROM orders"),
-        (keyed, "SELECT * FROM orders WHERE lower(status) = 'paid'"),
-        (whole, whole_sql),
+        (
+            keyed,
+            "SELECT \"id\", \"price\", \"status\" FROM orders WHERE lower(status) = 'paid'",
+        ),
+        (
+            whole,
+            "SELECT \"id\", \"price\", \"status\" FROM orders WHERE lower(status) = 'paid' \
+             AND id IN (SELECT id FROM managers)",
+        ),
     ] {
         let query = engine
             .read_query(subscription_id)
