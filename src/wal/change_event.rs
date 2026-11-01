@@ -1203,7 +1203,7 @@ mod tests {
                     RelationColumn {
                         name: "price".into(),
                         type_id: 701,
-                        type_modifier: -1,
+                        type_modifier: 22,
                         is_key: false,
                     },
                 ],
@@ -1225,6 +1225,12 @@ mod tests {
             assert_eq!(names, alloc::vec!["id", "price"]);
             assert!(columns[0].is_key());
             assert!(!columns[1].is_key());
+            // The server's type oids and modifiers ride the definition, which
+            // a consumer holding an older schema diffs against its catalog.
+            assert_eq!(columns[0].type_oid(), 20);
+            assert_eq!(columns[0].type_modifier(), -1);
+            assert_eq!(columns[1].type_oid(), 701);
+            assert_eq!(columns[1].type_modifier(), 22);
             assert!(row.position() < PgCommitPosition::at_commit(PgLsn(1500), PgXid(3)));
         }
 

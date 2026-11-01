@@ -1914,4 +1914,244 @@ mod tests {
         };
         assert_eq!(pk.to_vec(), vec![WireValue::Integer(2)]);
     }
+
+    /// An event naming a table the catalog lacks passes the projection
+    /// untouched and is the fold's to report, one report per event type,
+    /// since each takes its own path through the projection.
+    #[cfg(feature = "pgoutput-emit")]
+    #[test]
+    fn pgoutput_fold_reports_a_table_absent_from_the_catalog() {
+        use sqlite_diff_rs::pg_walstream::{ColumnValue, EventType, Lsn, ReplicaIdentity, RowData};
+
+        // The catalog has `orders`, so an event naming `other` is absent.
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE orders (id INT PRIMARY KEY, amount INT);",
+        )
+        .unwrap();
+        let data = || {
+            RowData::from_pairs(vec![
+                ("id", ColumnValue::text("1")),
+                ("amount", ColumnValue::text("100")),
+            ])
+        };
+        let insert = ChangeEvent {
+            event_type: EventType::Insert {
+                schema: "public".into(),
+                table: "other".into(),
+                relation_oid: 1,
+                data: data(),
+            },
+            lsn: Lsn::new(1),
+            metadata: None,
+            xid: None,
+        };
+        let update = ChangeEvent {
+            event_type: EventType::Update {
+                schema: "public".into(),
+                table: "other".into(),
+                relation_oid: 1,
+                old_data: Some(data()),
+                new_data: data(),
+                replica_identity: ReplicaIdentity::Full,
+                key_columns: alloc::vec!["id".into()],
+            },
+            lsn: Lsn::new(2),
+            metadata: None,
+            xid: None,
+        };
+        let delete = ChangeEvent {
+            event_type: EventType::Delete {
+                schema: "public".into(),
+                table: "other".into(),
+                relation_oid: 1,
+                old_data: data(),
+                replica_identity: ReplicaIdentity::Default,
+                key_columns: alloc::vec!["id".into()],
+            },
+            lsn: Lsn::new(3),
+            metadata: None,
+            xid: None,
+        };
+        for event in [insert, update, delete] {
+            let err = pgoutput_patchset(&db, core::slice::from_ref(&event)).unwrap_err();
+            assert!(
+                matches!(err, ConversionError::TableNotFound(_)),
+                "an event naming a table the catalog lacks is the fold's to report, got {err:?}"
+            );
+        }
+    }
+
+    /// A delete whose row names a column the catalog lacks folds into a
+    /// delete that keeps only the catalog's columns, the delete twin of the
+    /// insert and update projection.
+    #[cfg(feature = "pgoutput-emit")]
+    #[test]
+    fn pgoutput_fold_projects_a_delete_onto_the_catalogs_columns() {
+        use sqlite_diff_rs::pg_walstream::{ColumnValue, EventType, Lsn, ReplicaIdentity, RowData};
+
+        // The catalog was built before the server added `status`.
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE orders (id INT PRIMARY KEY, amount INT);",
+        )
+        .unwrap();
+        let delete = ChangeEvent {
+            event_type: EventType::Delete {
+                schema: "public".into(),
+                table: "orders".into(),
+                relation_oid: 1,
+                old_data: RowData::from_pairs(vec![
+                    ("id", ColumnValue::text("3")),
+                    ("amount", ColumnValue::text("50")),
+                    ("status", ColumnValue::text("new")),
+                ]),
+                replica_identity: ReplicaIdentity::Default,
+                key_columns: alloc::vec!["id".into()],
+            },
+            lsn: Lsn::new(1),
+            metadata: None,
+            xid: None,
+        };
+        let bytes = pgoutput_patchset(&db, core::slice::from_ref(&delete)).unwrap();
+        let ParsedDiffSet::Patchset(diff) = parse_patchset(&bytes) else {
+            unreachable!("parse_patchset asserted the Patchset variant");
+        };
+        let ops: Vec<RowOp<'_>> = diff.iter().collect();
+        assert_eq!(ops.len(), 1, "one op for the delete: {ops:?}");
+        let PatchsetOp::Delete { pk, .. } = &ops[0] else {
+            panic!("expected a delete op, got {:?}", ops[0]);
+        };
+        assert_eq!(
+            pk.to_vec(),
+            vec![WireValue::Integer(3)],
+            "the delete keeps the key, in the catalog's spelling"
+        );
+    }
+
+    /// The changeset vehicle projects the same way, so a column the catalog
+    /// lacks stays out of the old and new images it records.
+    #[cfg(feature = "pgoutput-emit")]
+    #[test]
+    fn pgoutput_changeset_projects_an_event_onto_the_catalogs_columns() {
+        use sqlite_diff_rs::pg_walstream::{ColumnValue, EventType, Lsn, ReplicaIdentity, RowData};
+
+        // The catalog was built before the server added `status`.
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE orders (id INT PRIMARY KEY, amount INT);",
+        )
+        .unwrap();
+        let insert = ChangeEvent {
+            event_type: EventType::Insert {
+                schema: "public".into(),
+                table: "orders".into(),
+                relation_oid: 1,
+                data: RowData::from_pairs(vec![
+                    ("id", ColumnValue::text("1")),
+                    ("amount", ColumnValue::text("100")),
+                    ("status", ColumnValue::text("new")),
+                ]),
+            },
+            lsn: Lsn::new(1),
+            metadata: None,
+            xid: None,
+        };
+        let update = ChangeEvent {
+            event_type: EventType::Update {
+                schema: "public".into(),
+                table: "orders".into(),
+                relation_oid: 1,
+                // A distinct key, so the fold reports both events rather
+                // than the coalesced final state of one key.
+                old_data: Some(RowData::from_pairs(vec![
+                    ("id", ColumnValue::text("2")),
+                    ("amount", ColumnValue::text("100")),
+                    ("status", ColumnValue::text("new")),
+                ])),
+                new_data: RowData::from_pairs(vec![
+                    ("id", ColumnValue::text("2")),
+                    ("amount", ColumnValue::text("200")),
+                    ("status", ColumnValue::text("paid")),
+                ]),
+                replica_identity: ReplicaIdentity::Full,
+                key_columns: alloc::vec!["id".into()],
+            },
+            lsn: Lsn::new(2),
+            metadata: None,
+            xid: None,
+        };
+
+        let bytes = pgoutput_changeset(&db, &[insert, update]).unwrap();
+        let ParsedDiffSet::Changeset(diff) = ParsedDiffSet::parse(&bytes).unwrap() else {
+            panic!("expected a changeset, got a patchset");
+        };
+        let ops: Vec<_> = diff.iter().collect();
+        assert_eq!(ops.len(), 2, "one op per row event: {ops:?}");
+        let ChangesetOp::Insert { values, .. } = &ops[0] else {
+            panic!("expected an insert op, got {:?}", ops[0]);
+        };
+        assert_eq!(
+            values.to_vec(),
+            vec![WireValue::Integer(1), WireValue::Integer(100)],
+            "the insert records only the catalog's columns"
+        );
+        let ChangesetOp::Update { values, .. } = &ops[1] else {
+            panic!("expected an update op, got {:?}", ops[1]);
+        };
+        assert_eq!(
+            values.to_vec(),
+            vec![
+                (Some(WireValue::Integer(2)), Some(WireValue::Integer(2))),
+                (Some(WireValue::Integer(100)), Some(WireValue::Integer(200))),
+            ],
+            "the old and new images hold only the catalog's columns"
+        );
+    }
+
+    /// The changeset vehicle records the old and new image of every column
+    /// the message carries, and a column absent from the old image keeps the
+    /// new value in both slots, so the WHERE still finds the row.
+    #[test]
+    fn maxwell_changeset_records_old_and_new_images() {
+        let db = orders_db();
+        let insert = maxwell_cdc::parse(
+            r#"{"database":"testdb","table":"orders","type":"insert","data":{"id":1,"amount":100,"status":"new"}}"#,
+        )
+        .unwrap();
+        let update = maxwell_cdc::parse(
+            r#"{"database":"testdb","table":"orders","type":"update","data":{"id":2,"amount":200,"status":"paid"},"old":{"amount":100}}"#,
+        )
+        .unwrap();
+        let bytes = maxwell_changeset(&db, &[insert, update]).unwrap();
+        let ParsedDiffSet::Changeset(diff) = ParsedDiffSet::parse(&bytes).unwrap() else {
+            panic!("expected a changeset, got a patchset");
+        };
+        let ops: Vec<_> = diff.iter().collect();
+        assert_eq!(ops.len(), 2, "one op per row message: {ops:?}");
+        let ChangesetOp::Insert { values, .. } = &ops[0] else {
+            panic!("expected an insert op, got {:?}", ops[0]);
+        };
+        assert_eq!(
+            values.to_vec(),
+            vec![
+                WireValue::Integer(1),
+                WireValue::Integer(100),
+                WireValue::Text(String::from("new")),
+            ],
+            "the insert records the message's columns in catalog order"
+        );
+        let ChangesetOp::Update { values, .. } = &ops[1] else {
+            panic!("expected an update op, got {:?}", ops[1]);
+        };
+        assert_eq!(
+            values.to_vec(),
+            vec![
+                (Some(WireValue::Integer(2)), Some(WireValue::Integer(2))),
+                (Some(WireValue::Integer(100)), Some(WireValue::Integer(200)),),
+                (
+                    Some(WireValue::Text(String::from("paid"))),
+                    Some(WireValue::Text(String::from("paid"))),
+                ),
+            ],
+            "a column absent from the old image keeps the new value in both slots"
+        );
+    }
 }
