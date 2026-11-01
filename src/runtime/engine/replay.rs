@@ -1527,6 +1527,7 @@ fn cell_read(value: &Value<impl Backend>) -> Result<AggCellRead, ReplayError> {
         ),
         Value::Missing => AggCellRead::Missing,
         Value::Null => AggCellRead::Null,
+        Value::Interval(value) => AggCellRead::Interval(*value),
         _ => AggCellRead::NonNumeric,
     })
 }
@@ -1555,6 +1556,9 @@ fn validate_fold_carrier<B: Backend, DB: DatabaseLike>(
         Some(ScalarFamily::Decimal) => {
             core::any::TypeId::of::<B::Decimal>() == core::any::TypeId::of::<BigDecimal>()
         }
+        // Every backend carries an interval as the same type, and only the
+        // engine that has one classifies a column as an interval.
+        Some(ScalarFamily::Interval) => !widens,
         _ => false,
     };
     if supported {

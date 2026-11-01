@@ -48,6 +48,98 @@ fn intervals_bind_and_read_back_on_postgres() {
     );
 }
 
+/// The interval seed runs on PostgreSQL, and the installed `SUM` and `AVG`
+/// then answer what the server answers, before and after a folded insert.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn interval_aggregates_seed_and_fold_as_postgres_answers() {
+    use diesel::RunQueryDsl;
+    use subql::testing::TestEvent;
+
+    #[derive(diesel::QueryableByName)]
+    struct Printed {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        sum: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        avg: String,
+    }
+
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.connect().batch_execute(SETUP).unwrap();
+    let catalog = sql_traits::structs::ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(
+        "CREATE TABLE shifts (id INT PRIMARY KEY, span INTERVAL);",
+    )
+    .unwrap();
+    let table = subql::catalog_helpers::table_id::<Postgres, _>(&catalog, "shifts").unwrap();
+    let mut engine: subql::SubscriptionEngine<
+        TestEvent<Postgres>,
+        subql::DefaultIds,
+        sql_traits::structs::ParserDB,
+    > = subql::SubscriptionEngine::new(catalog, sqlparser::dialect::PostgreSqlDialect {});
+    let connector = PgDieselConnector::new(db.connect());
+    let mut held = (String::new(), String::new());
+    let mut record = |updates: Vec<subql::AggregateValueUpdate<subql::DefaultIds>>| {
+        for update in updates {
+            let value = update.folded_value().unwrap().to_string();
+            if update.subscription == 1 {
+                held.0 = value;
+            } else {
+                held.1 = value;
+            }
+        }
+        held.clone()
+    };
+    for (id, sql) in [
+        (1u64, "SELECT SUM(span) FROM shifts"),
+        (2, "SELECT AVG(span) FROM shifts"),
+    ] {
+        let bootstrap = engine
+            .register(subql::SubscriptionRequest::new(id, sql))
+            .unwrap()
+            .served()
+            .unwrap()
+            .aggregate_bootstrap
+            .clone()
+            .unwrap();
+        let (row, _) = connector
+            .execute_scalar_row(&bootstrap.query.as_read_query(), &bootstrap.kinds, &())
+            .unwrap();
+        let updates = subql::Install::install(
+            &mut engine,
+            id,
+            subql::AggregateSeedInstall {
+                rows: vec![row],
+                fence: None,
+            },
+        )
+        .unwrap();
+        record(updates.updates);
+    }
+    let server = || -> (String, String) {
+        let printed: Printed =
+            diesel::sql_query("SELECT sum(span)::text AS sum, avg(span)::text AS avg FROM shifts")
+                .get_result(&mut db.connect())
+                .unwrap();
+        (printed.sum, printed.avg)
+    };
+    assert_eq!(record(Vec::new()), server(), "the seed");
+
+    db.connect()
+        .batch_execute("INSERT INTO shifts VALUES (4, '1 year -00:00:00.000007')")
+        .unwrap();
+    let insert = TestEvent::<Postgres>::insert(
+        table,
+        vec![Value::Int(4), interval("1 year -00:00:00.000007")],
+    )
+    .with_pk_columns([0u16]);
+    assert_eq!(
+        record(engine.aggregate_updates(&insert).unwrap().updates),
+        server(),
+        "after an insert"
+    );
+}
+
 /// The async connector binds an interval the same way.
 #[cfg(feature = "executor-diesel-async-postgres")]
 #[test]

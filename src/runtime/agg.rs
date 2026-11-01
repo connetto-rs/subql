@@ -26,6 +26,8 @@ pub enum AggCellRead {
     /// engines answer with them: measured, PostgreSQL sums `1.0` and
     /// `Infinity` to `Infinity`.
     Real(f64),
+    /// An interval cell, which `SUM` and `AVG` total field by field.
+    Interval(crate::backend::Interval),
     /// The cell is present but does not participate in numeric aggregates
     /// (Bool, String, non-finite Float, etc.).
     NonNumeric,
@@ -56,6 +58,9 @@ impl AggCellRead {
             Self::Real(value) => Some(TotalDelta::Real(crate::runtime::aggregate::FloatParts::of(
                 *value, weight,
             ))),
+            Self::Interval(value) => Some(TotalDelta::Interval(crate::backend::IntervalSum::of(
+                *value, weight,
+            ))),
             Self::Missing | Self::Null | Self::NonNumeric => None,
         }
     }
@@ -71,7 +76,7 @@ impl AggCellRead {
                 <bigdecimal::BigDecimal as bigdecimal::ToPrimitive>::to_f64(value)
             }
             Self::Real(value) => Some(*value),
-            Self::Missing | Self::Null | Self::NonNumeric => None,
+            Self::Missing | Self::Null | Self::NonNumeric | Self::Interval(_) => None,
         }
     }
 }

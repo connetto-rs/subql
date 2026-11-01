@@ -463,7 +463,8 @@ pub(crate) fn resolve_single_column_arg<B: crate::backend::Backend, DB: Database
 /// `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`, plus the `VARIANCE`
 /// and `STDDEV` aliases). Layers a numeric-type constraint on top of
 /// [`resolve_single_column_arg`]: rejects `Bool`/`String` columns when the
-/// catalog exposes type information.
+/// catalog exposes type information. `SUM` and `AVG` also take an interval
+/// column on the engine that has the type, where both answer an interval.
 fn resolve_numeric_agg_column<B: crate::backend::Backend, DB: DatabaseLike>(
     func: &str,
     f: &sqlparser::ast::Function,
@@ -479,6 +480,8 @@ fn resolve_numeric_agg_column<B: crate::backend::Backend, DB: DatabaseLike>(
             crate::backend::ScalarFamily::Int
             | crate::backend::ScalarFamily::Float
             | crate::backend::ScalarFamily::Decimal => {}
+            crate::backend::ScalarFamily::Interval
+                if B::HAS_INTERVAL && matches!(display.as_str(), "SUM" | "AVG") => {}
             // Everything else is rejected. Give the caller the concrete
             // kind in the error so the message matches the aggregate's
             // requirement.
@@ -994,6 +997,14 @@ fn having_from_expr<B: crate::backend::Backend, DB: DatabaseLike>(
                         .to_string(),
                 ));
             };
+            if catalog_helpers::column_scalar_family(database, table_id, projected_column)
+                == Some(crate::backend::ScalarFamily::Interval)
+            {
+                return Err(RegisterError::UnsupportedSql(
+                    "HAVING over an aggregate of an interval column is read from the database"
+                        .to_string(),
+                ));
+            }
             let column = spec
                 .column()
                 .expect("every non-COUNT(*) family spec names its column");
@@ -1410,7 +1421,6 @@ pub(crate) fn render_aggregate_bootstrap<B: crate::backend::Backend, DB: Databas
             Some(agg_call("SUM", arg.clone()))
         }
     };
-    let count = || agg_call("COUNT", arg.clone());
     // Group columns lead, in `GROUP BY` order rather than projection order, so
     // a seeded group's values line up with the order its key encodes in. Built
     // as `Ident`s carrying the dialect's quote style, so an embedded delimiter
@@ -1427,21 +1437,7 @@ pub(crate) fn render_aggregate_bootstrap<B: crate::backend::Backend, DB: Databas
             database, table_id, *column,
         )?);
     }
-    let mut components: Vec<Expr> = match spec {
-        _ if widened => alloc::vec![sum()?, sum_of_squared_deviations::<B>(&arg)?, count()],
-        AggSpec::CountStar => alloc::vec![agg_call("COUNT", FunctionArgExpr::Wildcard)],
-        AggSpec::CountColumn { .. } => alloc::vec![count()],
-        // `SUM` and `AVG` read the same pair: the total and how many rows
-        // contributed to it. `AVG` divides by that count and `SUM` reports
-        // NULL when it is zero.
-        AggSpec::Sum { .. } | AggSpec::Avg { .. } => alloc::vec![sum()?, count()],
-        AggSpec::VarPop { .. }
-        | AggSpec::VarSamp { .. }
-        | AggSpec::StddevPop { .. }
-        | AggSpec::StddevSamp { .. } => {
-            alloc::vec![sum()?, sum_of_squared_deviations::<B>(&arg)?, count()]
-        }
-    };
+    let mut components = seed_components::<B>(spec, widened, total_rule, &arg, dialect, &sum)?;
     if widened && single_total {
         components.push(sum_at_double_width(&arg)?);
     }
@@ -1484,6 +1480,40 @@ pub(crate) fn render_aggregate_bootstrap<B: crate::backend::Backend, DB: Databas
     })
 }
 
+/// The seed components of `spec`, in the order the accumulator reads them.
+fn seed_components<B: crate::backend::Backend>(
+    spec: &AggSpec,
+    widened: bool,
+    total_rule: crate::backend::SumRule,
+    arg: &FunctionArgExpr,
+    dialect: &dyn sqlparser::dialect::Dialect,
+    sum: &dyn Fn() -> Option<Expr>,
+) -> Option<Vec<Expr>> {
+    let count = || agg_call("COUNT", arg.clone());
+    Some(match spec {
+        _ if widened => alloc::vec![sum()?, sum_of_squared_deviations::<B>(arg)?, count()],
+        AggSpec::CountStar => alloc::vec![agg_call("COUNT", FunctionArgExpr::Wildcard)],
+        AggSpec::CountColumn { .. } => alloc::vec![count()],
+        // An interval total reads its finite sum and count apart from how
+        // many rows are each infinity, which a single `SUM` would hide.
+        AggSpec::Sum { .. } | AggSpec::Avg { .. }
+            if matches!(total_rule, crate::backend::SumRule::Interval) =>
+        {
+            interval_seed_components(arg, dialect)?
+        }
+        // `SUM` and `AVG` read the same pair: the total and how many rows
+        // contributed to it. `AVG` divides by that count and `SUM` reports
+        // NULL when it is zero.
+        AggSpec::Sum { .. } | AggSpec::Avg { .. } => alloc::vec![sum()?, count()],
+        AggSpec::VarPop { .. }
+        | AggSpec::VarSamp { .. }
+        | AggSpec::StddevPop { .. }
+        | AggSpec::StddevSamp { .. } => {
+            alloc::vec![sum()?, sum_of_squared_deviations::<B>(arg)?, count()]
+        }
+    })
+}
+
 /// Per-column decode kinds for an aggregate's seed components, in component
 /// order.
 ///
@@ -1493,12 +1523,52 @@ pub(crate) fn render_aggregate_bootstrap<B: crate::backend::Backend, DB: Databas
 /// number: PostgreSQL answers `bigint` for an `int` column and `numeric`
 /// for a `bigint` one, MySQL answers a decimal for both, and SQLite an
 /// integer. `SUM(x*x)` and `AVG`'s total keep their double, which is what
-/// their `f64` components still are until Phase D2.
+/// their `f64` components still are until Phase D2. An interval total reads
+/// the finite sum, the finite count and the count of each infinity.
 pub(crate) fn aggregate_bootstrap_kinds(
     spec: &AggSpec,
     rule: crate::backend::SumRule,
 ) -> Vec<crate::backend::ScalarFamily> {
+    if matches!(rule, crate::backend::SumRule::Interval)
+        && matches!(spec, AggSpec::Sum { .. } | AggSpec::Avg { .. })
+    {
+        return alloc::vec![
+            crate::backend::ScalarFamily::Interval,
+            crate::backend::ScalarFamily::Int,
+            crate::backend::ScalarFamily::Int,
+            crate::backend::ScalarFamily::Int,
+        ];
+    }
     aggregate_bootstrap_kinds_with_total(spec, bootstrap_total_kind(rule))
+}
+
+/// `SUM` and `COUNT` of the finite intervals, then the count of each
+/// infinity, the four numbers an interval total is seeded from.
+///
+/// Finiteness is read through the printed text, which is `infinity` or
+/// `-infinity` under every `IntervalStyle` on PostgreSQL 17 and later and
+/// never on 16, where `isfinite(interval)` does not exist.
+fn interval_seed_components(
+    arg: &FunctionArgExpr,
+    dialect: &dyn sqlparser::dialect::Dialect,
+) -> Option<Vec<Expr>> {
+    let column = arg.to_string();
+    let finite = alloc::format!("({column})::text NOT IN ('infinity', '-infinity')");
+    [
+        alloc::format!("SUM({column}) FILTER (WHERE {finite})"),
+        alloc::format!("COUNT({column}) FILTER (WHERE {finite})"),
+        alloc::format!("COUNT({column}) FILTER (WHERE ({column})::text = 'infinity')"),
+        alloc::format!("COUNT({column}) FILTER (WHERE ({column})::text = '-infinity')"),
+    ]
+    .iter()
+    .map(|text| {
+        sqlparser::parser::Parser::new(dialect)
+            .try_with_sql(text)
+            .ok()?
+            .parse_expr()
+            .ok()
+    })
+    .collect()
 }
 
 /// The kind a `SUM` over a column accumulating under `rule` decodes in.
@@ -1520,6 +1590,7 @@ const fn bootstrap_total_kind(rule: crate::backend::SumRule) -> crate::backend::
         crate::backend::SumRule::Single | crate::backend::SumRule::Double => {
             crate::backend::ScalarFamily::Float
         }
+        crate::backend::SumRule::Interval => crate::backend::ScalarFamily::Interval,
     }
 }
 
