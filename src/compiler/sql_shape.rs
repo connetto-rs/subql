@@ -3402,6 +3402,22 @@ mod wildcard_seed_tests {
                 alloc::vec![super::agg_call("COUNT", FunctionArgExpr::Wildcard)],
             );
         }
+        // A column argument is summed, which the wildcard never is.
+        let column =
+            FunctionArgExpr::Expr(super::Expr::Identifier(sqlparser::ast::Ident::new("x")));
+        assert_eq!(
+            super::seed_components::<crate::backend::Postgres>(
+                &AggSpec::Sum { column: 0 },
+                false,
+                crate::backend::SumRule::Double,
+                &column,
+                &sum,
+            ),
+            alloc::vec![
+                super::Expr::value(sqlparser::ast::Value::Null),
+                super::agg_call("COUNT", column.clone()),
+            ],
+        );
     }
 }
 
