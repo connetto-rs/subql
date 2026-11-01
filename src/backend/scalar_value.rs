@@ -1323,37 +1323,30 @@ fn encode_exact_component<B: Backend>(
     value: &Value<B>,
     output: &mut alloc::vec::Vec<u8>,
 ) -> bool {
-    macro_rules! tagged {
-        ($tag:literal, $value:expr) => {{
-            output.push($tag);
-            append_postcard(output, $value)
-        }};
-    }
     if let (ScalarKind::Custom(kind), Value::Custom(custom)) = (&column.kind, value) {
-        return *kind == <B::Custom as CustomScalars>::kind_of(custom) && tagged!(14, custom);
+        return *kind == <B::Custom as CustomScalars>::kind_of(custom)
+            && append_tagged(output, 14, custom);
     }
     match (column.kind.family(), value) {
         (_, Value::Null) => {
             output.push(0);
             true
         }
-        (Some(ScalarFamily::Bool), Value::Bool(value)) => tagged!(1, value),
-        (Some(ScalarFamily::Int), Value::Int(value)) => tagged!(2, value),
-        (Some(ScalarFamily::Float), Value::Float(value)) => tagged!(3, value),
-        (Some(ScalarFamily::String), Value::String(value)) => tagged!(4, value),
-        (Some(ScalarFamily::Bytes), Value::Bytes(value)) => tagged!(5, value),
-        (Some(ScalarFamily::Uuid), Value::Uuid(value)) => tagged!(6, value),
-        (Some(ScalarFamily::Timestamp), Value::Timestamp(value)) => {
-            tagged!(7, value)
-        }
+        (Some(ScalarFamily::Bool), Value::Bool(value)) => append_tagged(output, 1, value),
+        (Some(ScalarFamily::Int), Value::Int(value)) => append_tagged(output, 2, value),
+        (Some(ScalarFamily::Float), Value::Float(value)) => append_tagged(output, 3, value),
+        (Some(ScalarFamily::String), Value::String(value)) => append_tagged(output, 4, value),
+        (Some(ScalarFamily::Bytes), Value::Bytes(value)) => append_tagged(output, 5, value),
+        (Some(ScalarFamily::Uuid), Value::Uuid(value)) => append_tagged(output, 6, value),
+        (Some(ScalarFamily::Timestamp), Value::Timestamp(value)) => append_tagged(output, 7, value),
         (Some(ScalarFamily::TimestampTz), Value::TimestampTz(value)) => {
-            tagged!(8, value)
+            append_tagged(output, 8, value)
         }
-        (Some(ScalarFamily::Date), Value::Date(value)) => tagged!(9, value),
-        (Some(ScalarFamily::Time), Value::Time(value)) => tagged!(10, value),
-        (Some(ScalarFamily::Decimal), Value::Decimal(value)) => tagged!(11, value),
-        (Some(ScalarFamily::Json), Value::Json(value)) => tagged!(12, value),
-        (Some(ScalarFamily::Jsonb), Value::Jsonb(value)) => tagged!(13, value),
+        (Some(ScalarFamily::Date), Value::Date(value)) => append_tagged(output, 9, value),
+        (Some(ScalarFamily::Time), Value::Time(value)) => append_tagged(output, 10, value),
+        (Some(ScalarFamily::Decimal), Value::Decimal(value)) => append_tagged(output, 11, value),
+        (Some(ScalarFamily::Json), Value::Json(value)) => append_tagged(output, 12, value),
+        (Some(ScalarFamily::Jsonb), Value::Jsonb(value)) => append_tagged(output, 13, value),
         _ => false,
     }
 }

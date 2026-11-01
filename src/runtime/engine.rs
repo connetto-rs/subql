@@ -2206,7 +2206,7 @@ where
             database_reads_per_consumer,
         };
         let registered = self.capture_whole(subscription_id, plan, &registration);
-        self.persist_reads_after_transition();
+        self.persist_reads_after("an answer changed tier");
         Ok((
             crate::MaintenanceTransition {
                 subscription_id,
@@ -2778,7 +2778,7 @@ where
     pub fn unregister_reread(&mut self, subscription_id: SubscriptionId) -> bool {
         let removed = self.unregister_reread_only(subscription_id);
         if removed {
-            self.persist_reads_after_removal();
+            self.persist_reads_after("an answer ended");
         }
         removed
     }
@@ -2871,21 +2871,16 @@ where
     #[allow(clippy::unused_self)]
     fn persist_table_after_removal(&self, _table_id: TableId) {}
 
-    /// Rewrite the reads file after an answer ends.
-    ///
-    /// The file is what a restart believes, so an answer dropped without
-    /// rewriting it comes back. Ending cannot be undone and the caller has
-    /// already been told it happened, so a failed write is logged rather
-    /// than raised, which leaves the stale file a restart would have had
-    /// anyway.
+    /// Rewrite the reads file after `event`, logging a failure because the change is already done
+    /// and reported.
     #[cfg(feature = "std")]
-    fn persist_reads_after_removal(&self) {
+    fn persist_reads_after(&self, event: &str) {
         if self.storage_path.is_none() {
             return;
         }
         if let Err(e) = self.snapshot_reads() {
             Self::log_best_effort_durability(&format!(
-                "Reads file not rewritten after an answer ended: {e}"
+                "Reads file not rewritten after {event}: {e}"
             ));
         }
     }
@@ -2893,30 +2888,7 @@ where
     /// Without the standard library there is no file to write.
     #[cfg(not(feature = "std"))]
     #[allow(clippy::unused_self)]
-    fn persist_reads_after_removal(&self) {}
-
-    /// Rewrite the reads file after an answer moved to another tier.
-    ///
-    /// A restart reads the file, so an answer the file names at its old tier,
-    /// or not at all, comes back wrong or not at all. The move already
-    /// happened inside a dispatch, so a failed write is logged, as after a
-    /// removal.
-    #[cfg(feature = "std")]
-    fn persist_reads_after_transition(&self) {
-        if self.storage_path.is_none() {
-            return;
-        }
-        if let Err(e) = self.snapshot_reads() {
-            Self::log_best_effort_durability(&format!(
-                "Reads file not rewritten after an answer changed tier: {e}"
-            ));
-        }
-    }
-
-    /// Without the standard library there is no file to write.
-    #[cfg(not(feature = "std"))]
-    #[allow(clippy::unused_self)]
-    fn persist_reads_after_transition(&self) {}
+    fn persist_reads_after(&self, _event: &str) {}
 
     /// Write every re-read answer to its own file.
     ///
@@ -3870,7 +3842,7 @@ where
             if let Some(table_id) = table {
                 self.persist_table_after_removal(table_id);
             }
-            self.persist_reads_after_removal();
+            self.persist_reads_after("an answer ended");
         }
         read_ended || removed
     }
@@ -4809,7 +4781,7 @@ where
         for table_id in touched {
             self.persist_table_after_removal(table_id);
         }
-        self.persist_reads_after_removal();
+        self.persist_reads_after("an answer ended");
 
         UnregisterReport {
             removed_bindings,
@@ -4918,7 +4890,7 @@ where
         #[cfg(feature = "std")]
         {
             self.persist_table_after_removal(table_id);
-            self.persist_reads_after_removal();
+            self.persist_reads_after("an answer ended");
         }
 
         Ok(UnregisterReport {

@@ -21,17 +21,31 @@ use sqlite_diff_rs::{
 ))]
 use sqlite_diff_rs::ApplyOpsAsync;
 
-/// Owned reconstructed batch that
-/// [`apply_diffset_bytes_async_with_catalog`] hands to the async execution
-/// driver. Owning it keeps the returned future from borrowing `catalog`,
-/// so the future stays `Send`.
-#[cfg(any(
-    feature = "apply-patchset-postgres-async",
-    feature = "apply-patchset-mysql-async"
-))]
+/// An uploaded diffset rebuilt against the catalog, owned so the async apply's
+/// future does not borrow `catalog` and stays `Send`.
 enum ReconstructedDiff {
     Patchset(PatchSet<SimpleTable, String, Vec<u8>>),
     Changeset(ChangeSet<SimpleTable, String, Vec<u8>>),
+}
+
+/// Parse uploaded diffset bytes and rebuild them in the format their marker
+/// names, with every table shape taken from `catalog`.
+fn reconstruct_diff<DB: DatabaseLike>(
+    catalog: &DB,
+    bytes: &[u8],
+) -> QueryResult<ReconstructedDiff> {
+    match ParsedDiffSet::parse(bytes).map_err(|err| {
+        ingest_error(alloc::format!(
+            "failed to parse uploaded SQLite session diffset bytes: {err}"
+        ))
+    })? {
+        ParsedDiffSet::Patchset(diff) => {
+            reconstruct_patchset(catalog, &diff).map(ReconstructedDiff::Patchset)
+        }
+        ParsedDiffSet::Changeset(diff) => {
+            reconstruct_changeset(catalog, &diff).map(ReconstructedDiff::Changeset)
+        }
+    }
 }
 
 /// Apply a client-uploaded SQLite session diffset from its raw wire bytes
@@ -66,25 +80,15 @@ where
     str: ToSql<Text, DBend>,
     [u8]: ToSql<Binary, DBend>,
 {
-    match ParsedDiffSet::parse(bytes).map_err(|err| {
-        ingest_error(alloc::format!(
-            "failed to parse uploaded SQLite session diffset bytes: {err}"
-        ))
-    })? {
-        ParsedDiffSet::Patchset(diff) => {
-            let patchset = reconstruct_patchset(catalog, &diff)?;
-            patchset
-                .iter()
-                .map(|op| op.with_adapter::<DBend, _>(adapter))
-                .apply_transactional(conn)
-        }
-        ParsedDiffSet::Changeset(diff) => {
-            let changeset = reconstruct_changeset(catalog, &diff)?;
-            changeset
-                .iter()
-                .map(|op| op.with_adapter::<DBend, _>(adapter))
-                .apply_transactional(conn)
-        }
+    match reconstruct_diff(catalog, bytes)? {
+        ReconstructedDiff::Patchset(patchset) => patchset
+            .iter()
+            .map(|op| op.with_adapter::<DBend, _>(adapter))
+            .apply_transactional(conn),
+        ReconstructedDiff::Changeset(changeset) => changeset
+            .iter()
+            .map(|op| op.with_adapter::<DBend, _>(adapter))
+            .apply_transactional(conn),
     }
 }
 
@@ -123,20 +127,7 @@ where
 {
     // Reconstruct synchronously up front so the future owns its batch and
     // never borrows `catalog`.
-    let reconstructed = ParsedDiffSet::parse(bytes)
-        .map_err(|err| {
-            ingest_error(alloc::format!(
-                "failed to parse uploaded SQLite session diffset bytes: {err}"
-            ))
-        })
-        .and_then(|parsed| match parsed {
-            ParsedDiffSet::Patchset(diff) => {
-                reconstruct_patchset(catalog, &diff).map(ReconstructedDiff::Patchset)
-            }
-            ParsedDiffSet::Changeset(diff) => {
-                reconstruct_changeset(catalog, &diff).map(ReconstructedDiff::Changeset)
-            }
-        });
+    let reconstructed = reconstruct_diff(catalog, bytes);
     async move {
         match reconstructed? {
             ReconstructedDiff::Patchset(patchset) => {

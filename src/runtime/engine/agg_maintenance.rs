@@ -81,7 +81,7 @@ where
         let registered = self.capture_whole(subscription_id, plan, &reread);
         // The reads file first, as `snapshot_table` orders them, so a failed
         // shard write leaves the new tier named rather than the answer lost.
-        self.persist_reads_after_transition();
+        self.persist_reads_after("an answer changed tier");
         if let Some(table_id) = table_id {
             self.persist_table_after_removal(table_id);
         }
