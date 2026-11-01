@@ -661,4 +661,39 @@ mod tests {
             "a bytea literal reads but has no index key"
         );
     }
+
+    /// The plan builder is public and stays total on a literal the compiler
+    /// would refuse. Each such predicate files no atom and goes to the scan
+    /// set, the conservative side a prefilter must stay on.
+    #[test]
+    fn an_unreadable_literal_is_a_conservative_scan() {
+        use sql_traits::structs::ParserDB;
+        use sqlparser::dialect::PostgreSqlDialect;
+
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE shifts (id INT PRIMARY KEY, span INTERVAL, n INT);",
+        )
+        .unwrap();
+        let table = catalog_helpers::table_id::<Postgres, _>(&db, "shifts").unwrap();
+        let dialect = PostgreSqlDialect {};
+        let expr = |sql: &str| {
+            sqlparser::parser::Parser::new(&dialect)
+                .try_with_sql(sql)
+                .unwrap()
+                .parse_expr()
+                .unwrap()
+        };
+        for predicate in [
+            "span = interval '1 fortnight'",
+            "n = interval '1 hour'",
+            "n = 'abc'",
+        ] {
+            let plan = build_prefilter_plan::<Postgres, _>(Some(&expr(predicate)), table, &db);
+            assert!(
+                plan.scan_required,
+                "{predicate} stays a scan the VM answers"
+            );
+            assert!(plan.trigger_atoms.is_empty(), "{predicate} files no atom");
+        }
+    }
 }

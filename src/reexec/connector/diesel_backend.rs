@@ -437,4 +437,57 @@ mod tests {
             "the generic read refuses an interval bind"
         );
     }
+
+    /// The shared bind vocabulary has no interval, so a re-execution read
+    /// that would bind one refuses it at the bind on every backend, never at
+    /// the connection once the query runs.
+    #[test]
+    fn read_bind_refuses_an_interval() {
+        use super::DieselBackend;
+
+        let span = Interval::parse("1 day").expect("PostgreSQL reads this interval");
+        assert!(
+            <Postgres as DieselBackend>::read_bind(&Value::Interval(span)).is_none(),
+            "PostgreSQL answers an interval only through its own page read"
+        );
+        assert!(
+            <MySql as DieselBackend>::read_bind(&Value::Interval(span)).is_none(),
+            "MySQL has no native interval bind"
+        );
+        assert!(
+            <SQLite as DieselBackend>::read_bind(&Value::Interval(span)).is_none(),
+            "SQLite has no native interval bind"
+        );
+    }
+
+    /// The PostgreSQL page read alone binds an interval natively, and the
+    /// bind carries the span's months, days and microseconds.
+    #[cfg(feature = "executor-diesel-async-postgres")]
+    #[test]
+    fn the_postgres_page_read_binds_the_interval_span() {
+        let span = Interval::parse("1 mon 01:02:03").expect("PostgreSQL reads this interval");
+        let query =
+            ReadQuery::<Postgres>::owned(String::from("SELECT 1"), vec![Value::Interval(span)]);
+        let boxed = super::boxed_postgres_read_query_owned(&query)
+            .expect("the page read binds an interval natively");
+        let rendered = diesel::debug_query::<diesel::pg::Pg, _>(&boxed).to_string();
+        assert!(
+            rendered.contains("PgInterval { microseconds: 3723000000, days: 0, months: 1 }"),
+            "the bind carries the span's fields, {rendered}"
+        );
+    }
+
+    /// The MySQL page read has no native interval, so an interval bind
+    /// refuses at construction rather than at the connection.
+    #[cfg(feature = "executor-diesel-async-mysql")]
+    #[test]
+    fn the_mysql_page_read_refuses_an_interval_bind() {
+        let span = Interval::parse("1 day").expect("PostgreSQL reads this interval");
+        let query =
+            ReadQuery::<MySql>::owned(String::from("SELECT 1"), vec![Value::Interval(span)]);
+        assert!(
+            super::boxed_mysql_read_query_owned(&query).is_err(),
+            "MySQL refuses the interval at construction"
+        );
+    }
 }
