@@ -1398,11 +1398,11 @@ pub(crate) fn render_aggregate_bootstrap<B: crate::backend::Backend, DB: Databas
         select.having = None;
     }
     let arg = aggregate_arg(&stmt)?;
-    let sum = || {
+    let sum = |column: &Expr| {
         if single_input && !single_total {
-            sum_at_double_width(&arg)
+            sum_at_double_width(column)
         } else {
-            Some(agg_call("SUM", arg.clone()))
+            agg_call("SUM", FunctionArgExpr::Expr(column.clone()))
         }
     };
     // Group columns lead, in `GROUP BY` order rather than projection order, so
@@ -1421,10 +1421,7 @@ pub(crate) fn render_aggregate_bootstrap<B: crate::backend::Backend, DB: Databas
             database, table_id, *column,
         )?);
     }
-    let mut components = seed_components::<B>(spec, widened, total_rule, &arg, &sum)?;
-    if widened && single_total {
-        components.push(sum_at_double_width(&arg)?);
-    }
+    let components = seed_components::<B>(spec, widened, total_rule, &arg, &sum);
     let component_count = components.len();
     items.extend(
         components
@@ -1465,40 +1462,47 @@ pub(crate) fn render_aggregate_bootstrap<B: crate::backend::Backend, DB: Databas
 }
 
 /// The seed components of `spec`, in the order the accumulator reads them.
+///
+/// The `*` argument is `COUNT(*)`'s own, and it names no column to seed a
+/// total from, so a wildcard seeds the wildcard's count alone. Every other
+/// argument is a column the components read.
 fn seed_components<B: crate::backend::Backend>(
     spec: &AggSpec,
     widened: bool,
     total_rule: crate::backend::SumRule,
     arg: &FunctionArgExpr,
-    sum: &dyn Fn() -> Option<Expr>,
-) -> Option<Vec<Expr>> {
-    let count = || agg_call("COUNT", arg.clone());
-    Some(match spec {
-        _ if widened => alloc::vec![sum()?, sum_of_squared_deviations::<B>(arg)?, count()],
-        AggSpec::CountStar => alloc::vec![agg_call("COUNT", FunctionArgExpr::Wildcard)],
-        AggSpec::CountColumn { .. } => alloc::vec![count()],
+    sum: &dyn Fn(&Expr) -> Expr,
+) -> Vec<Expr> {
+    let FunctionArgExpr::Expr(column) = arg else {
+        return alloc::vec![agg_call("COUNT", FunctionArgExpr::Wildcard)];
+    };
+    let count = || agg_call("COUNT", FunctionArgExpr::Expr(column.clone()));
+    if widened {
+        let mut components =
+            alloc::vec![sum(column), sum_of_squared_deviations::<B>(column), count()];
+        // A single-precision total decodes from its double sum, so the seed
+        // carries it behind the usual three components.
+        if matches!(total_rule, crate::backend::SumRule::Single) {
+            components.push(sum_at_double_width(column));
+        }
+        components
+    } else if matches!(spec, AggSpec::CountColumn { .. }) {
+        alloc::vec![count()]
+    } else if matches!(spec, AggSpec::Sum { .. } | AggSpec::Avg { .. })
+        && matches!(total_rule, crate::backend::SumRule::Interval)
+    {
         // An interval total reads its finite sum and count apart from how
         // many rows are each infinity, which a single `SUM` would hide.
-        AggSpec::Sum { .. } | AggSpec::Avg { .. }
-            if matches!(total_rule, crate::backend::SumRule::Interval) =>
-        {
-            // A `*` argument names no column to seed from.
-            let FunctionArgExpr::Expr(column) = arg else {
-                return None;
-            };
-            interval_seed_components(column)
-        }
-        // `SUM` and `AVG` read the same pair: the total and how many rows
+        interval_seed_components(column)
+    } else if matches!(spec, AggSpec::Sum { .. } | AggSpec::Avg { .. }) {
+        // `SUM` and `AVG` read the same pair, the total and how many rows
         // contributed to it. `AVG` divides by that count and `SUM` reports
         // NULL when it is zero.
-        AggSpec::Sum { .. } | AggSpec::Avg { .. } => alloc::vec![sum()?, count()],
-        AggSpec::VarPop { .. }
-        | AggSpec::VarSamp { .. }
-        | AggSpec::StddevPop { .. }
-        | AggSpec::StddevSamp { .. } => {
-            alloc::vec![sum()?, sum_of_squared_deviations::<B>(arg)?, count()]
-        }
-    })
+        alloc::vec![sum(column), count()]
+    } else {
+        // The variance family reads its spread beside the total and the count.
+        alloc::vec![sum(column), sum_of_squared_deviations::<B>(column), count()]
+    }
 }
 
 /// Per-column decode kinds for an aggregate's seed components, in component
@@ -1690,11 +1694,10 @@ fn agg_call(name: &str, arg: FunctionArgExpr) -> Expr {
     })
 }
 
-fn sum_at_double_width(arg: &FunctionArgExpr) -> Option<Expr> {
-    let FunctionArgExpr::Expr(column) = arg else {
-        return None;
-    };
-    Some(agg_call(
+/// `SUM` of `CAST(column AS DOUBLE PRECISION)`, a total the seed must read
+/// as a double.
+fn sum_at_double_width(column: &Expr) -> Expr {
+    agg_call(
         "SUM",
         FunctionArgExpr::Expr(Expr::Cast {
             kind: sqlparser::ast::CastKind::Cast,
@@ -1702,7 +1705,7 @@ fn sum_at_double_width(arg: &FunctionArgExpr) -> Option<Expr> {
             data_type: sqlparser::ast::DataType::DoublePrecision,
             format: None,
         }),
-    ))
+    )
 }
 
 /// `expr AS cN`, the alias a seed component is read back by.
@@ -1713,8 +1716,8 @@ fn component(expr: Expr, slot: usize) -> SelectItem {
     }
 }
 
-/// The seed component for the variance family's spread: the engine's own
-/// sum of squared deviations, spelled `VAR_POP(x) * COUNT(x)`.
+/// The seed component for the variance family's spread, the engine's own
+/// sum of squared deviations spelled `VAR_POP(x) * COUNT(x)`.
 ///
 /// Read back from the server rather than derived from a sum of squares,
 /// because `sum_sq - sum^2/n` is the cancellation this fold exists to
@@ -1726,18 +1729,16 @@ fn component(expr: Expr, slot: usize) -> SelectItem {
 ///
 /// `VAR_POP` is NULL over no rows, so the product is NULL there, which
 /// seeds the empty state exactly as the other components do.
-fn sum_of_squared_deviations<B: crate::backend::Backend>(arg: &FunctionArgExpr) -> Option<Expr> {
-    let FunctionArgExpr::Expr(col) = arg else {
-        // `COUNT(*)` has no column to spread, and no spec that needs this
-        // term accepts a wildcard argument.
-        return None;
-    };
+fn sum_of_squared_deviations<B: crate::backend::Backend>(column: &Expr) -> Expr {
     match B::VARIANCE_SEED {
-        crate::backend::VarianceSeed::EnginesOwn => Some(Expr::BinaryOp {
-            left: alloc::boxed::Box::new(agg_call("VAR_POP", arg.clone())),
+        crate::backend::VarianceSeed::EnginesOwn => Expr::BinaryOp {
+            left: alloc::boxed::Box::new(agg_call(
+                "VAR_POP",
+                FunctionArgExpr::Expr(column.clone()),
+            )),
             op: BinaryOperator::Multiply,
-            right: alloc::boxed::Box::new(agg_call("COUNT", arg.clone())),
-        }),
+            right: alloc::boxed::Box::new(agg_call("COUNT", FunctionArgExpr::Expr(column.clone()))),
+        },
         // No variance function to ask, so the seed asks for a sum of
         // squares and the deviations are derived from it. The `* 1.0 *`
         // keeps the product out of the source integer type.
@@ -1746,18 +1747,18 @@ fn sum_of_squared_deviations<B: crate::backend::Backend>(arg: &FunctionArgExpr) 
                 sqlparser::ast::Value::Number("1.0".to_string(), false).with_empty_span(),
             );
             let scaled = Expr::BinaryOp {
-                left: alloc::boxed::Box::new(col.clone()),
+                left: alloc::boxed::Box::new(column.clone()),
                 op: BinaryOperator::Multiply,
                 right: alloc::boxed::Box::new(one),
             };
-            Some(agg_call(
+            agg_call(
                 "SUM",
                 FunctionArgExpr::Expr(Expr::BinaryOp {
                     left: alloc::boxed::Box::new(scaled),
                     op: BinaryOperator::Multiply,
-                    right: alloc::boxed::Box::new(col.clone()),
+                    right: alloc::boxed::Box::new(column.clone()),
                 }),
-            ))
+            )
         }
     }
 }
@@ -3374,24 +3375,120 @@ mod written_column_tests {
 }
 
 #[cfg(test)]
-mod interval_seed_tests {
+mod wildcard_seed_tests {
     use super::{AggSpec, FunctionArgExpr};
 
-    /// A `*` argument names no column, so the interval seed renders nothing
-    /// rather than a statement over no column.
+    /// The `*` argument is `COUNT(*)`'s own, and it names no column to seed
+    /// a total from, so a wildcard seeds the wildcard's count alone and an
+    /// interval rule cannot pull it into an interval statement.
     #[test]
-    fn a_wildcard_argument_renders_no_interval_seed() {
-        let numeric_sum = || Some(super::Expr::value(sqlparser::ast::Value::Null));
+    fn a_wildcard_argument_seeds_the_wildcard_count() {
+        let sum = |_column: &super::Expr| super::Expr::value(sqlparser::ast::Value::Null);
         let seed = |rule| {
             super::seed_components::<crate::backend::Postgres>(
-                &AggSpec::Sum { column: 0 },
+                &AggSpec::CountStar,
                 false,
                 rule,
                 &FunctionArgExpr::Wildcard,
-                &numeric_sum,
+                &sum,
             )
         };
-        assert!(seed(crate::backend::SumRule::Interval).is_none());
-        assert!(seed(crate::backend::SumRule::Double).is_some());
+        for rule in [
+            crate::backend::SumRule::Interval,
+            crate::backend::SumRule::Double,
+        ] {
+            assert_eq!(
+                seed(rule),
+                alloc::vec![super::agg_call("COUNT", FunctionArgExpr::Wildcard)],
+            );
+        }
+        // A column argument is summed, which the wildcard never is.
+        let column =
+            FunctionArgExpr::Expr(super::Expr::Identifier(sqlparser::ast::Ident::new("x")));
+        assert_eq!(
+            super::seed_components::<crate::backend::Postgres>(
+                &AggSpec::Sum { column: 0 },
+                false,
+                crate::backend::SumRule::Double,
+                &column,
+                &sum,
+            ),
+            alloc::vec![
+                super::Expr::value(sqlparser::ast::Value::Null),
+                super::agg_call("COUNT", column.clone()),
+            ],
+        );
+    }
+}
+
+/// `render_aggregate_bootstrap` answers `None` when the statement and the
+/// projection it receives no longer agree, which only a caller other than
+/// the registration that validated both can happen.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod bootstrap_refusal_tests {
+    use super::{render_aggregate_bootstrap, AggSpec, QueryProjection};
+    use crate::catalog_helpers;
+    use sql_traits::structs::ParserDB;
+    use sqlparser::dialect::PostgreSqlDialect;
+
+    const DDL: &str = "CREATE TABLE docs (id INT PRIMARY KEY, owner INT);";
+
+    fn docs() -> (ParserDB, crate::TableId) {
+        let db = ParserDB::parse::<PostgreSqlDialect>(DDL).unwrap();
+        let table = catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "docs").unwrap();
+        (db, table)
+    }
+
+    fn bootstrap(
+        sql: &str,
+        projection: &QueryProjection,
+        db: &ParserDB,
+        table_id: crate::TableId,
+    ) -> Option<crate::AggregateBootstrap<crate::backend::Postgres>> {
+        render_aggregate_bootstrap::<crate::backend::Postgres, _>(
+            sql,
+            &[],
+            projection,
+            &PostgreSqlDialect {},
+            table_id,
+            db,
+        )
+    }
+
+    /// More than one statement parses no seed query at all.
+    #[test]
+    fn two_statements_render_no_bootstrap() {
+        let (db, table) = docs();
+        let projection = QueryProjection::Aggregate(AggSpec::Sum { column: 0 });
+        assert!(bootstrap("SELECT 1; SELECT 2", &projection, &db, table).is_none());
+    }
+
+    /// A statement that is not a `SELECT` carries neither the projection's
+    /// aggregate nor a `HAVING` to drop.
+    #[test]
+    fn a_non_select_statement_renders_no_bootstrap() {
+        let (db, table) = docs();
+        let projection = QueryProjection::Aggregate(AggSpec::CountStar);
+        assert!(bootstrap("CREATE TABLE notes (id INT)", &projection, &db, table).is_none());
+    }
+
+    /// A group column the catalog does not know names nothing to seed the
+    /// group values with.
+    #[test]
+    fn an_unknown_group_column_renders_no_bootstrap() {
+        let (db, table) = docs();
+        let projection = QueryProjection::GroupedAggregate {
+            groups: alloc::vec![u16::MAX],
+            agg: AggSpec::CountStar,
+            having: None,
+        };
+        assert!(bootstrap(
+            "SELECT owner, COUNT(*) FROM docs GROUP BY owner",
+            &projection,
+            &db,
+            table
+        )
+        .is_none());
     }
 }
