@@ -244,6 +244,9 @@ pub(crate) struct InProcessSource<I: IdTypes, B: Backend> {
     pub(crate) consumer_id: I::ConsumerId,
     pub(crate) scope: SubscriptionScope<I>,
     pub(crate) source_query: crate::reexec::BoundQuery<B>,
+    /// Whether each database read runs under the individual consumer's
+    /// database identity.
+    pub(crate) database_reads_per_consumer: bool,
 }
 
 /// An engine reopened from storage, holding the answers that came back.
@@ -1744,6 +1747,7 @@ where
             compiled.spec.consumer_id,
             compiled.spec.scope,
             source_query,
+            database_reads_per_consumer,
         );
 
         // 10. Enforce durability policy for this table.
@@ -2678,6 +2682,7 @@ where
         consumer_id: I::ConsumerId,
         scope: SubscriptionScope<I>,
         source_query: crate::reexec::BoundQuery<E::Backend>,
+        database_reads_per_consumer: bool,
     ) {
         self.in_process_sources.insert(
             subscription_id,
@@ -2685,6 +2690,7 @@ where
                 consumer_id,
                 scope,
                 source_query,
+                database_reads_per_consumer,
             },
         );
     }
@@ -2942,6 +2948,7 @@ where
                     consumer_id: source.consumer_id,
                     scope: source.scope,
                     source_query: source.source_query.clone(),
+                    database_reads_per_consumer: source.database_reads_per_consumer,
                 },
             )
             .collect();
@@ -3014,7 +3021,9 @@ where
             .binds(entry.source_query.binds().to_vec())
             .scope(entry.scope);
             // Planning again reopens the aggregate the shards still route events to.
-            let mut compiled = self.compile_spec(spec, false).ok();
+            let mut compiled = self
+                .compile_spec(spec, entry.database_reads_per_consumer)
+                .ok();
             let aggregate_bootstrap = compiled
                 .as_mut()
                 .and_then(|c| core::mem::take(&mut c.bootstrap));
@@ -3024,7 +3033,7 @@ where
                     &compiled.spec,
                     compiled.table_id,
                     &compiled.projection,
-                    false,
+                    entry.database_reads_per_consumer,
                 );
             }
             report.in_process.push(crate::RestoredInProcess {
@@ -3038,6 +3047,7 @@ where
                     consumer_id: entry.consumer_id,
                     scope: entry.scope,
                     source_query: entry.source_query,
+                    database_reads_per_consumer: entry.database_reads_per_consumer,
                 },
             );
         }
@@ -3732,11 +3742,14 @@ where
             if let Ok(registered) = result {
                 if matches!(registered.tier, Tier::InProcess(_)) {
                     let subscription_id = registered.subscription_id;
+                    // The batch path plans every statement under shared
+                    // reads, so the retained one runs its reads the same way.
                     self.retain_in_process_source(
                         subscription_id,
                         consumer_id,
                         scope,
                         source_query,
+                        false,
                     );
                 }
             }
@@ -6662,6 +6675,93 @@ mod tests {
             .expect("whole read is stored");
         assert!(entry.database_reads_per_consumer);
         assert_eq!(entry.source_query.binds(), &[Value::Int(0)]);
+    }
+
+    /// The reads file carries the read mode a maintained aggregate ran
+    /// under, so a demotion after a restart keeps per-consumer reads
+    /// instead of coming back shared.
+    #[test]
+    fn restored_aggregate_demotion_keeps_per_consumer_reads() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+        let table = catalog_helpers::table_id::<Postgres, _>(&db, "orders").expect("orders");
+        let store = tempfile::tempdir().expect("a temp store");
+        let mut first = Engine::with_storage(db, PostgreSqlDialect {}, store.path().to_path_buf())
+            .expect("the store opens")
+            .into_parts()
+            .0;
+        first.set_rotation_threshold(0);
+        let registered = first
+            .register(
+                SubscriptionRequest::new(1u64, "SELECT COUNT(*) FROM orders")
+                    .database_reads_per_consumer(),
+            )
+            .expect("aggregate registers");
+        first.snapshot_table(table).expect("the store is written");
+        drop(first);
+
+        let db = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+        let mut engine = Engine::with_storage(db, PostgreSqlDialect {}, store.path().to_path_buf())
+            .expect("the store reopens")
+            .into_parts()
+            .0;
+        let (_, _) = engine
+            .transition_aggregate_to_whole(
+                registered.subscription_id,
+                crate::MaintenanceStopReason::GroupLimit { limit: 1 },
+                None,
+            )
+            .expect("the restored aggregate demotes");
+        let entry = engine
+            .reexec
+            .get(&registered.subscription_id)
+            .expect("whole read is stored");
+        assert!(
+            entry.database_reads_per_consumer,
+            "the demoted read keeps the read mode its registration ran under"
+        );
+    }
+
+    /// The same restart keeps a shared aggregate's reads shared, so the
+    /// stored mode is a round trip rather than a flip to one side.
+    #[test]
+    fn restored_aggregate_demotion_keeps_shared_reads() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+        let table = catalog_helpers::table_id::<Postgres, _>(&db, "orders").expect("orders");
+        let store = tempfile::tempdir().expect("a temp store");
+        let mut first = Engine::with_storage(db, PostgreSqlDialect {}, store.path().to_path_buf())
+            .expect("the store opens")
+            .into_parts()
+            .0;
+        first.set_rotation_threshold(0);
+        let registered = first
+            .register(SubscriptionRequest::new(
+                1u64,
+                "SELECT COUNT(*) FROM orders",
+            ))
+            .expect("aggregate registers");
+        first.snapshot_table(table).expect("the store is written");
+        drop(first);
+
+        let db = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+        let mut engine = Engine::with_storage(db, PostgreSqlDialect {}, store.path().to_path_buf())
+            .expect("the store reopens")
+            .into_parts()
+            .0;
+        let (_, _) = engine
+            .transition_aggregate_to_whole(
+                registered.subscription_id,
+                crate::MaintenanceStopReason::GroupLimit { limit: 1 },
+                None,
+            )
+            .expect("the restored aggregate demotes");
+        let entry = engine
+            .reexec
+            .get(&registered.subscription_id)
+            .expect("whole read is stored");
+        assert!(
+            !entry.database_reads_per_consumer,
+            "a shared registration comes back shared"
+        );
     }
 
     #[test]
