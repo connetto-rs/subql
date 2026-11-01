@@ -353,6 +353,7 @@ mod tests {
             ("interval '1 fortnight'", true),
             ("interval 5 hour", true),
             ("interval x hour", true),
+            ("interval '1' year to day", true),
             ("1 + 1", true),
             ("interval '1 day 02:03:04.5'", false),
         ] {

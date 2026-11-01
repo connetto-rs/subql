@@ -806,6 +806,11 @@ mod tests {
         fold(&mut wide, "-2000000000 mons", -1);
         assert_eq!(wide.sum(), Err(IntervalOutOfRange));
         assert_eq!(
+            wide.mean(),
+            Err(IntervalOutOfRange),
+            "a total out of range has no mean"
+        );
+        assert_eq!(
             IntervalSum::seeded(None, 0, 0, 0).sum(),
             Ok(None),
             "a seed over no rows answers NULL"

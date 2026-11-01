@@ -157,6 +157,10 @@ fn arithmetic_answers_as_postgres_answers() {
             "zoned + interval '90 minutes' = '2024-03-01 01:30:01+00'",
         ),
         (
+            "zoned - interval '90 minutes' = '2024-02-29 22:30:00+00'",
+            "zoned - interval '90 minutes' = '2024-02-29 22:30:01+00'",
+        ),
+        (
             "zoned + (- interval '90 minutes') = '2024-02-29 22:30:00+00'",
             "zoned + (- interval '90 minutes') = '2024-02-29 22:30:01+00'",
         ),
@@ -259,6 +263,22 @@ fn a_result_postgres_raises_on_is_refused() {
                 operation: ArithmeticOp::Divide
             },
         ]
+    );
+}
+
+/// Subtracting an interval whose negation leaves its range is refused, as
+/// PostgreSQL 16 and 18 raise there.
+#[test]
+fn subtracting_an_interval_that_cannot_negate_is_refused() {
+    let lowest = Shift {
+        span: "-178956970 years -8 mons",
+        ..SHIFT
+    };
+    assert_eq!(
+        refusals(&lowest, &["start - span IS NOT NULL"]),
+        [EvaluationRefusal::DatetimeOutOfRange {
+            operation: ArithmeticOp::Subtract
+        }]
     );
 }
 

@@ -101,6 +101,7 @@ fn an_unreadable_interval_literal_is_refused() {
         "span = interval x hour",
         "span IN (interval '1' week)",
         "span IN ('1 fortnight')",
+        "span IN (interval '1 fortnight')",
     ] {
         assert!(
             engine
