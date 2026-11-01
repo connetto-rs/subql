@@ -97,7 +97,7 @@ fn sync_keyed_event_scopes_registration_binds() {
     assert_eq!(queries.len(), 1);
     assert_eq!(
         queries[0].sql(),
-        "SELECT * FROM orders WHERE (lower(status) = $1) AND \"id\" IN (1)"
+        "SELECT \"id\", \"price\", \"quantity\", \"status\" FROM orders WHERE (lower(status) = $1) AND \"id\" IN (1)"
     );
     assert_eq!(queries[0].binds(), &[Value::String("paid".into())]);
 }
@@ -140,7 +140,7 @@ fn sync_keyed_insert_asks_about_the_declared_key() {
     assert_eq!(queries.len(), 1, "both keys are asked in one read");
     assert_eq!(
         queries[0].sql(),
-        "SELECT * FROM orders WHERE (lower(status) = 'paid') AND \"id\" IN (1, 2)",
+        "SELECT \"id\", \"price\", \"quantity\", \"status\" FROM orders WHERE (lower(status) = 'paid') AND \"id\" IN (1, 2)",
         "the read names the id column and both ids"
     );
 }
@@ -250,7 +250,7 @@ fn sync_whole_event_forwards_registration_binds() {
     assert_eq!(queries.len(), 1);
     assert_eq!(
         queries[0].sql(),
-        "SELECT * FROM orders ORDER BY id DESC LIMIT $1"
+        "SELECT \"id\", \"price\", \"quantity\", \"status\" FROM orders ORDER BY id DESC LIMIT $1"
     );
     assert_eq!(queries[0].binds(), &[Value::Int(3)]);
 }
@@ -277,4 +277,33 @@ fn registration_request_metadata_comes_from_consumed_request() {
 
     let _ = engine.unregister_session(session);
     assert!(engine.contexts.is_empty());
+}
+
+/// A keyed read's scoped SQL names the catalog's columns instead of `*`,
+/// so a column the server adds under it cannot widen the rows the re-read
+/// delivers.
+#[test]
+fn a_keyed_scoped_read_names_the_catalogs_columns() {
+    let (mut engine, table) = engine_with_values(alloc::vec![]);
+    engine
+        .register(
+            SubscriptionRequest::new(1u64, "SELECT * FROM orders WHERE lower(status) = $1")
+                .binds(alloc::vec![Value::String("paid".into())]),
+            (),
+        )
+        .expect("keyed read registers");
+
+    engine
+        .apply_leaving_reads_queued(&delete_event(table, 1, 5.0))
+        .unwrap();
+    let _ = engine.resolve_collect();
+    let queries = engine.connector().page_queries.borrow();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(
+        queries[0].sql(),
+        "SELECT \"id\", \"price\", \"quantity\", \"status\" FROM orders \
+         WHERE (lower(status) = $1) AND \"id\" IN (1)",
+        "the scoped read lists the catalog's columns, quoted, in catalog order"
+    );
+    assert_eq!(queries[0].binds(), &[Value::String("paid".into())]);
 }

@@ -299,9 +299,13 @@ fn restored_fixed_tiers_report_exact_executable_queries() {
         ),
         (
             keyed.subscription_id,
-            "SELECT * FROM orders WHERE lower(status) = $1",
+            "SELECT \"id\", \"price\", \"status\" FROM orders WHERE lower(status) = $1",
         ),
-        (whole.subscription_id, whole_sql),
+        (
+            whole.subscription_id,
+            "SELECT \"id\", \"price\", \"status\" FROM orders WHERE lower(status) = $1 \
+             AND id IN (SELECT id FROM managers)",
+        ),
     ];
     for (subscription_id, sql) in expected {
         let restored = report
@@ -363,7 +367,7 @@ fn keyed_restores_and_executes_registration_binds() {
     assert_eq!(queries.len(), 1);
     assert_eq!(
         queries[0].sql(),
-        "SELECT * FROM orders WHERE lower(status) = $1"
+        "SELECT \"id\", \"price\", \"status\" FROM orders WHERE lower(status) = $1"
     );
     assert_eq!(queries[0].binds(), &[Value::String("paid".into())]);
 }
@@ -409,7 +413,8 @@ fn whole_restores_and_executes_registration_binds() {
     assert_eq!(queries.len(), 1);
     assert_eq!(
         queries[0].sql(),
-        "SELECT * FROM orders WHERE lower(status) = $1 AND id IN (SELECT id FROM managers)"
+        "SELECT \"id\", \"price\", \"status\" FROM orders WHERE lower(status) = $1 \
+         AND id IN (SELECT id FROM managers)"
     );
     assert_eq!(queries[0].binds(), &[Value::String("paid".into())]);
 }

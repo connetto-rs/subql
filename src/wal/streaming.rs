@@ -6,7 +6,8 @@
 //! the `pg-streaming` feature) own the underlying connection, parse
 //! the wire bytes via the existing [`crate::wal`] parsers, and surface
 //! their parser output through `next_item`, each row change as a
-//! [`SourceItem::Event`] and each transaction's end as a
+//! [`SourceItem::Event`], each table definition a relation message
+//! states as a [`SourceItem::Relation`], and each transaction's end as a
 //! [`SourceItem::Commit`]. Every event type impls
 //! [`crate::backend::CdcEvent`], so the caller reads typed scalars off
 //! it directly. The caller drives the loop. Acks flow back through `ack`.
@@ -18,47 +19,61 @@
 
 use crate::backend::CdcEvent;
 
-/// One item a [`CdcSource`] yields: a row change, or the commit ending the
-/// transaction whose row changes came before it.
+/// Every item a [`CdcSource`] yields is a row change, the table definition a
+/// relation message states, or the commit ending the transaction whose row
+/// changes came before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SourceItem<E, C> {
+pub enum SourceItem<E, C, R> {
     /// A row change.
     Event(E),
+    /// The table definition a relation message states, at the place the
+    /// message decodes.
+    Relation(R),
     /// The end of a transaction, yielded after its last row change.
     Commit(C),
 }
 
-impl<E, C> SourceItem<E, C> {
-    /// The row change, or `None` for a commit.
+impl<E, C, R> SourceItem<E, C, R> {
+    /// The row change, or `None` for a relation or a commit.
     #[must_use]
     pub fn into_event(self) -> Option<E> {
         match self {
             Self::Event(event) => Some(event),
-            Self::Commit(_) => None,
+            Self::Relation(_) | Self::Commit(_) => None,
         }
     }
 
-    /// The commit, or `None` for a row change.
+    /// The table definition, or `None` for a row change or a commit.
+    #[must_use]
+    pub fn into_relation(self) -> Option<R> {
+        match self {
+            Self::Relation(relation) => Some(relation),
+            Self::Event(_) | Self::Commit(_) => None,
+        }
+    }
+
+    /// The commit, or `None` for a row change or a relation.
     #[must_use]
     pub fn into_commit(self) -> Option<C> {
         match self {
-            Self::Event(_) => None,
             Self::Commit(commit) => Some(commit),
+            Self::Event(_) | Self::Relation(_) => None,
         }
     }
 }
 
 /// The item a [`CdcSource`] `S` yields.
-pub type SourceItemOf<S> = SourceItem<<S as CdcSource>::Event, <S as CdcSource>::Commit>;
+pub type SourceItemOf<S> =
+    SourceItem<<S as CdcSource>::Event, <S as CdcSource>::Commit, <S as CdcSource>::Relation>;
 
 /// Push-based source of typed CDC events.
 ///
 /// Implementations transparently handle non-event protocol frames
-/// (keepalives, relation metadata, transaction begins) and surface the
-/// consumer-visible row changes and transaction ends through
-/// [`Self::next_item`]. Progress is reported via [`Self::ack`], which the
-/// source forwards to the upstream server (e.g. Postgres
-/// `StandbyStatusUpdate`) so that WAL can be recycled.
+/// (keepalives, transaction begins) and surface the consumer-visible row
+/// changes, table definitions a relation message states, and transaction
+/// ends through [`Self::next_item`]. Progress is reported via
+/// [`Self::ack`], which the source forwards to the upstream server (e.g.
+/// Postgres `StandbyStatusUpdate`) so that WAL can be recycled.
 ///
 /// # Send bounds
 ///
@@ -102,6 +117,14 @@ pub trait CdcSource: Send {
     /// [`core::convert::Infallible`].
     type Commit: Send + Sync;
 
+    /// The table definition a relation message of this source states.
+    ///
+    /// The Postgres sources yield [`crate::PgRelation`], which a consumer
+    /// holding an older schema checks against its catalog to detect a
+    /// destructive change. A source that never states a table definition
+    /// uses [`core::convert::Infallible`].
+    type Relation: Send + Sync;
+
     /// Source-specific error returned by the futures below.
     type Error: core::error::Error + Send + 'static;
 
@@ -113,9 +136,9 @@ pub trait CdcSource: Send {
     /// the consumer must surface (typically by reconnecting or
     /// failing over).
     ///
-    /// Implementations consume keepalive frames, relation metadata
-    /// messages, and transaction begins internally without surfacing
-    /// them to the consumer.
+    /// Implementations consume keepalive frames and transaction begins
+    /// internally without surfacing them to the consumer. Relation
+    /// messages are surfaced as [`SourceItem::Relation`].
     fn next_item(
         &mut self,
     ) -> impl core::future::Future<Output = Result<Option<SourceItemOf<Self>>, Self::Error>> + Send;
@@ -172,6 +195,7 @@ mod tests {
     impl CdcSource for NoopSource {
         type Event = TestEvent<Postgres>;
         type Commit = Infallible;
+        type Relation = Infallible;
         type Error = Infallible;
 
         fn next_item(

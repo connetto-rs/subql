@@ -34,8 +34,8 @@ pub use sqlite_cdc::{SqliteChangesetEvent, SqliteChangesetParser};
 pub use types::*;
 pub use wal::{
     parse_maxwell, parse_wal2json_v1, ChangeEvent, ChangeV1, MaxwellEvent, MaxwellMessage,
-    MessageV2, PgChangeEvent, PgCommit, TransactionOrderError, Wal2JsonV2Event, Wal2JsonV2Reader,
-    WalParseError, WalParser,
+    MessageV2, PgChangeEvent, PgCommit, PgRelation, PgRelationColumn, TransactionOrderError,
+    Wal2JsonV2Event, Wal2JsonV2Reader, WalParseError, WalParser,
 };
 #[cfg(feature = "std")]
 pub use wal::{CdcSource, SourceItem, SourceItemOf};

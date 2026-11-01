@@ -17,16 +17,16 @@ use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{CdcEvent, RowKind};
 use subql::{
-    CdcSource, EventKind, PgChangeEvent, PgCommit, PgCommitPosition, PgLsn, PollingPgCdcConfig,
-    PollingPgCdcSource, SourceItem,
+    CdcSource, EventKind, PgChangeEvent, PgCommit, PgCommitPosition, PgLsn, PgRelation,
+    PollingPgCdcConfig, PollingPgCdcSource, SourceItem,
 };
 
-type Item = SourceItem<PgChangeEvent, PgCommit>;
+type Item = SourceItem<PgChangeEvent, PgCommit, PgRelation>;
 
 /// The next item, which must arrive within five seconds.
 async fn next_item<S>(source: &mut S, what: &str) -> Item
 where
-    S: CdcSource<Event = PgChangeEvent, Commit = PgCommit>,
+    S: CdcSource<Event = PgChangeEvent, Commit = PgCommit, Relation = PgRelation>,
 {
     tokio::time::timeout(Duration::from_secs(5), source.next_item())
         .await
@@ -38,29 +38,40 @@ where
 /// The next item, which must be a row.
 async fn next_row<S>(source: &mut S, what: &str) -> PgChangeEvent
 where
-    S: CdcSource<Event = PgChangeEvent, Commit = PgCommit>,
+    S: CdcSource<Event = PgChangeEvent, Commit = PgCommit, Relation = PgRelation>,
 {
-    match next_item(source, what).await {
-        SourceItem::Event(event) => event,
-        SourceItem::Commit(commit) => panic!("expected {what}, got {commit:?}"),
+    loop {
+        match next_item(source, what).await {
+            SourceItem::Event(event) => return event,
+            SourceItem::Relation(_) => {}
+            SourceItem::Commit(commit) => panic!("expected {what}, got {commit:?}"),
+        }
     }
 }
 
 /// The next item, which must be a commit.
 async fn next_commit<S>(source: &mut S, what: &str) -> PgCommit
 where
-    S: CdcSource<Event = PgChangeEvent, Commit = PgCommit>,
+    S: CdcSource<Event = PgChangeEvent, Commit = PgCommit, Relation = PgRelation>,
 {
-    match next_item(source, what).await {
-        SourceItem::Commit(commit) => commit,
-        SourceItem::Event(event) => panic!("expected {what}, got {event:?}"),
+    loop {
+        match next_item(source, what).await {
+            SourceItem::Commit(commit) => return commit,
+            SourceItem::Relation(_) => {}
+            SourceItem::Event(event) => panic!("expected {what}, got {event:?}"),
+        }
     }
 }
 
-const fn position(item: &Item) -> PgCommitPosition {
+fn position(item: &Item) -> PgCommitPosition {
     match item {
         SourceItem::Event(event) => event.position(),
         SourceItem::Commit(commit) => commit.position(),
+        // A relation carries a message LSN, not a commit position, so a
+        // test that positions items must consume it on its own first.
+        SourceItem::Relation(_) => {
+            panic!("a relation has no commit position, got {item:?}")
+        }
     }
 }
 
@@ -163,6 +174,41 @@ fn an_unacknowledged_event_replays_after_the_source_is_dropped() {
         );
     });
 
+    common::drop_slot(&mut setup, &slot);
+}
+
+/// A fresh polling source delivers the table's `Relation` ahead of its
+/// first row, and a peek that re-reads the unacknowledged transaction does
+/// not deliver it a second time.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_fresh_source_delivers_the_tables_relation_once() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    let mut dml = db.connect();
+    let slot = db.slot("subql_polling_relation");
+    let publication = "subql_polling_relation_pub";
+    fixture(&mut setup, "relation dedup", publication, &slot);
+
+    let config = config(db.url(), &slot, publication);
+    let catalog = catalog();
+
+    common::multi_thread_rt().block_on(async move {
+        let mut source = PollingPgCdcSource::connect(config, catalog)
+            .await
+            .expect("connect polling source");
+        sql_query("INSERT INTO orders VALUES (1, 5.0)")
+            .execute(&mut dml)
+            .expect("insert");
+
+        let first = next_item(&mut source, "the table's relation").await;
+        assert!(
+            !matches!(first, SourceItem::Event(_) | SourceItem::Commit(_)),
+            "the first item is the table's relation, got {first:?}"
+        );
+        drop(source);
+    });
     common::drop_slot(&mut setup, &slot);
 }
 
@@ -405,13 +451,16 @@ fn every_change_of_one_transaction_is_delivered() {
 
         let mut seen = Vec::new();
         let mut commits = 0;
-        for _ in 0..8 {
+        // A fresh source states the table's relation first, which the
+        // assertions below are about events and commits only.
+        while seen.len() < 6 || commits < 2 {
             match next_item(&mut source, &format!("every item, got {seen:?}")).await {
                 SourceItem::Event(event) => seen.push(
                     event
                         .value_at(&catalog(), RowKind::New, 0)
                         .expect("the new image carries the key"),
                 ),
+                SourceItem::Relation(_) => {}
                 SourceItem::Commit(_) => commits += 1,
             }
         }
@@ -452,6 +501,13 @@ fn every_row_of_a_copied_batch_is_delivered() {
             .execute(&mut dml)
             .expect("copy three rows");
 
+        // A fresh slot states the table's relation before the first row,
+        // and the position assertions below are about rows and the commit.
+        let first = next_item(&mut source, "the table's relation").await;
+        assert!(
+            matches!(first, SourceItem::Relation(_)),
+            "the fresh slot states its table first, got {first:?}"
+        );
         let mut seen = Vec::new();
         for _ in 0..4 {
             seen.push(position(
@@ -504,8 +560,13 @@ fn polled_checkpoints_follow_commit_order_across_interleaved_transactions() {
             .expect("commit the older");
 
         let mut delivered = Vec::new();
-        for _ in 0..5 {
-            delivered.push(next_item(&mut source, &format!("every item, got {delivered:?}")).await);
+        // A fresh source states the table's relation first, which the
+        // assertions below are about events and commits only.
+        while delivered.len() < 5 {
+            match next_item(&mut source, &format!("every item, got {delivered:?}")).await {
+                SourceItem::Relation(_) => {}
+                other => delivered.push(other),
+            }
         }
         let ids: Vec<_> = delivered
             .iter()
@@ -516,6 +577,7 @@ fn polled_checkpoints_follow_commit_order_across_interleaved_transactions() {
                         .expect("the new image carries the key"),
                 ),
                 SourceItem::Commit(_) => None,
+                SourceItem::Relation(_) => unreachable!("the loop skips relations"),
             })
             .collect();
         assert_eq!(

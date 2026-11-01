@@ -52,7 +52,7 @@ use pg_walstream::error::ReplicationError;
 use pg_walstream::PgReplicationConnection;
 use sql_traits::prelude::DatabaseLike;
 
-use crate::wal::{PgChangeEvent, PgCommit, PgSourceItem, TransactionOrderError};
+use crate::wal::{PgChangeEvent, PgCommit, PgRelation, PgSourceItem, TransactionOrderError};
 use crate::PgCommitPosition;
 
 pub(crate) mod helpers;
@@ -335,6 +335,7 @@ impl Drop for PollingPgCdcSource {
 impl crate::CdcSource for PollingPgCdcSource {
     type Event = PgChangeEvent;
     type Commit = PgCommit;
+    type Relation = PgRelation;
     type Error = PollingPgCdcError;
 
     #[allow(clippy::manual_async_fn)]

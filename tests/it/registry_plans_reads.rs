@@ -39,7 +39,8 @@ fn a_bare_registry_plans_the_read_it_cannot_serve() {
         keyed.tier,
         Tier::KeyedRows {
             query: subql::reexec::BoundQuery::new(
-                "SELECT * FROM orders WHERE lower(status) = 'paid'".to_string(),
+                "SELECT \"id\", \"price\", \"status\" FROM orders WHERE lower(status) = 'paid'"
+                    .to_string(),
                 Vec::new(),
             ),
             table_id: table,
