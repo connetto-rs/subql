@@ -111,6 +111,13 @@ const COMPARED: [Kind; 7] = [
 
 const NUMBERS: [Kind; 3] = [Kind::Int, Kind::Float, Kind::Decimal];
 
+/// The value a draw of the case pools yields. `arbitrary` fails a draw only
+/// on an empty range or pool, and the case pools are never empty, so a draw
+/// cannot fail.
+fn drawn<T>(draw: arbitrary::Result<T>) -> T {
+    draw.expect("a draw from a non-empty case pool cannot fail")
+}
+
 impl Kind {
     const fn column(self) -> &'static str {
         match self {
@@ -152,17 +159,17 @@ pub enum Literal {
 }
 
 impl Literal {
-    fn arbitrary(u: &mut Unstructured<'_>, kind: Kind) -> arbitrary::Result<Self> {
-        Ok(match kind {
-            Kind::Timestamp => Self::Text(kind, pick(u, &TIMESTAMPS)?),
-            Kind::TimestampTz => Self::Text(kind, pick(u, &TIMESTAMPTZS)?),
-            Kind::Date => Self::Text(kind, pick(u, &DATES)?),
-            Kind::Time => Self::Text(kind, pick(u, &TIMES)?),
-            Kind::Interval => Self::Text(kind, pick(u, &INTERVALS)?),
-            Kind::Int => Self::Int(pick(u, &INTS)?),
-            Kind::Float => Self::Float(pick(u, &FLOATS)?),
-            Kind::Decimal => Self::Decimal(pick(u, &DECIMALS)?),
-        })
+    fn arbitrary(u: &mut Unstructured<'_>, kind: Kind) -> Self {
+        match kind {
+            Kind::Timestamp => Self::Text(kind, drawn(pick(u, &TIMESTAMPS))),
+            Kind::TimestampTz => Self::Text(kind, drawn(pick(u, &TIMESTAMPTZS))),
+            Kind::Date => Self::Text(kind, drawn(pick(u, &DATES))),
+            Kind::Time => Self::Text(kind, drawn(pick(u, &TIMES))),
+            Kind::Interval => Self::Text(kind, drawn(pick(u, &INTERVALS))),
+            Kind::Int => Self::Int(drawn(pick(u, &INTS))),
+            Kind::Float => Self::Float(drawn(pick(u, &FLOATS))),
+            Kind::Decimal => Self::Decimal(drawn(pick(u, &DECIMALS))),
+        }
     }
 
     /// The literal, a quoted one after its kind's keyword when `typed`.
@@ -222,12 +229,13 @@ fn timestamp(text: &str) -> NaiveDateTime {
 pub struct Row(Vec<Option<Literal>>);
 
 impl Row {
-    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        KINDS
-            .iter()
-            .map(|&kind| maybe(u, |u| Literal::arbitrary(u, kind)))
-            .collect::<arbitrary::Result<_>>()
-            .map(Self)
+    fn arbitrary(u: &mut Unstructured<'_>) -> Self {
+        Self(
+            KINDS
+                .iter()
+                .map(|&kind| drawn(maybe(u, |u| Ok(Literal::arbitrary(u, kind)))))
+                .collect(),
+        )
     }
 
     /// The statement that stores the row with `id = 1`.
@@ -283,112 +291,121 @@ pub enum Expr {
 }
 
 impl Expr {
-    fn condition(u: &mut Unstructured<'_>, depth: u8) -> arbitrary::Result<Self> {
+    fn condition(u: &mut Unstructured<'_>, depth: u8) -> Self {
         let below = depth.saturating_sub(1);
-        if depth == 0 || u.ratio(1u8, 3u8)? {
+        if depth == 0 || drawn(u.ratio(1u8, 3u8)) {
             return Self::comparison(u, below);
         }
-        let condition = |u: &mut Unstructured<'_>| Self::condition(u, below).map(Box::new);
-        Ok(match u.int_in_range(0u8..=5)? {
-            0 => Self::Not(condition(u)?),
-            1 | 2 => Self::Binary(pick(u, &[Op::And, Op::Or])?, condition(u)?, condition(u)?),
+        let condition = |u: &mut Unstructured<'_>| Box::new(Self::condition(u, below));
+        match drawn(u.int_in_range(0u8..=5)) {
+            0 => Self::Not(condition(u)),
+            1 | 2 => Self::Binary(
+                drawn(pick(u, &[Op::And, Op::Or])),
+                condition(u),
+                condition(u),
+            ),
             3 => {
-                let kind = pick(u, &COMPARED)?;
-                Self::IsNull(Box::new(Self::value(u, below, kind)?), u.arbitrary()?)
+                let kind = drawn(pick(u, &COMPARED));
+                Self::IsNull(
+                    Box::new(Self::value(u, below, kind)),
+                    drawn(u.arbitrary::<bool>()),
+                )
             }
             4 => {
-                let kind = pick(u, &COMPARED)?;
+                let kind = drawn(pick(u, &COMPARED));
                 Self::Between(
-                    Box::new(Self::value(u, below, kind)?),
-                    Box::new(Self::value(u, below, kind)?),
-                    Box::new(Self::value(u, below, kind)?),
-                    u.arbitrary()?,
+                    Box::new(Self::value(u, below, kind)),
+                    Box::new(Self::value(u, below, kind)),
+                    Box::new(Self::value(u, below, kind)),
+                    drawn(u.arbitrary::<bool>()),
                 )
             }
             _ => {
-                let kind = pick(u, &COMPARED)?;
-                let list = (0..u.int_in_range(1usize..=3)?)
-                    .map(|_| Ok(Self::Literal(Literal::arbitrary(u, kind)?, u.arbitrary()?)))
-                    .collect::<arbitrary::Result<_>>()?;
-                Self::In(Box::new(Self::value(u, below, kind)?), list, u.arbitrary()?)
+                let kind = drawn(pick(u, &COMPARED));
+                let list = (0..drawn(u.int_in_range(1usize..=3)))
+                    .map(|_| {
+                        Self::Literal(Literal::arbitrary(u, kind), drawn(u.arbitrary::<bool>()))
+                    })
+                    .collect();
+                Self::In(
+                    Box::new(Self::value(u, below, kind)),
+                    list,
+                    drawn(u.arbitrary::<bool>()),
+                )
             }
-        })
+        }
     }
 
-    fn comparison(u: &mut Unstructured<'_>, depth: u8) -> arbitrary::Result<Self> {
-        let kind = pick(u, &COMPARED)?;
-        Ok(Self::Binary(
-            pick(u, &COMPARISONS)?,
-            Box::new(Self::value(u, depth, kind)?),
-            Box::new(Self::value(u, depth, kind)?),
-        ))
+    fn comparison(u: &mut Unstructured<'_>, depth: u8) -> Self {
+        let kind = drawn(pick(u, &COMPARED));
+        Self::Binary(
+            drawn(pick(u, &COMPARISONS)),
+            Box::new(Self::value(u, depth, kind)),
+            Box::new(Self::value(u, depth, kind)),
+        )
     }
 
     /// A value of `kind`, its operands of the kinds PostgreSQL's operator
     /// reads, except one operation in six over operands of any kinds.
-    fn value(u: &mut Unstructured<'_>, depth: u8, kind: Kind) -> arbitrary::Result<Self> {
-        if depth == 0 || u.ratio(1u8, 3u8)? {
+    fn value(u: &mut Unstructured<'_>, depth: u8, kind: Kind) -> Self {
+        if depth == 0 || drawn(u.ratio(1u8, 3u8)) {
             return Self::leaf(u, kind);
         }
         let below = depth - 1;
-        let of = |u: &mut Unstructured<'_>, kind| Self::value(u, below, kind).map(Box::new);
-        if u.ratio(1u8, 6u8)? {
-            let op = pick(u, &[Op::Add, Op::Sub, Op::Mul, Op::Div])?;
-            let (left, right) = (pick(u, &KINDS)?, pick(u, &KINDS)?);
-            return Ok(Self::Binary(op, of(u, left)?, of(u, right)?));
+        let of = |u: &mut Unstructured<'_>, kind| Box::new(Self::value(u, below, kind));
+        if drawn(u.ratio(1u8, 6u8)) {
+            let op = drawn(pick(u, &[Op::Add, Op::Sub, Op::Mul, Op::Div]));
+            let (left, right) = (drawn(pick(u, &KINDS)), drawn(pick(u, &KINDS)));
+            return Self::Binary(op, of(u, left), of(u, right));
         }
-        let additive = |u: &mut Unstructured<'_>| pick(u, &[Op::Add, Op::Sub]);
-        Ok(match kind {
-            Kind::Interval => match u.int_in_range(0u8..=5)? {
-                0 => Self::Binary(additive(u)?, of(u, kind)?, of(u, kind)?),
-                1 => Self::Neg(of(u, kind)?),
+        let additive = |u: &mut Unstructured<'_>| drawn(pick(u, &[Op::Add, Op::Sub]));
+        match kind {
+            Kind::Interval => match drawn(u.int_in_range(0u8..=5)) {
+                0 => Self::Binary(additive(u), of(u, kind), of(u, kind)),
+                1 => Self::Neg(of(u, kind)),
                 2 => {
-                    let number = pick(u, &NUMBERS)?;
-                    let number = of(u, number)?;
-                    if u.arbitrary()? {
-                        Self::Binary(Op::Mul, of(u, kind)?, number)
+                    let number = drawn(pick(u, &NUMBERS));
+                    let number = of(u, number);
+                    if drawn(u.arbitrary::<bool>()) {
+                        Self::Binary(Op::Mul, of(u, kind), number)
                     } else {
-                        Self::Binary(Op::Mul, number, of(u, kind)?)
+                        Self::Binary(Op::Mul, number, of(u, kind))
                     }
                 }
                 3 => {
-                    let number = pick(u, &NUMBERS)?;
-                    Self::Binary(Op::Div, of(u, kind)?, of(u, number)?)
+                    let number = drawn(pick(u, &NUMBERS));
+                    Self::Binary(Op::Div, of(u, kind), of(u, number))
                 }
-                4 => Self::Binary(Op::Sub, of(u, Kind::Timestamp)?, of(u, Kind::Timestamp)?),
-                _ => Self::Binary(
-                    Op::Sub,
-                    of(u, Kind::TimestampTz)?,
-                    of(u, Kind::TimestampTz)?,
-                ),
+                4 => Self::Binary(Op::Sub, of(u, Kind::Timestamp), of(u, Kind::Timestamp)),
+                _ => Self::Binary(Op::Sub, of(u, Kind::TimestampTz), of(u, Kind::TimestampTz)),
             },
-            Kind::Timestamp => match u.int_in_range(0u8..=2)? {
-                0 => Self::Binary(additive(u)?, of(u, kind)?, of(u, Kind::Interval)?),
-                1 => Self::Binary(Op::Add, of(u, Kind::Interval)?, of(u, kind)?),
-                _ => Self::Binary(additive(u)?, of(u, Kind::Date)?, of(u, Kind::Interval)?),
+            Kind::Timestamp => match drawn(u.int_in_range(0u8..=2)) {
+                0 => Self::Binary(additive(u), of(u, kind), of(u, Kind::Interval)),
+                1 => Self::Binary(Op::Add, of(u, Kind::Interval), of(u, kind)),
+                _ => Self::Binary(additive(u), of(u, Kind::Date), of(u, Kind::Interval)),
             },
             Kind::TimestampTz | Kind::Time => {
-                if u.arbitrary()? {
-                    Self::Binary(additive(u)?, of(u, kind)?, of(u, Kind::Interval)?)
+                if drawn(u.arbitrary::<bool>()) {
+                    Self::Binary(additive(u), of(u, kind), of(u, Kind::Interval))
                 } else {
-                    Self::Binary(Op::Add, of(u, Kind::Interval)?, of(u, kind)?)
+                    Self::Binary(Op::Add, of(u, Kind::Interval), of(u, kind))
                 }
             }
-            Kind::Int | Kind::Float | Kind::Decimal => Self::Neg(of(u, kind)?),
-            Kind::Date => Self::leaf(u, kind)?,
-        })
+            Kind::Int | Kind::Float | Kind::Decimal => Self::Neg(of(u, kind)),
+            Kind::Date => Self::leaf(u, kind),
+        }
     }
 
     /// The column of `kind` two times in three, otherwise a literal of it or
     /// now and then `NULL`.
-    fn leaf(u: &mut Unstructured<'_>, kind: Kind) -> arbitrary::Result<Self> {
-        if u.ratio(1u8, 12u8)? {
-            return Ok(Self::Null);
+    fn leaf(u: &mut Unstructured<'_>, kind: Kind) -> Self {
+        if drawn(u.ratio(1u8, 12u8)) {
+            return Self::Null;
         }
-        if u.ratio(1u8, 3u8)? {
-            Ok(Self::Literal(Literal::arbitrary(u, kind)?, u.arbitrary()?))
+        if drawn(u.ratio(1u8, 3u8)) {
+            Self::Literal(Literal::arbitrary(u, kind), drawn(u.arbitrary::<bool>()))
         } else {
-            Ok(Self::Column(kind))
+            Self::Column(kind)
         }
     }
 
@@ -439,15 +456,11 @@ pub struct Case {
 
 impl Case {
     /// Draw a case from fuzzer-controlled bytes.
-    ///
-    /// # Errors
-    ///
-    /// When the bytes run out before the case is complete.
-    pub fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            row: Row::arbitrary(u)?,
-            filter: Expr::condition(u, 3)?,
-        })
+    pub fn arbitrary(u: &mut Unstructured<'_>) -> Self {
+        Self {
+            row: Row::arbitrary(u),
+            filter: Expr::condition(u, 3),
+        }
     }
 
     /// DDL, insert and filter, which is what a divergence has to carry.
@@ -485,4 +498,27 @@ pub fn subql_selects(case: &Case, database: ParserDB) -> Option<bool> {
         case.row.cells(),
         || case.reproduction(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Case, Kind, DDL};
+
+    /// A kind without a SQL keyword writes a bare quoted literal.
+    #[test]
+    fn a_numberless_kind_writes_no_keyword() {
+        assert_eq!(Kind::Int.keyword(), None);
+        assert_eq!(Kind::Float.keyword(), None);
+        assert_eq!(Kind::Decimal.keyword(), None);
+    }
+
+    /// A reproduction carries the DDL, the row and the filter that diverged.
+    #[test]
+    fn a_reproduction_carries_the_statement() {
+        let case = Case::arbitrary(&mut arbitrary::Unstructured::new(&[0u8; 256]));
+        let text = case.reproduction();
+        assert!(text.starts_with(&format!("{DDL};")));
+        assert!(text.contains("INSERT INTO tt"));
+        assert!(text.ends_with(&format!("WHERE {};", case.filter.render())));
+    }
 }

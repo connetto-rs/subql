@@ -227,10 +227,7 @@ fn generated_temporal_filters_agree_with_postgres() {
     let connection = RefCell::new(connection);
     let compared = Cell::new(0u32);
     let outcome = runner.run(&vec(any::<u8>(), 64..512), |bytes| {
-        let Ok(case) = temporal_grammar::Case::arbitrary(&mut arbitrary::Unstructured::new(&bytes))
-        else {
-            return Ok(());
-        };
+        let case = temporal_grammar::Case::arbitrary(&mut arbitrary::Unstructured::new(&bytes));
         let Some(served) = temporal_grammar::subql_selects(&case, catalog.clone()) else {
             return Ok(());
         };

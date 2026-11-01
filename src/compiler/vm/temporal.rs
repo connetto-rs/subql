@@ -50,11 +50,11 @@ pub(super) fn subtract<B: Backend>(
         (Value::Interval(x), Value::Interval(y)) => interval(x.checked_sub(y), operation),
         (other, Value::Interval(span)) => shifted(other, span, true, operation),
         (Value::Timestamp(x), Value::Timestamp(y)) => {
-            let (x, y) = (naive::<B>(&x, operation)?, naive::<B>(&y, operation)?);
+            let (x, y) = carriers::<NaiveDateTime, _>(&x, &y, operation)?;
             interval(timestamp_difference(x, y), operation)
         }
         (Value::TimestampTz(x), Value::TimestampTz(y)) => {
-            let (x, y) = (instant::<B>(&x, operation)?, instant::<B>(&y, operation)?);
+            let (x, y) = carriers::<DateTime<Utc>, _>(&x, &y, operation)?;
             interval(
                 timestamp_difference(x.naive_utc(), y.naive_utc()),
                 operation,
@@ -194,6 +194,18 @@ fn carrier<T: Any + Copy, C: Any>(
         .ok_or(EvaluationRefusal::OperandKinds { operation })
 }
 
+/// Two carriers of one type read as the `chrono` type PostgreSQL's carries.
+fn carriers<T: Any + Copy, C: Any>(
+    x: &C,
+    y: &C,
+    operation: ArithmeticOp,
+) -> Result<(T, T), EvaluationRefusal> {
+    let read = |value: &C| (value as &dyn Any).downcast_ref::<T>().copied();
+    read(x)
+        .zip(read(y))
+        .ok_or(EvaluationRefusal::OperandKinds { operation })
+}
+
 fn naive<B: Backend>(
     value: &B::Timestamp,
     operation: ArithmeticOp,
@@ -240,5 +252,320 @@ fn float_factor<B: Backend>(
                 .ok_or(EvaluationRefusal::DecimalOutsideFloatRange)
         }
         _ => Err(EvaluationRefusal::OperandKinds { operation }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! A `Backend` whose temporal carriers differ from this library's must
+    //! never panic inside a temporal operator, and never answer one. Every
+    //! interval operation over such a row is refused, so the downcast
+    //! fallibility at every carrier read is exercised, not bypassed.
+
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use crate::backend::{
+        at_float4, declared_type_of, declares_sixty_four_bit_int, Backend, ComparisonContext,
+        DeclaredType, DivisionPrecisionIncrement, DivisionRule, FloatOrder, FloatSumOverflow,
+        FloatWidth, IntWidth, Interval, MeanRule, NoCustomScalars, NullSafeEquality, Pg18,
+        ScalarFamily, SumRule, TextOperation, TextResolution, TextRule, TextWidth, Value,
+        VarianceSeed,
+    };
+    use crate::compiler::vm::refusal::{
+        ArithmeticOp, DanglingEscape, DivisionByZero, EvaluationRefusal, IntegerOverflow,
+    };
+
+    /// A `Postgres` whose temporal carriers and decimal are all the `i64`, and
+    /// whose `/` answers a decimal whose scale depends on the declared
+    /// `div_precision_increment`. A hand-built catalog can declare no such
+    /// setting, so its registration is refused rather than answered.
+    struct Tb;
+
+    impl Backend for Tb {
+        type Dialect = sqlparser::dialect::PostgreSqlDialect;
+        type Custom = NoCustomScalars<Self>;
+        type Bool = bool;
+        type Int = i64;
+        type Float = f64;
+        type String = String;
+        type Bytes = Vec<u8>;
+        type Uuid = uuid::Uuid;
+        type Timestamp = i64;
+        type TimestampTz = i64;
+        type Date = i64;
+        type Time = i64;
+        type Decimal = i64;
+        type Json = serde_json::Value;
+        type Jsonb = serde_json::Value;
+        type JsonbVersion = Pg18;
+
+        const LIKE_DEFAULT_ESCAPE: Option<char> = Some('\\');
+        const LIKE_DANGLING_ESCAPE: DanglingEscape = DanglingEscape::Fails;
+        const COLUMN_NAME_CASE: sql_traits::structs::IdentifierCase =
+            sql_traits::structs::IdentifierCase::AsWritten;
+        const WRITTEN_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase =
+            sql_traits::structs::IdentifierCase::AsWritten;
+        const WIRE_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase =
+            sql_traits::structs::IdentifierCase::Exact;
+        const DIVISION_BY_ZERO: DivisionByZero = DivisionByZero::Fails;
+        const INTEGER_OVERFLOW: IntegerOverflow = IntegerOverflow::Fails;
+        const DIVISION: DivisionRule = DivisionRule::QuotientsAreDecimalInWords;
+        const NULL_SAFE_EQUALITY: NullSafeEquality = NullSafeEquality::DistinctFrom;
+        const READS_IS_UNKNOWN: bool = true;
+        const HAS_INTERVAL: bool = true;
+        const RANGE_WITH_NULL_BOUND_COMPARES_DOUBLES: bool = false;
+        const NULL_ARITHMETIC_IS_AMBIGUOUS: bool = true;
+        const FLOAT_SUM_OVERFLOW: FloatSumOverflow = FloatSumOverflow::Raises;
+        const FLOAT_ORDER: FloatOrder = FloatOrder::NanIsGreatest;
+        const VARIANCE_SEED: VarianceSeed = VarianceSeed::EnginesOwn;
+        const MEAN: MeanRule = MeanRule::Exact;
+
+        fn like_escape_clause(written: &str) -> Result<Option<char>, &'static str> {
+            <crate::backend::Postgres as Backend>::like_escape_clause(written)
+        }
+
+        fn float_arithmetic_width(
+            left: Option<FloatWidth>,
+            right: Option<FloatWidth>,
+        ) -> Option<FloatWidth> {
+            left.or(right).map(|_| FloatWidth::Double)
+        }
+
+        fn hold_float_at_single(value: Self::Float) -> Self::Float {
+            at_float4(value)
+        }
+
+        fn refine_declared_type(family: ScalarFamily, declared_type: &str) -> DeclaredType {
+            declared_type_of(
+                family,
+                declares_sixty_four_bit_int(declared_type),
+                FloatWidth::Double,
+                TextWidth::Varying,
+            )
+        }
+
+        fn text_rule(
+            _comparison: &ComparisonContext<'_, Self>,
+            _operation: TextOperation,
+        ) -> TextResolution {
+            TextResolution::Rule(TextRule::EXACT)
+        }
+
+        fn numeric_widening(
+            _left: ScalarFamily,
+            _right: ScalarFamily,
+        ) -> Option<crate::backend::NumericWidening> {
+            None
+        }
+
+        fn numeric_literal_family(text: &str) -> ScalarFamily {
+            <crate::backend::Postgres as Backend>::numeric_literal_family(text)
+        }
+
+        fn sum_rule(column: DeclaredType) -> SumRule {
+            match column {
+                DeclaredType::Int(IntWidth::UpToThirtyTwo) => SumRule::Integer,
+                DeclaredType::Int(IntWidth::SixtyFour) | DeclaredType::Decimal => {
+                    SumRule::Decimal {
+                        integer_digits: Some(131_072),
+                    }
+                }
+                _ => SumRule::Double,
+            }
+        }
+
+        fn decimal_quotient(
+            dividend: Self::Decimal,
+            divisor: Self::Decimal,
+            _quotient: crate::compiler::bytecode::Quotient,
+        ) -> Self::Decimal {
+            // Not reached by the temporal tests, which refuse first.
+            if divisor == 0 {
+                0
+            } else {
+                dividend / divisor
+            }
+        }
+
+        fn integer_quotient(
+            dividend: Self::Int,
+            divisor: Self::Int,
+            _increment: DivisionPrecisionIncrement,
+        ) -> Self::Decimal {
+            // Not reached by the temporal tests, which refuse first.
+            if divisor == 0 {
+                0
+            } else {
+                dividend / divisor
+            }
+        }
+
+        fn integer_binary(
+            operation: ArithmeticOp,
+            left: Self::Int,
+            right: Self::Int,
+        ) -> Result<Value<Self>, EvaluationRefusal> {
+            crate::compiler::vm::arithmetic::checked_integer_binary::<Self>(
+                Self::INTEGER_OVERFLOW,
+                operation,
+                left,
+                right,
+            )
+        }
+
+        fn integer_negate(value: Self::Int) -> Result<Value<Self>, EvaluationRefusal> {
+            crate::compiler::vm::arithmetic::checked_integer_negate::<Self>(
+                Self::INTEGER_OVERFLOW,
+                value,
+            )
+        }
+    }
+
+    impl crate::compiler::literals::SqlLiteralParse for Tb {
+        fn parse_literal(
+            sql: &sqlparser::ast::Value,
+            target: crate::backend::ValueKindOf<Self>,
+        ) -> Result<Value<Self>, crate::RegisterError> {
+            use crate::backend::{ScalarFamily, Value, ValueKind};
+            use sqlparser::ast::Value as SqlValue;
+
+            if matches!(sql, SqlValue::Null) {
+                return Ok(Value::Null);
+            }
+            let family = match target {
+                ValueKind::Builtin(family) => family,
+                ValueKind::Custom(_) => {
+                    return Err(crate::RegisterError::TypeError(
+                        "the test backend carries no custom literals".to_string(),
+                    ))
+                }
+            };
+            match (family, sql) {
+                (ScalarFamily::Int, SqlValue::Number(digits, _)) => {
+                    let int: i64 = digits.parse().map_err(|_| {
+                        crate::RegisterError::TypeError(format!(
+                            "cannot read {sql:?} as an integer"
+                        ))
+                    })?;
+                    Ok(Value::Int(int))
+                }
+                (ScalarFamily::Interval, SqlValue::SingleQuotedString(text)) => {
+                    crate::backend::Interval::parse(text)
+                        .map(Value::Interval)
+                        .ok_or_else(|| {
+                            crate::RegisterError::TypeError(format!(
+                                "cannot read {sql:?} as an interval"
+                            ))
+                        })
+                }
+                _ => Err(crate::RegisterError::TypeError(format!(
+                    "the test backend refuses the literal {sql:?}"
+                ))),
+            }
+        }
+    }
+
+    /// Each temporal carrier of `Tb` is an `i64`, so reading it as the
+    /// `chrono` type a `timestamp` or `date` shift needs is refused, and a
+    /// `decimal` scaling factor is not the `BigDecimal` a `span * 2` needs.
+    #[test]
+    fn interval_arithmetic_over_foreign_carriers_is_refused() {
+        let span = Interval::parse("1 hour").expect("the span parses");
+
+        assert!(matches!(
+            super::add::<Tb>(Value::Timestamp(1i64), Value::Interval(span)),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Add
+            })
+        ));
+        assert!(matches!(
+            super::add::<Tb>(Value::TimestampTz(1i64), Value::Interval(span)),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Add
+            })
+        ));
+        assert!(matches!(
+            super::add::<Tb>(Value::Date(1i64), Value::Interval(span)),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Add
+            })
+        ));
+        assert!(matches!(
+            super::add::<Tb>(Value::Time(1i64), Value::Interval(span)),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Add
+            })
+        ));
+        // An operand that is no temporal carrier at all falls to the catch-all.
+        assert!(matches!(
+            super::add::<Tb>(Value::Int(1i64), Value::Interval(span)),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Add
+            })
+        ));
+        assert!(matches!(
+            super::subtract::<Tb>(Value::Timestamp(1i64), Value::Timestamp(2i64)),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Subtract
+            })
+        ));
+        assert!(matches!(
+            super::subtract::<Tb>(Value::TimestampTz(1i64), Value::TimestampTz(2i64)),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Subtract
+            })
+        ));
+        assert!(matches!(
+            super::multiply::<Tb>(Value::Interval(span), Value::Decimal(1i64)),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Multiply
+            })
+        ));
+        // A factor that is not an `int`, a `float` or a `decimal` falls to the
+        // `float_factor` catch-all.
+        assert!(matches!(
+            super::multiply::<Tb>(Value::Interval(span), Value::String("x".to_string())),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Multiply
+            })
+        ));
+        assert!(matches!(
+            super::divide::<Tb>(Value::Interval(span), Value::Decimal(1i64)),
+            Err(EvaluationRefusal::OperandKinds {
+                operation: ArithmeticOp::Divide
+            })
+        ));
+    }
+
+    /// The temporal `span / 2` plans a `Quotient` whose resolution needs the
+    /// declared `div_precision_increment`. A hand-built catalog declares none,
+    /// so `Tb` refuses registration instead of answering a decimal with an
+    /// unknown scale.
+    #[test]
+    fn a_division_rule_without_declared_precision_refuses_temporal_division() {
+        use crate::testing::TestEvent;
+        use crate::{DefaultIds, SubscriptionEngine, SubscriptionRequest};
+        use sql_traits::structs::ParserDB;
+
+        let catalog = ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(
+            "CREATE TABLE t (id INT PRIMARY KEY, span INTERVAL)",
+        )
+        .expect("the catalog parses");
+        let mut engine: SubscriptionEngine<TestEvent<Tb>, DefaultIds, ParserDB> =
+            SubscriptionEngine::new(catalog, sqlparser::dialect::PostgreSqlDialect {});
+        let registered = engine.register(SubscriptionRequest::new(
+            1u64,
+            "SELECT * FROM t WHERE span / 2 > '1 day'",
+        ));
+
+        assert!(matches!(
+            registered,
+            Ok(registered)
+                if matches!(
+                    registered.not_served_because,
+                    Some(crate::NotServed::DivisionPrecisionNotDeclared)
+                )
+        ));
     }
 }

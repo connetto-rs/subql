@@ -300,6 +300,38 @@ fn a_timestamp_past_the_last_chrono_year_is_refused() {
     );
 }
 
+/// A number no double precision holds, on which PostgreSQL raises scaling
+/// an interval by it.
+const HUGE_AMOUNT: &str = concat!(
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+);
+
+/// A number no double holds is refused, and PostgreSQL raises scaling an
+/// interval by it in either direction.
+#[test]
+fn a_number_no_double_holds_is_refused() {
+    let big = Shift {
+        amount: HUGE_AMOUNT,
+        ..SHIFT
+    };
+    assert_eq!(
+        refusals(
+            &big,
+            &["span * amount > '1 day'", "span / amount > '1 day'"]
+        ),
+        [
+            EvaluationRefusal::DecimalOutsideFloatRange,
+            EvaluationRefusal::DecimalOutsideFloatRange,
+        ]
+    );
+}
+
 /// What stays a read: a `timestamptz` moved by months, days or an interval
 /// column, which the session's time zone decides, and the operators
 /// PostgreSQL cannot resolve or has not.
