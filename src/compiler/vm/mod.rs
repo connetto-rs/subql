@@ -17,7 +17,8 @@
 //!   lift to `Tri::Unknown`). Any other final shape is a compiler bug and
 //!   surfaces as [`VmError::MalformedProgram`].
 //! * Same-scalar arithmetic only, and an integer beside a float read as a
-//!   float. Any other pair is refused with
+//!   float, plus PostgreSQL's interval arithmetic over intervals, dates,
+//!   times and timestamps. Any other pair is refused with
 //!   [`EvaluationRefusal::OperandKinds`].
 //!   A `Null` operand answers `Null`, and otherwise a `Missing` one answers
 //!   `Missing`, so a null test over the result stays unanswered.
@@ -33,6 +34,7 @@
 pub mod arithmetic;
 mod possible;
 pub mod refusal;
+mod temporal;
 
 use super::{
     bytecode::{ComparisonRef, FloatResult},

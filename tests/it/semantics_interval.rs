@@ -136,15 +136,12 @@ fn a_bound_interval_matches_by_span() {
     assert!(!reached("1 day"));
 }
 
-/// What the engine does not model over an interval is read from the database.
+/// Grouping by an interval, and comparing an integer with one, are read from
+/// the database.
 #[test]
-fn interval_arithmetic_and_grouping_are_reread() {
+fn interval_grouping_is_reread() {
     for statement in [
-        "SELECT * FROM shifts WHERE span + interval '1 hour' > '2 hours'",
-        "SELECT * FROM shifts WHERE span * 2 > '2 hours'",
         "SELECT span, COUNT(*) FROM shifts GROUP BY span",
-        "SELECT * FROM shifts WHERE -span > '1 hour'",
-        "SELECT * FROM shifts WHERE span > interval '1 hour' * 2",
         "SELECT * FROM shifts WHERE id = interval '1 hour'",
     ] {
         let registered = register::<Postgres>(DDL, statement);
@@ -163,4 +160,18 @@ fn engines_without_the_type_reread_interval_predicates() {
     assert!(served::<Postgres>(DDL, predicate));
     assert!(!served::<SQLite>(DDL, predicate));
     assert!(!served::<MySql>(DDL, predicate));
+}
+
+/// Interval arithmetic plans only where the engine has the type, so an
+/// engine without one reads the arithmetic from the database as well.
+#[test]
+fn engines_without_the_type_reread_interval_arithmetic() {
+    for predicate in [
+        "SELECT * FROM shifts WHERE span + interval '1 day' > '2 hours'",
+        "SELECT * FROM shifts WHERE span - interval '1 day' > '2 hours'",
+    ] {
+        assert!(served::<Postgres>(DDL, predicate));
+        assert!(!served::<SQLite>(DDL, predicate), "{predicate} is served");
+        assert!(!served::<MySql>(DDL, predicate), "{predicate} is served");
+    }
 }

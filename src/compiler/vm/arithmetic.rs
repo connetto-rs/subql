@@ -100,12 +100,13 @@ fn promoted(operation: ArithmeticOp, a: i64, b: i64) -> f64 {
     }
 }
 
-/// Add: same-scalar only, and an integer beside a float read as a float.
+/// Add: same-scalar only, an integer beside a float read as a float, and
+/// dates, times and intervals as [`super::temporal::add`] moves them.
 ///
 /// # Errors
 ///
-/// The backend's integer overflow, and [`EvaluationRefusal::OperandKinds`]
-/// for any other pair.
+/// The backend's integer overflow, a date or interval PostgreSQL raises on,
+/// and [`EvaluationRefusal::OperandKinds`] for any other pair.
 pub(crate) fn arithmetic_add<B: Backend>(
     a: Value<B>,
     b: Value<B>,
@@ -119,11 +120,7 @@ pub(crate) fn arithmetic_add<B: Backend>(
         (Value::Int(x), Value::Float(y)) => Value::Float(widened::<B>(&x, ArithmeticOp::Add)? + y),
         (Value::Float(x), Value::Int(y)) => Value::Float(x + widened::<B>(&y, ArithmeticOp::Add)?),
         (Value::Decimal(x), Value::Decimal(y)) => Value::Decimal(x + y),
-        _ => {
-            return Err(EvaluationRefusal::OperandKinds {
-                operation: ArithmeticOp::Add,
-            })
-        }
+        (a, b) => return super::temporal::add(a, b),
     })
 }
 
@@ -149,11 +146,7 @@ pub(crate) fn arithmetic_subtract<B: Backend>(
             Value::Float(x - widened::<B>(&y, ArithmeticOp::Subtract)?)
         }
         (Value::Decimal(x), Value::Decimal(y)) => Value::Decimal(x - y),
-        _ => {
-            return Err(EvaluationRefusal::OperandKinds {
-                operation: ArithmeticOp::Subtract,
-            })
-        }
+        (a, b) => return super::temporal::subtract(a, b),
     })
 }
 
@@ -179,11 +172,7 @@ pub(crate) fn arithmetic_multiply<B: Backend>(
             Value::Float(x * widened::<B>(&y, ArithmeticOp::Multiply)?)
         }
         (Value::Decimal(x), Value::Decimal(y)) => Value::Decimal(x * y),
-        _ => {
-            return Err(EvaluationRefusal::OperandKinds {
-                operation: ArithmeticOp::Multiply,
-            })
-        }
+        (a, b) => return super::temporal::multiply(a, b),
     })
 }
 
@@ -249,11 +238,7 @@ pub(crate) fn arithmetic_divide<B: Backend>(
             }
             Value::Decimal(B::decimal_quotient(x, y, quotient))
         }
-        _ => {
-            return Err(EvaluationRefusal::OperandKinds {
-                operation: ArithmeticOp::Divide,
-            })
-        }
+        (a, b) => return super::temporal::divide(a, b),
     })
 }
 
@@ -325,12 +310,12 @@ where
     }
 }
 
-/// Negate: a number only.
+/// Negate: a number or an interval.
 ///
 /// # Errors
 ///
-/// The backend's integer overflow, and [`EvaluationRefusal::OperandKinds`]
-/// for anything but a number.
+/// The backend's integer overflow, an interval field at its minimum, and
+/// [`EvaluationRefusal::OperandKinds`] for anything else.
 pub(crate) fn arithmetic_negate<B: Backend>(a: Value<B>) -> Result<Value<B>, EvaluationRefusal> {
     if a.is_absent() {
         return Ok(a);
@@ -339,11 +324,7 @@ pub(crate) fn arithmetic_negate<B: Backend>(a: Value<B>) -> Result<Value<B>, Eva
         Value::Int(x) => return B::integer_negate(x),
         Value::Float(x) => Value::Float(-x),
         Value::Decimal(x) => Value::Decimal(-x),
-        _ => {
-            return Err(EvaluationRefusal::OperandKinds {
-                operation: ArithmeticOp::Negate,
-            })
-        }
+        a => return super::temporal::negate(&a),
     })
 }
 

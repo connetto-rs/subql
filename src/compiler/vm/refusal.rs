@@ -64,6 +64,21 @@ pub enum EvaluationRefusal {
         /// The operation over the operands.
         operation: ArithmeticOp,
     },
+    /// A date, time or interval result leaves its type's range, or adds an
+    /// infinite interval to a time, and PostgreSQL raises `timestamp out of
+    /// range`, `interval out of range` or the time's own refusal.
+    DatetimeOutOfRange {
+        /// The operation whose result left the range.
+        operation: ArithmeticOp,
+    },
+    /// A timestamp result PostgreSQL holds that `chrono` does not carry, an
+    /// infinite one or one past the year 262142, is not computed. A null in
+    /// its place would answer `IS NOT NULL` false where PostgreSQL keeps the
+    /// row, so no answer is given.
+    DatetimeUnrepresentable {
+        /// The operation whose result could not be carried.
+        operation: ArithmeticOp,
+    },
 }
 
 /// What a backend answers when a divisor is zero.
