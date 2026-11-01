@@ -61,7 +61,9 @@ const UNKNOWN: [&str; 3] = [
 ];
 
 /// Each engine serves the tests it accepts over a condition or a boolean
-/// column, and SQLite routes `IS [NOT] UNKNOWN`, which it does not have.
+/// column. SQLite, which has no `IS [NOT] UNKNOWN`, routes it over a
+/// condition and refuses it over a column, where `UNKNOWN` names a column the
+/// table does not have.
 #[test]
 fn each_engine_serves_the_truth_tests_it_accepts() {
     for predicate in EVERYWHERE.iter().chain(&UNKNOWN) {
@@ -83,12 +85,25 @@ fn each_engine_serves_the_truth_tests_it_accepts() {
             "SQLite serves {predicate}"
         );
     }
-    for predicate in UNKNOWN {
+    for predicate in &UNKNOWN[..2] {
         assert!(
             not_served::<SQLite, _>(SQLiteDialect {}, predicate).is_some(),
             "SQLite routes {predicate}"
         );
     }
+    let database = ParserDB::parse::<SQLiteDialect>(DDL).unwrap();
+    let mut engine: SubscriptionEngine<TestEvent<SQLite>, DefaultIds, ParserDB> =
+        SubscriptionEngine::new(database, SQLiteDialect {});
+    let error = engine
+        .register(SubscriptionRequest::new(
+            7u64,
+            format!("SELECT * FROM t WHERE {}", UNKNOWN[2]),
+        ))
+        .expect_err("SQLite reads UNKNOWN as a column");
+    assert!(
+        matches!(&error, subql::RegisterError::UnknownColumn { column, .. } if column == "UNKNOWN"),
+        "{error:?}"
+    );
 }
 
 /// SQLite keeps a boolean column as the integer stored in it, and reads any
