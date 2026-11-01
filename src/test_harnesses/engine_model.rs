@@ -1111,14 +1111,15 @@ pub fn engine_model_sqlite(data: &[u8]) -> EngineModelCoverage {
 mod tests {
     use super::{Cell, NumericValue};
 
-    /// The SQLite model has no interval answer, so one reads as NULL.
+    /// The SQLite model has no interval answer, so one reads as NULL while a
+    /// number keeps its value.
     #[test]
     fn an_interval_answer_reads_as_null() {
-        assert!(matches!(
-            Cell::of_numeric(Some(&NumericValue::Interval(
-                crate::backend::Interval::parse("1 mon").expect("a month parses")
-            ))),
-            Cell::Null,
-        ));
+        let interval = NumericValue::Interval(
+            crate::backend::Interval::parse("1 mon").expect("a month parses"),
+        );
+        for (answer, null) in [(interval, true), (NumericValue::Integer(1), false)] {
+            assert_eq!(matches!(Cell::of_numeric(Some(&answer)), Cell::Null), null);
+        }
     }
 }

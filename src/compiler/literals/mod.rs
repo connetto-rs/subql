@@ -426,18 +426,27 @@ mod tests {
     /// is refused, whatever shape the parser hands over.
     #[test]
     fn a_precision_without_seconds_is_refused() {
-        let interval = sqlparser::ast::Interval {
+        let interval = |field| sqlparser::ast::Interval {
             value: alloc::boxed::Box::new(sqlparser::ast::Expr::value(
                 SqlValue::SingleQuotedString("1".into()),
             )),
-            leading_field: Some(sqlparser::ast::DateTimeField::Day),
+            leading_field: Some(field),
             leading_precision: None,
             last_field: None,
             fractional_seconds_precision: Some(3),
         };
-        assert!(matches!(
-            super::interval_literal(&interval),
-            Err(RegisterError::TypeError(_))
-        ));
+        for (field, refused) in [
+            (sqlparser::ast::DateTimeField::Day, true),
+            (sqlparser::ast::DateTimeField::Second, false),
+        ] {
+            assert_eq!(
+                matches!(
+                    super::interval_literal(&interval(field.clone())),
+                    Err(RegisterError::TypeError(_))
+                ),
+                refused,
+                "{field:?}"
+            );
+        }
     }
 }
