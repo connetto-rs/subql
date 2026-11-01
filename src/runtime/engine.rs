@@ -2993,9 +2993,8 @@ where
                 }),
             }
         }
-        // The shards already brought these back as maintained answers. What
-        // is rebuilt here is only the statement each falls back to reading,
-        // which the shards do not hold.
+        // The shards hold the bindings but not the statement or the
+        // aggregate state a maintained answer folds into, so both are rebuilt here.
         for entry in payload.in_process {
             // The shards decide what is live. A statement whose
             // subscription they did not bring back belongs to one ended
@@ -3014,10 +3013,20 @@ where
             )
             .binds(entry.source_query.binds().to_vec())
             .scope(entry.scope);
-            let aggregate_bootstrap = self
-                .compile_spec(spec, false)
-                .ok()
-                .and_then(|c| c.bootstrap);
+            // Planning again reopens the aggregate the shards still route events to.
+            let mut compiled = self.compile_spec(spec, false).ok();
+            let aggregate_bootstrap = compiled
+                .as_mut()
+                .and_then(|c| core::mem::take(&mut c.bootstrap));
+            if let Some(compiled) = &compiled {
+                self.open_aggregate_total(
+                    entry.subscription_id,
+                    &compiled.spec,
+                    compiled.table_id,
+                    &compiled.projection,
+                    false,
+                );
+            }
             report.in_process.push(crate::RestoredInProcess {
                 subscription_id: entry.subscription_id,
                 source_query: entry.source_query.clone(),
