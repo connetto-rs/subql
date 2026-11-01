@@ -618,6 +618,7 @@ where
             row_deltas,
             triggers,
             transitions,
+            stopped,
         } = self.inner.reread_notifications(event)?;
         // Debug-time only. The invariant is the core's and is enforced
         // there by `the_core_delivers_no_read_answers`.
@@ -626,6 +627,10 @@ where
             "the core has no connector, so it cannot deliver read answers"
         );
         self.apply_transitions(&transitions);
+        // The stopped subscriptions are unregistered in the core and queue no
+        // read of this event, so their stored state goes before the event's
+        // own reads land.
+        self.purge_stopped(&stopped);
         let mut debounced = 0usize;
         for trigger in triggers {
             if !self.enqueue_read(trigger) {
@@ -638,6 +643,7 @@ where
             aggregate_updates,
             scalar_updates,
             transitions,
+            stopped,
             outstanding: self.pending_read_count(),
             debounced,
         })
@@ -826,6 +832,21 @@ where
             .retain(|trigger| contexts.contains_key(&trigger.subscription_id));
         self.deferred_reads
             .retain(|trigger| contexts.contains_key(&trigger.subscription_id));
+    }
+
+    /// Drop the stored state of every subscription the engine stopped on an
+    /// event, its resolve context and every read it had queued. The core
+    /// unregistered them, so a context or read that outlived the
+    /// subscription would send the next `resolve` to look up state that is
+    /// gone.
+    fn purge_stopped(&mut self, stopped: &[crate::StoppedSubscription<I>]) {
+        for stop in stopped {
+            self.contexts.remove(&stop.subscription_id);
+            self.pending_reads
+                .retain(|trigger| trigger.subscription_id != stop.subscription_id);
+            self.deferred_reads
+                .retain(|trigger| trigger.subscription_id != stop.subscription_id);
+        }
     }
 
     /// Unregister a session and drop every stored auth context and queued

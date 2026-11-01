@@ -23,8 +23,9 @@ pub use trait_definitions::{
     AggValue, AggregateDispatch, AggregateMaintenanceOutput, AggregateResultValue,
     AggregateValueChange, AggregateValueUpdate, AsyncSubscriptionDispatch, ConsumerNotifications,
     ConsumerNotificationsIter, DispatchOutput, EvaluationFailure, GroupIdentity,
-    MaintenanceStopReason, MaintenanceTransition, NumericValue, SubscriptionDispatch,
-    SubscriptionRegistration, SubscriptionUnregistration, TermNarrowing, UnansweredCell,
+    MaintenanceStopReason, MaintenanceTransition, NumericValue, StoppedSubscription,
+    SubscriptionDispatch, SubscriptionRegistration, SubscriptionUnregistration, TermNarrowing,
+    UnansweredCell,
 };
 #[cfg(feature = "std")]
 pub use trait_definitions::{DurableShardMerge, DurableShardStore};

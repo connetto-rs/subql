@@ -2274,6 +2274,7 @@ where
             triggers: alloc::vec![trigger],
             transitions: alloc::vec![transition],
             evaluation_failures: Vec::new(),
+            stopped: Vec::new(),
         })
     }
 
@@ -2340,8 +2341,10 @@ where
 
     /// Feed `event` to every re-read answer whose table it touches.
     ///
-    /// Returns the answers that moved in process, and the reads that have to
-    /// happen because nothing in process could decide them.
+    /// Returns the answers that moved in process, the reads that have to
+    /// happen because nothing in process could decide them, and the
+    /// subscriptions whose maintenance failed the event deterministically
+    /// and were stopped, each with the error that stopped it.
     #[allow(
         clippy::type_complexity,
         clippy::too_many_lines,
@@ -2356,6 +2359,7 @@ where
             Vec<crate::reexec::ScalarUpdate<I, E::Backend, E::Checkpoint>>,
             Vec<crate::reexec::ReExecutionTrigger<I, E::Checkpoint, E::Backend>>,
             Vec<crate::MaintenanceTransition<E::Backend>>,
+            Vec<crate::StoppedSubscription<I>>,
         ),
         DispatchError,
     > {
@@ -2364,7 +2368,7 @@ where
         let table_id = event.table_id();
         let subscription_ids: Vec<SubscriptionId> = match self.table_deps.get(&table_id) {
             Some(ids) => ids.iter().copied().collect(),
-            None => return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new())),
+            None => return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())),
         };
         let pending_cap = self.max_changes_during_aggregate_read;
         let group_limit = self.max_groups_per_aggregate;
@@ -2381,6 +2385,7 @@ where
         let mut triggers = Vec::new();
         let mut keyless = Vec::new();
         let mut grouped_stops = Vec::new();
+        let mut stopped = Vec::new();
         let mut transitions = Vec::new();
         let mut wants_fence = None;
         for subscription_id in subscription_ids {
@@ -2401,17 +2406,28 @@ where
             let consumer_id = entry.consumer_id;
             let checkpoint = event.checkpoint();
             if let QueryRuntime::Grouped(query) = &mut entry.runtime {
-                let grouped = query
-                    .on_event(event, vm, database, pending_cap, group_limit, latest_fence)
-                    .map_err(|error| match error {
-                        DispatchError::TierTransition { message, .. } => {
-                            DispatchError::TierTransition {
-                                subscription: subscription_id,
-                                message,
-                            }
-                        }
-                        error => error,
-                    })?;
+                let grouped = match query.on_event(
+                    subscription_id,
+                    event,
+                    vm,
+                    database,
+                    pending_cap,
+                    group_limit,
+                    latest_fence,
+                ) {
+                    Ok(grouped) => grouped,
+                    // A decode failure or a re-read rebuild failure is
+                    // deterministic for this subscription, so stop it and
+                    // report it, and dispatch the event to the rest as usual.
+                    Err(error) => {
+                        stopped.push(crate::StoppedSubscription {
+                            subscription_id,
+                            consumer_id,
+                            error,
+                        });
+                        continue;
+                    }
+                };
                 let reason = if grouped.missing_group {
                     Some(crate::MaintenanceStopReason::MissingOldRow { table_id })
                 } else if grouped.group_limit {
@@ -2507,7 +2523,17 @@ where
             transitions.push(transition);
             triggers.push(trigger);
         }
-        Ok((aggregate_updates, scalar_updates, triggers, transitions))
+        // The replacement tier would fail the same event again, so a stop ends the subscription.
+        for stop in &stopped {
+            self.unregister_subscription(stop.subscription_id);
+        }
+        Ok((
+            aggregate_updates,
+            scalar_updates,
+            triggers,
+            transitions,
+            stopped,
+        ))
     }
 
     /// Dispatch one event into the compatibility output used by the connector
@@ -2526,6 +2552,7 @@ where
             scalar_updates,
             triggers,
             transitions,
+            stopped,
         } = self.dispatch_resolved(&event, false)?;
         Ok(crate::reexec::ReExecNotifications {
             engine: notifications,
@@ -2535,13 +2562,15 @@ where
             row_deltas: Vec::new(),
             triggers,
             transitions,
+            stopped,
         })
     }
 
     /// One resolved event's row notifications, aggregate folds, scalar
-    /// updates, reads and tier changes, as `dispatch` and
-    /// `reread_notifications` both report them. `bootstrap_unseeded` adds a
-    /// read for every aggregate still waiting for its seed.
+    /// updates, reads, tier changes and stopped subscriptions, as
+    /// `dispatch` and `reread_notifications` both report them.
+    /// `bootstrap_unseeded` adds a read for every aggregate still waiting
+    /// for its seed.
     fn dispatch_resolved(
         &mut self,
         event: &crate::backend::ResolvedEvent<'_, E>,
@@ -2563,8 +2592,12 @@ where
             &aggregate.evaluation_failures,
             &mut notifications,
         );
-        let (grouped_updates, scalar_updates, mut triggers, mut transitions) =
+        let (grouped_updates, scalar_updates, mut triggers, mut transitions, mut stopped) =
             self.maintain_resolved(event)?;
+        // Row, fold and maintain stops report in subscription-id order.
+        stopped.extend(core::mem::take(&mut notifications.stopped));
+        stopped.extend(aggregate.stopped);
+        stopped.sort_by_key(|entry| entry.subscription_id);
         aggregate.updates.extend(grouped_updates);
         triggers.extend(aggregate.triggers);
         if bootstrap_unseeded {
@@ -2585,6 +2618,7 @@ where
             scalar_updates,
             triggers,
             transitions,
+            stopped,
         ))
     }
 
@@ -4243,7 +4277,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`DispatchError`] for an unknown table or a cell or predicate evaluation error.
+    /// Returns [`DispatchError`] for an unknown table id. A cell or predicate
+    /// failure is reported in
+    /// [`ConsumerNotifications::stopped`](crate::ConsumerNotifications::stopped)
+    /// and not returned.
     pub fn match_rows(
         &mut self,
         event: &E,
@@ -4258,6 +4295,10 @@ where
     ) -> Result<crate::ConsumerNotifications<I, E::Checkpoint, E::Backend>, DispatchError> {
         let table_id = event.table_id();
         let notifs = self.row_consumers(event, self.eviction_strategy.needs_activity_tracking())?;
+        // The replacement tier would fail the same event again, so a stop ends the subscription.
+        for stop in &notifs.stopped {
+            self.unregister_subscription(stop.subscription_id);
+        }
         // After the row dispatch rather than before it. A table can be both the
         // one a subscription reads and the one carrying its memberships, and then
         // both row versions are judged against the set as it stood when the event
@@ -4300,18 +4341,18 @@ where
                 &mut self.vm,
                 arity,
                 &self.database,
-            )?;
+            );
             self.stamp_activity(&stamps);
             Ok(notifs)
         } else {
-            dispatch_consumers(
+            Ok(dispatch_consumers(
                 event,
                 partition,
                 consumer_dict,
                 &mut self.vm,
                 arity,
                 &self.database,
-            )
+            ))
         }
     }
 

@@ -352,6 +352,11 @@ pub struct ConsumerNotifications<
     /// not `Value::Null`, and a caller holding a connector can re-execute
     /// the subscription to get the answer the stream could not give.
     pub(crate) unanswered: Vec<UnansweredCell<I>>,
+    /// Subscriptions whose predicate or projection failed this event
+    /// deterministically and that the engine ended, each with the failure
+    /// that stopped it. They receive no further events, so a caller can
+    /// refuse the subscription and tell its client what stopped it.
+    pub(crate) stopped: Vec<StoppedSubscription<I>>,
 }
 
 /// One subscription's predicate that read a cell the change stream did not
@@ -430,6 +435,7 @@ impl<I: IdTypes, C: Checkpoint, B: Backend> ConsumerNotifications<I, C, B> {
             narrowings: Vec::new(),
             evaluation_failures: Vec::new(),
             unanswered: Vec::new(),
+            stopped: Vec::new(),
         }
     }
 
@@ -489,10 +495,25 @@ impl<I: IdTypes, C: Checkpoint, B: Backend> ConsumerNotifications<I, C, B> {
         &self.unanswered
     }
 
+    /// The subscriptions this event stopped deterministically, each with
+    /// the failure that stopped it. Empty for every event every predicate
+    /// answered.
+    #[must_use]
+    pub fn stopped(&self) -> &[StoppedSubscription<I>] {
+        &self.stopped
+    }
+
     /// Attach the unanswerable subscriptions one event produced.
     #[must_use]
     pub(crate) fn with_unanswered(mut self, unanswered: Vec<UnansweredCell<I>>) -> Self {
         self.unanswered = unanswered;
+        self
+    }
+
+    /// Attach the subscriptions one event stopped.
+    #[must_use]
+    pub(crate) fn with_stopped(mut self, stopped: Vec<StoppedSubscription<I>>) -> Self {
+        self.stopped = stopped;
         self
     }
 
@@ -543,6 +564,16 @@ impl<I: IdTypes, C: Checkpoint, B: Backend> core::fmt::Debug for ConsumerNotific
                     .unanswered
                     .iter()
                     .map(|entry| (entry.subscription_id, entry.column))
+                    .collect::<Vec<_>>(),
+            )
+            // `I::ConsumerId` carries no `Debug`, so the ids and causes are
+            // what this can show. The consumer is read through the accessor.
+            .field(
+                "stopped",
+                &self
+                    .stopped
+                    .iter()
+                    .map(|entry| (entry.subscription_id, &entry.error))
                     .collect::<Vec<_>>(),
             )
             .finish()
@@ -699,8 +730,30 @@ pub struct MaintenanceTransition<B: Backend = crate::backend::Postgres> {
     pub reason: MaintenanceStopReason,
 }
 
+/// One subscription the engine ended because its own predicate or
+/// maintenance failed one event deterministically.
+///
+/// The engine unregistered the subscription when it failed, so it receives no
+/// further events, and an engine that owns the read queue has purged the
+/// reads the subscription had queued. A tier change reported through
+/// [`MaintenanceTransition`] keeps the subscription alive, while one
+/// reported here does not.
+#[derive(Clone, Debug)]
+pub struct StoppedSubscription<I: IdTypes> {
+    /// The subscription the engine stopped.
+    pub subscription_id: SubscriptionId,
+    /// The consumer that registered it.
+    pub consumer_id: I::ConsumerId,
+    /// The failure that stopped its maintenance on the event.
+    pub error: crate::DispatchError,
+}
+
 /// Aggregate processing result from either an event or seed installation.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// There is no derived `PartialEq`, because a stopped entry carries a
+/// `DispatchError`, which is not comparable, and deriving would require
+/// `I: PartialEq`, which `IdTypes` does not imply.
+#[derive(Clone, Debug)]
 pub struct AggregateMaintenanceOutput<
     I: IdTypes,
     B: Backend = crate::backend::Postgres,
@@ -723,6 +776,10 @@ pub struct AggregateMaintenanceOutput<
         crate::SubscriptionId,
         crate::compiler::vm::refusal::EvaluationRefusal,
     )>,
+    /// Subscriptions this event stopped deterministically and ended, each
+    /// with the failure that stopped it. Unlike a tier change, no
+    /// replacement tier serves them, and they receive no further events.
+    pub stopped: Vec<StoppedSubscription<I>>,
 }
 
 impl<I: IdTypes, B: Backend, C: Checkpoint> AggregateMaintenanceOutput<I, B, C> {
@@ -732,6 +789,7 @@ impl<I: IdTypes, B: Backend, C: Checkpoint> AggregateMaintenanceOutput<I, B, C> 
             triggers: Vec::new(),
             transitions: Vec::new(),
             evaluation_failures: Vec::new(),
+            stopped: Vec::new(),
         }
     }
 }
@@ -778,6 +836,7 @@ pub struct DispatchOutput<
     pub(crate) scalar_updates: Vec<crate::reexec::ScalarUpdate<I, B, C>>,
     pub(crate) triggers: Vec<crate::reexec::ReExecutionTrigger<I, C, B>>,
     pub(crate) transitions: Vec<MaintenanceTransition<B>>,
+    pub(crate) stopped: Vec<StoppedSubscription<I>>,
 }
 
 impl<I: IdTypes, C: Checkpoint, B: Backend> DispatchOutput<I, C, B> {
@@ -787,6 +846,7 @@ impl<I: IdTypes, C: Checkpoint, B: Backend> DispatchOutput<I, C, B> {
         scalar_updates: Vec<crate::reexec::ScalarUpdate<I, B, C>>,
         triggers: Vec<crate::reexec::ReExecutionTrigger<I, C, B>>,
         transitions: Vec<MaintenanceTransition<B>>,
+        stopped: Vec<StoppedSubscription<I>>,
     ) -> Self {
         Self {
             notifications,
@@ -794,6 +854,7 @@ impl<I: IdTypes, C: Checkpoint, B: Backend> DispatchOutput<I, C, B> {
             scalar_updates,
             triggers,
             transitions,
+            stopped,
         }
     }
 
@@ -830,6 +891,17 @@ impl<I: IdTypes, C: Checkpoint, B: Backend> DispatchOutput<I, C, B> {
         &self.transitions
     }
 
+    /// Subscriptions the engine stopped because their maintenance failed
+    /// deterministically on this event, with the failure that stopped each.
+    ///
+    /// A stopped subscription receives no further events and holds no queued
+    /// read any more, so the failure is its final report. A caller that
+    /// re-dispatches the same event gets no second one.
+    #[must_use]
+    pub fn stopped(&self) -> &[StoppedSubscription<I>] {
+        &self.stopped
+    }
+
     /// Every consumer whose client-visible data moved, sorted and deduplicated.
     #[must_use]
     pub fn notified(&self) -> Vec<I::ConsumerId> {
@@ -843,6 +915,7 @@ impl<I: IdTypes, C: Checkpoint, B: Backend> DispatchOutput<I, C, B> {
             .collect();
         ids.extend(self.aggregate_updates.iter().map(|u| u.consumer));
         ids.extend(self.scalar_updates.iter().map(|u| u.consumer_id));
+        ids.extend(self.stopped.iter().map(|stop| stop.consumer_id));
         ids.sort_unstable();
         ids.dedup();
         ids
@@ -855,6 +928,7 @@ impl<I: IdTypes, C: Checkpoint, B: Backend> DispatchOutput<I, C, B> {
             && self.scalar_updates.is_empty()
             && self.triggers.is_empty()
             && self.transitions.is_empty()
+            && self.stopped.is_empty()
             && self.notifications.inserted().is_empty()
             && self.notifications.updated().is_empty()
             && self.notifications.deleted().is_empty()

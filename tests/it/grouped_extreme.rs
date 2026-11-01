@@ -3,29 +3,22 @@
 
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect};
-use subql::backend::{MySql, Postgres, SQLite, ScalarFamily, Value};
+use subql::backend::{MySql, Postgres, RowKind, SQLite, ScalarFamily, Value};
 use subql::reexec::ReExecutionRead;
 use subql::testing::TestEvent;
 use subql::{
-    catalog_helpers, AggregateResultValue, AggregateValueChange, DefaultIds, GroupedScalarInstall,
-    GroupedScalarSeedInstall, Install, MaintenanceStopReason, PgLsn, SubscriptionEngine,
-    SubscriptionRequest, TableId, Tier, TierKind,
+    catalog_helpers, AggregateResultValue, AggregateValueChange, DefaultIds, DispatchError,
+    GroupedScalarInstall, GroupedScalarSeedInstall, Install, MaintenanceStopReason, PgLsn,
+    ScalarInstall, SubscriptionEngine, SubscriptionRequest, Tier, TierKind, ValueError,
 };
+
+use crate::common::altered_cell::AlteredCell;
+use crate::common::postgres_engine;
 
 const DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, region TEXT, amount INT, status TEXT);";
 
 type Event = TestEvent<Postgres, PgLsn>;
 type Engine = SubscriptionEngine<Event, DefaultIds, ParserDB>;
-
-fn engine() -> (Engine, TableId) {
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
-    let table =
-        catalog_helpers::table_id::<Postgres, _>(&catalog, "orders").expect("orders resolves");
-    (
-        SubscriptionEngine::new(catalog, PostgreSqlDialect {}),
-        table,
-    )
-}
 
 fn row(id: i64, region: Value<Postgres>, amount: Value<Postgres>) -> Vec<Value<Postgres>> {
     vec![Value::Int(id), region, amount, Value::String("paid".into())]
@@ -70,7 +63,7 @@ const fn scalar(value: Value<Postgres>) -> AggregateValueChange<Postgres> {
 
 #[test]
 fn registration_exposes_a_grouped_seed_with_extreme_and_row_count() {
-    let (mut engine, _) = engine();
+    let (mut engine, _) = postgres_engine(DDL);
     let (_, bootstrap) = register(&mut engine, "MIN");
 
     assert_eq!(bootstrap.group_columns, 1);
@@ -84,7 +77,7 @@ fn registration_exposes_a_grouped_seed_with_extreme_and_row_count() {
 
 #[test]
 fn insert_folds_delete_requeries_only_the_displaced_group() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     let opening = seed(
         &mut engine,
@@ -156,7 +149,7 @@ fn insert_folds_delete_requeries_only_the_displaced_group() {
 
 #[test]
 fn registration_binds_precede_group_scope_binds() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let registered = engine
         .register(
             SubscriptionRequest::new(
@@ -425,7 +418,7 @@ fn positional_registration_binds_skip_null_group_values_sqlite() {
 
 #[test]
 fn the_last_row_removes_the_group_without_a_read() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MAX");
     let opening = seed(
         &mut engine,
@@ -453,7 +446,7 @@ fn the_last_row_removes_the_group_without_a_read() {
 
 #[test]
 fn null_group_values_use_is_null_in_the_scoped_read() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     let opening = seed(
         &mut engine,
@@ -479,7 +472,7 @@ fn null_group_values_use_is_null_in_the_scoped_read() {
 
 #[test]
 fn an_extreme_removed_during_the_seed_read_requests_its_group_after_install() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     let event = Event::delete(orders, text_row(1, "north", 2))
         .with_pk_columns([0u16])
@@ -507,7 +500,7 @@ fn an_extreme_removed_during_the_seed_read_requests_its_group_after_install() {
 
 #[test]
 fn a_change_the_seed_read_already_saw_is_not_replayed() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     let event = Event::delete(orders, text_row(1, "north", 2))
         .with_pk_columns([0u16])
@@ -535,7 +528,7 @@ fn a_change_the_seed_read_already_saw_is_not_replayed() {
 
 #[test]
 fn an_unreadable_old_group_transitions_under_the_same_identity() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     seed(
         &mut engine,
@@ -568,7 +561,7 @@ fn an_unreadable_old_group_transitions_under_the_same_identity() {
 }
 #[test]
 fn a_readable_group_recovers_a_missing_old_extreme_with_one_group_read() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     seed(
         &mut engine,
@@ -626,7 +619,7 @@ fn a_readable_group_recovers_a_missing_old_extreme_with_one_group_read() {
 
 #[test]
 fn an_installed_group_replaces_the_extreme() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     seed(
         &mut engine,
@@ -670,7 +663,7 @@ fn an_installed_group_replaces_the_extreme() {
 
 #[test]
 fn an_installed_group_replaces_the_source_row_count() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     seed(
         &mut engine,
@@ -715,7 +708,7 @@ fn an_installed_group_replaces_the_source_row_count() {
 
 #[test]
 fn moving_an_extreme_requeries_the_old_group_and_folds_the_new_group() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     let opening = seed(
         &mut engine,
@@ -754,7 +747,7 @@ fn moving_an_extreme_requeries_the_old_group_and_folds_the_new_group() {
 
 #[test]
 fn one_update_displacing_two_groups_keeps_both_reads() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     seed(
         &mut engine,
@@ -793,7 +786,7 @@ fn one_update_displacing_two_groups_keeps_both_reads() {
 
 #[test]
 fn removing_one_tied_extreme_conservatively_rereads_its_group() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let (subscription, _) = register(&mut engine, "MIN");
     seed(
         &mut engine,
@@ -817,7 +810,7 @@ fn removing_one_tied_extreme_conservatively_rereads_its_group() {
 /// it does not fail installation and it does not half-install groups.
 #[test]
 fn seeding_more_groups_than_the_limit_stops_the_seed_read() {
-    let (engine, _) = engine();
+    let (engine, _) = postgres_engine(DDL);
     let mut engine = engine.with_max_groups_per_aggregate(1);
     let (subscription, _) = register(&mut engine, "MIN");
 
@@ -849,7 +842,7 @@ fn seeding_more_groups_than_the_limit_stops_the_seed_read() {
 
 #[test]
 fn a_new_group_past_the_limit_transitions_under_the_same_identity() {
-    let (engine, orders) = engine();
+    let (engine, orders) = postgres_engine(DDL);
     let mut engine = engine.with_max_groups_per_aggregate(1);
     let (subscription, _) = register(&mut engine, "MIN");
     seed(
@@ -877,7 +870,7 @@ fn a_new_group_past_the_limit_transitions_under_the_same_identity() {
 
 #[test]
 fn grouped_max_preserves_a_text_extreme() {
-    let (mut engine, orders) = engine();
+    let (mut engine, orders) = postgres_engine(DDL);
     let registered = engine
         .register(SubscriptionRequest::new(
             9u64,
@@ -1002,7 +995,7 @@ mod having_on_grouped_extreme {
 
     #[test]
     fn a_having_extreme_registers_and_strips_the_clause() {
-        let (mut engine, _) = engine();
+        let (mut engine, _) = postgres_engine(DDL);
         let (_, bootstrap) = register_having(
             &mut engine,
             "SELECT region, MIN(amount) FROM orders GROUP BY region HAVING MIN(amount) < 5",
@@ -1016,7 +1009,7 @@ mod having_on_grouped_extreme {
 
     #[test]
     fn a_sibling_having_on_an_extreme_rides_the_capture() {
-        let (mut engine, _) = engine();
+        let (mut engine, _) = postgres_engine::<Event>(DDL);
         let registered = engine
             .register(SubscriptionRequest::new(
                 7u64,
@@ -1032,7 +1025,7 @@ mod having_on_grouped_extreme {
 
     #[test]
     fn an_extreme_crossing_on_a_fold_emits_entering() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_having(
             &mut engine,
             "SELECT region, MIN(amount) FROM orders GROUP BY region HAVING MIN(amount) < 5",
@@ -1058,7 +1051,7 @@ mod having_on_grouped_extreme {
 
     #[test]
     fn an_extreme_crossing_out_on_a_scoped_read_install_emits_remove() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_having(
             &mut engine,
             "SELECT region, MIN(amount) FROM orders GROUP BY region HAVING MIN(amount) < 5",
@@ -1109,7 +1102,7 @@ mod having_on_grouped_extreme {
 
     #[test]
     fn a_row_count_having_announces_without_an_extreme_change() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_having(
             &mut engine,
             "SELECT region, MAX(amount) FROM orders GROUP BY region HAVING COUNT(*) > 1",
@@ -1139,7 +1132,7 @@ mod having_on_grouped_extreme {
 
     #[test]
     fn a_hidden_extreme_group_that_empties_stays_silent() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_having(
             &mut engine,
             "SELECT region, MIN(amount) FROM orders GROUP BY region HAVING MIN(amount) < 5",
@@ -1168,7 +1161,7 @@ mod having_on_grouped_extreme {
     /// opening pass speaks for the final state, never on top of the replay.
     #[test]
     fn a_group_inserted_during_the_seed_window_is_announced_once() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register(&mut engine, "MIN");
         let event = Event::insert(orders, text_row(1, "south", 4))
             .with_pk_columns([0u16])
@@ -1212,7 +1205,7 @@ mod having_on_grouped_extreme {
     /// engine's private row count.
     #[test]
     fn a_confirming_reread_stays_silent() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register(&mut engine, "MIN");
         seed(
             &mut engine,
@@ -1252,7 +1245,7 @@ mod having_on_grouped_extreme {
     /// `HAVING` was never delivered, so its disappearance announces nothing.
     #[test]
     fn truncate_removes_only_announced_groups() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_having(
             &mut engine,
             "SELECT region, MIN(amount) FROM orders GROUP BY region HAVING MIN(amount) < 5",
@@ -1282,4 +1275,624 @@ mod having_on_grouped_extreme {
         );
         assert!(output.triggers().is_empty());
     }
+}
+
+type AlteredEvent = AlteredCell<Event>;
+
+#[test]
+fn an_undecodable_group_column_stops_only_its_subscription() {
+    let (mut engine, orders) = postgres_engine::<AlteredEvent>(DDL);
+    // A grouped extreme seeded over its regions.
+    let sql = "SELECT region, MIN(amount) FROM orders WHERE status = 'paid' GROUP BY region";
+    let registered = engine
+        .register(SubscriptionRequest::new(7u64, sql))
+        .expect("the grouped extreme registers");
+    assert!(
+        matches!(registered.tier, Tier::GroupedScalar { .. }),
+        "expected the grouped scalar tier, got {:?}",
+        registered.tier
+    );
+    let grouped = registered.subscription_id;
+    Install::install(
+        &mut engine,
+        grouped,
+        GroupedScalarSeedInstall {
+            rows: vec![vec![
+                Value::String("north".into()),
+                Value::Int(5),
+                Value::Int(2),
+            ]],
+            fence: Some(PgLsn(5)),
+        },
+    )
+    .expect("the group seed installs");
+    // A sibling extreme on the same table that never reads the group column.
+    let sibling = engine
+        .register(SubscriptionRequest::new(
+            8u64,
+            "SELECT MIN(amount) FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sibling registers")
+        .subscription_id;
+    Install::install(
+        &mut engine,
+        sibling,
+        ScalarInstall {
+            value: Value::Int(4),
+            checkpoint: None,
+            fence: None,
+        },
+    )
+    .expect("the sibling seeds");
+
+    // One event whose new region cell no longer decodes as the declared text.
+    let event = AlteredCell::new(
+        Event::insert(orders, row(9, Value::String("south".into()), Value::Int(3)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(11)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        true,
+    );
+    let output = engine
+        .dispatch(&event)
+        .expect("the dispatch isolates the failing subscription");
+
+    // The sibling folded the event.
+    assert_eq!(output.scalar_updates().len(), 1);
+    assert_eq!(output.scalar_updates()[0].subscription_id, sibling);
+    assert_eq!(output.scalar_updates()[0].consumer_id, 8);
+    assert_eq!(output.scalar_updates()[0].value, Value::Int(3));
+    // The grouped one is reported with its id, its consumer and the decode
+    // failure, and nothing else of it moved or read.
+    assert_eq!(output.stopped().len(), 1);
+    assert_eq!(output.stopped()[0].subscription_id, grouped);
+    assert_eq!(output.stopped()[0].consumer_id, 7);
+    assert!(matches!(
+        output.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    assert!(output.aggregate_updates().is_empty());
+    assert!(output.triggers().is_empty());
+    assert_eq!(output.transitions(), []);
+    // The engine ended the subscription, so a second unregistration finds
+    // nothing.
+    assert!(!engine.unregister_subscription(grouped));
+
+    // A second event carries the changed column too and reaches only the
+    // sibling.
+    let second = AlteredCell::new(
+        Event::insert(orders, row(10, Value::String("east".into()), Value::Int(2)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(12)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        true,
+    );
+    let second_output = engine
+        .dispatch(&second)
+        .expect("the second event dispatches");
+    assert!(second_output.stopped().is_empty());
+    assert_eq!(second_output.scalar_updates().len(), 1);
+    assert_eq!(second_output.scalar_updates()[0].subscription_id, sibling);
+    assert_eq!(second_output.scalar_updates()[0].value, Value::Int(2));
+}
+
+#[test]
+fn an_undecodable_group_column_stops_only_its_count_subscription() {
+    let (mut engine, orders) = postgres_engine::<AlteredEvent>(DDL);
+    // A grouped count rides the fold tier, where the group key is decoded per event.
+    let registered = engine
+        .register(SubscriptionRequest::new(
+            7u64,
+            "SELECT region, COUNT(*) FROM orders WHERE status = 'paid' GROUP BY region",
+        ))
+        .expect("the grouped count registers");
+    assert!(
+        matches!(registered.tier, Tier::InProcess(_)),
+        "expected the in-process fold tier, got {:?}",
+        registered.tier
+    );
+    let count = registered.subscription_id;
+    let sibling = engine
+        .register(SubscriptionRequest::new(
+            8u64,
+            "SELECT MIN(amount) FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sibling registers")
+        .subscription_id;
+    Install::install(
+        &mut engine,
+        sibling,
+        ScalarInstall {
+            value: Value::Int(4),
+            checkpoint: None,
+            fence: None,
+        },
+    )
+    .expect("the sibling seeds");
+
+    // The event folds cleanly. Nothing reads the region cell but the group key.
+    let event = AlteredCell::new(
+        Event::insert(orders, row(9, Value::String("south".into()), Value::Int(3)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(11)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        false,
+    );
+    let output = engine.dispatch(&event).expect("the event dispatches");
+    assert!(output.stopped().is_empty());
+    assert_eq!(output.scalar_updates().len(), 1);
+    assert_eq!(output.scalar_updates()[0].subscription_id, sibling);
+    assert_eq!(output.scalar_updates()[0].consumer_id, 8);
+    assert_eq!(output.scalar_updates()[0].value, Value::Int(3));
+
+    // The column's type changes under the stream, so the group key no longer decodes.
+    let altered = AlteredCell::new(
+        Event::insert(orders, row(10, Value::String("east".into()), Value::Int(2)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(12)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        true,
+    );
+    let second = engine
+        .dispatch(&altered)
+        .expect("the altered event dispatches");
+    assert_eq!(second.stopped().len(), 1);
+    assert_eq!(second.stopped()[0].subscription_id, count);
+    assert_eq!(second.stopped()[0].consumer_id, 7);
+    assert!(matches!(
+        second.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    assert_eq!(second.scalar_updates().len(), 1);
+    assert_eq!(second.scalar_updates()[0].subscription_id, sibling);
+    assert_eq!(second.scalar_updates()[0].value, Value::Int(2));
+    assert!(!engine.unregister_subscription(count));
+}
+
+#[test]
+fn an_undecodable_filter_column_stops_only_its_row_subscription() {
+    let (mut engine, orders) = postgres_engine::<AlteredEvent>(DDL);
+    // A row filter that reads the region column, and one that does not.
+    let region = engine
+        .register(SubscriptionRequest::new(
+            9u64,
+            "SELECT * FROM orders WHERE region = 'north'",
+        ))
+        .expect("the region filter registers")
+        .subscription_id;
+    engine
+        .register(SubscriptionRequest::new(
+            10u64,
+            "SELECT * FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sibling registers");
+
+    // The event's region cell no longer decodes as the declared text.
+    let event = AlteredCell::new(
+        Event::insert(orders, row(9, Value::String("south".into()), Value::Int(3)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(11)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        true,
+    );
+    let output = engine
+        .dispatch(&event)
+        .expect("the dispatch isolates the failing subscription");
+
+    // The sibling matched and is the only one notified.
+    assert_eq!(output.notifications().inserted(), [10u64]);
+    // The region filter is reported with its decode failure and stopped.
+    assert_eq!(output.stopped().len(), 1);
+    assert_eq!(output.stopped()[0].subscription_id, region);
+    assert_eq!(output.stopped()[0].consumer_id, 9);
+    assert!(matches!(
+        output.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    assert!(!engine.unregister_subscription(region));
+
+    // A second event reaches only the sibling.
+    let second = AlteredCell::new(
+        Event::insert(orders, row(10, Value::String("east".into()), Value::Int(2)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(12)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        false,
+    );
+    let second_output = engine
+        .dispatch(&second)
+        .expect("the second event dispatches");
+    assert!(second_output.stopped().is_empty());
+    assert_eq!(second_output.notifications().inserted(), [10u64]);
+}
+
+fn region_filter_and_sibling(
+    engine: &mut SubscriptionEngine<AlteredEvent, DefaultIds, ParserDB>,
+) -> (u64, u64) {
+    // A row filter that reads the region column, and a sibling whose filter
+    // and projection both stay clear of it.
+    let region = engine
+        .register(SubscriptionRequest::new(
+            9u64,
+            "SELECT * FROM orders WHERE region = 'north'",
+        ))
+        .expect("the region filter registers")
+        .subscription_id;
+    let sibling = engine
+        .register(SubscriptionRequest::new(
+            10u64,
+            "SELECT amount FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sibling registers")
+        .subscription_id;
+    (region, sibling)
+}
+
+#[test]
+fn an_undecodable_new_row_stops_only_its_update_subscription() {
+    let (mut engine, orders) = postgres_engine::<AlteredEvent>(DDL);
+    let (region, sibling) = region_filter_and_sibling(&mut engine);
+
+    // The new image's region cell no longer decodes as the declared text.
+    let event = AlteredCell::new(
+        Event::update(
+            orders,
+            row(9, Value::String("north".into()), Value::Int(3)),
+            row(9, Value::String("east".into()), Value::Int(5)),
+        )
+        .with_pk_columns([0u16])
+        .with_changed_columns([1u16, 2u16])
+        .with_checkpoint(PgLsn(11)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        true,
+    );
+    let output = engine
+        .dispatch(&event)
+        .expect("the dispatch isolates the failing subscription");
+
+    // The sibling kept its update.
+    assert_eq!(output.notifications().updated(), [10u64]);
+    // The region filter is reported with its decode failure and stopped.
+    assert_eq!(output.stopped().len(), 1);
+    assert_eq!(output.stopped()[0].subscription_id, region);
+    assert_eq!(output.stopped()[0].consumer_id, 9);
+    assert!(matches!(
+        output.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    assert!(!engine.unregister_subscription(region));
+
+    // A second event reaches only the sibling.
+    let second = AlteredCell::new(
+        Event::update(
+            orders,
+            row(10, Value::String("north".into()), Value::Int(1)),
+            row(10, Value::String("east".into()), Value::Int(2)),
+        )
+        .with_pk_columns([0u16])
+        .with_changed_columns([1u16, 2u16])
+        .with_checkpoint(PgLsn(12)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        false,
+    );
+    let second_output = engine
+        .dispatch(&second)
+        .expect("the second event dispatches");
+    assert!(second_output.stopped().is_empty());
+    assert_eq!(second_output.notifications().updated(), [10u64]);
+    // The stop ended only the failing subscription. The sibling is still
+    // registered.
+    assert!(engine.unregister_subscription(sibling));
+}
+
+#[test]
+fn an_undecodable_old_row_stops_only_its_update_subscription() {
+    let (mut engine, orders) = postgres_engine::<AlteredEvent>(DDL);
+    let (region, sibling) = region_filter_and_sibling(&mut engine);
+
+    // The old image's region cell no longer decodes as the declared text.
+    let event = AlteredCell::new(
+        Event::update(
+            orders,
+            row(9, Value::String("north".into()), Value::Int(3)),
+            row(9, Value::String("east".into()), Value::Int(5)),
+        )
+        .with_pk_columns([0u16])
+        .with_changed_columns([1u16, 2u16])
+        .with_checkpoint(PgLsn(11)),
+        RowKind::Old,
+        1,
+        ScalarFamily::String,
+        true,
+    );
+    let output = engine
+        .dispatch(&event)
+        .expect("the dispatch isolates the failing subscription");
+
+    // The sibling kept its update.
+    assert_eq!(output.notifications().updated(), [10u64]);
+    // The region filter is reported with its decode failure and stopped.
+    assert_eq!(output.stopped().len(), 1);
+    assert_eq!(output.stopped()[0].subscription_id, region);
+    assert_eq!(output.stopped()[0].consumer_id, 9);
+    assert!(matches!(
+        output.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    assert!(!engine.unregister_subscription(region));
+
+    // A second event reaches only the sibling.
+    let second = AlteredCell::new(
+        Event::update(
+            orders,
+            row(10, Value::String("north".into()), Value::Int(1)),
+            row(10, Value::String("east".into()), Value::Int(2)),
+        )
+        .with_pk_columns([0u16])
+        .with_changed_columns([1u16, 2u16])
+        .with_checkpoint(PgLsn(12)),
+        RowKind::Old,
+        1,
+        ScalarFamily::String,
+        false,
+    );
+    let second_output = engine
+        .dispatch(&second)
+        .expect("the second event dispatches");
+    assert!(second_output.stopped().is_empty());
+    assert_eq!(second_output.notifications().updated(), [10u64]);
+    // The stop ended only the failing subscription. The sibling is still
+    // registered.
+    assert!(engine.unregister_subscription(sibling));
+}
+
+#[test]
+fn an_undecodable_projection_stops_only_its_update_subscription() {
+    let (mut engine, orders) = postgres_engine::<AlteredEvent>(DDL);
+    // A projection that carries the region column, whose filter stays clear
+    // of it, and a sibling whose projection does as well.
+    let star = engine
+        .register(SubscriptionRequest::new(
+            9u64,
+            "SELECT id, region, status FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the projection registers")
+        .subscription_id;
+    let sibling = engine
+        .register(SubscriptionRequest::new(
+            10u64,
+            "SELECT amount FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sibling registers")
+        .subscription_id;
+
+    // The new image's region cell no longer decodes as the declared text.
+    let event = AlteredCell::new(
+        Event::update(
+            orders,
+            row(9, Value::String("north".into()), Value::Int(3)),
+            row(9, Value::String("east".into()), Value::Int(5)),
+        )
+        .with_pk_columns([0u16])
+        .with_changed_columns([1u16, 2u16])
+        .with_checkpoint(PgLsn(11)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        true,
+    );
+    let output = engine
+        .dispatch(&event)
+        .expect("the dispatch isolates the failing subscription");
+
+    // The sibling kept its update.
+    assert_eq!(output.notifications().updated(), [10u64]);
+    // The projection is reported with its decode failure and stopped.
+    assert_eq!(output.stopped().len(), 1);
+    assert_eq!(output.stopped()[0].subscription_id, star);
+    assert_eq!(output.stopped()[0].consumer_id, 9);
+    assert!(matches!(
+        output.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    assert!(!engine.unregister_subscription(star));
+
+    // A second event reaches only the sibling.
+    let second = AlteredCell::new(
+        Event::update(
+            orders,
+            row(10, Value::String("north".into()), Value::Int(1)),
+            row(10, Value::String("east".into()), Value::Int(2)),
+        )
+        .with_pk_columns([0u16])
+        .with_changed_columns([1u16, 2u16])
+        .with_checkpoint(PgLsn(12)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        false,
+    );
+    let second_output = engine
+        .dispatch(&second)
+        .expect("the second event dispatches");
+    assert!(second_output.stopped().is_empty());
+    assert_eq!(second_output.notifications().updated(), [10u64]);
+    // The stop ended only the failing subscription. The sibling is still
+    // registered.
+    assert!(engine.unregister_subscription(sibling));
+}
+
+#[test]
+fn an_undecodable_value_column_stops_only_its_scalar_subscription() {
+    let (mut engine, orders) = postgres_engine::<AlteredEvent>(DDL);
+    // An ungrouped sum that folds the amount column, seeded empty.
+    let total = engine
+        .register(SubscriptionRequest::new(
+            7u64,
+            "SELECT SUM(amount) FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sum registers")
+        .subscription_id;
+    Install::install(
+        &mut engine,
+        total,
+        subql::AggregateSeedInstall {
+            rows: vec![vec![Value::Null, Value::Int(0)]],
+            fence: None,
+        },
+    )
+    .expect("the sum seeds");
+    let sibling = engine
+        .register(SubscriptionRequest::new(
+            8u64,
+            "SELECT * FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sibling registers")
+        .subscription_id;
+
+    // The new image's amount cell no longer decodes as the declared int.
+    let event = AlteredCell::new(
+        Event::insert(orders, row(9, Value::String("south".into()), Value::Int(3)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(11)),
+        RowKind::New,
+        2,
+        ScalarFamily::Int,
+        true,
+    );
+    let output = engine
+        .dispatch(&event)
+        .expect("the dispatch isolates the failing subscription");
+
+    // The sibling notified its consumer.
+    assert_eq!(output.notifications().inserted(), [8u64]);
+    // The sum is reported with its decode failure and stopped.
+    assert_eq!(output.stopped().len(), 1);
+    assert_eq!(output.stopped()[0].subscription_id, total);
+    assert_eq!(output.stopped()[0].consumer_id, 7);
+    assert!(matches!(
+        output.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 2, .. })
+    ));
+    assert!(output.scalar_updates().is_empty());
+    assert!(!engine.unregister_subscription(total));
+
+    // A second event reaches only the sibling.
+    let second = AlteredCell::new(
+        Event::insert(orders, row(10, Value::String("east".into()), Value::Int(2)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(12)),
+        RowKind::New,
+        2,
+        ScalarFamily::Int,
+        false,
+    );
+    let second_output = engine
+        .dispatch(&second)
+        .expect("the second event dispatches");
+    assert!(second_output.stopped().is_empty());
+    assert_eq!(second_output.notifications().inserted(), [8u64]);
+    // The stop ended only the failing subscription. The sibling is still
+    // registered.
+    assert!(engine.unregister_subscription(sibling));
+}
+
+/// A stop is a dispatch outcome, so an output carrying only one is not empty.
+#[test]
+fn a_stop_alone_is_not_an_empty_dispatch_output() {
+    let (mut engine, orders) = postgres_engine::<AlteredEvent>(DDL);
+    // An ungrouped sum that folds the amount column, seeded empty.
+    let total = engine
+        .register(SubscriptionRequest::new(
+            7u64,
+            "SELECT SUM(amount) FROM orders WHERE status = 'paid'",
+        ))
+        .expect("the sum registers")
+        .subscription_id;
+    Install::install(
+        &mut engine,
+        total,
+        subql::AggregateSeedInstall {
+            rows: vec![vec![Value::Null, Value::Int(0)]],
+            fence: None,
+        },
+    )
+    .expect("the sum seeds");
+
+    // The new image's amount cell no longer decodes as the declared int.
+    let event = AlteredCell::new(
+        Event::insert(orders, row(9, Value::String("south".into()), Value::Int(3)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(11)),
+        RowKind::New,
+        2,
+        ScalarFamily::Int,
+        true,
+    );
+    let output = engine
+        .dispatch(&event)
+        .expect("the dispatch isolates the failing subscription");
+
+    assert_eq!(output.stopped().len(), 1);
+    assert_eq!(output.stopped()[0].subscription_id, total);
+    // Every other outcome is empty, so only the stopped line of is_empty decides.
+    assert!(output.aggregate_updates().is_empty());
+    assert!(output.scalar_updates().is_empty());
+    assert!(output.triggers().is_empty());
+    assert_eq!(output.transitions(), []);
+    assert!(!output.is_empty());
+}
+
+#[test]
+fn match_rows_reports_a_stop_without_ending_the_subscription() {
+    let (mut engine, orders) = postgres_engine::<AlteredEvent>(DDL);
+    let region = engine
+        .register(SubscriptionRequest::new(
+            9u64,
+            "SELECT * FROM orders WHERE region = 'north'",
+        ))
+        .expect("the region filter registers")
+        .subscription_id;
+
+    // The new image's region cell no longer decodes as the declared text.
+    let event = AlteredCell::new(
+        Event::insert(orders, row(9, Value::String("south".into()), Value::Int(3)))
+            .with_pk_columns([0u16])
+            .with_checkpoint(PgLsn(11)),
+        RowKind::New,
+        1,
+        ScalarFamily::String,
+        true,
+    );
+    let notifs = engine
+        .match_rows(&event)
+        .expect("row matching reports stops instead of erroring");
+
+    // The filter is named with its decode failure.
+    assert_eq!(notifs.stopped().len(), 1);
+    assert_eq!(notifs.stopped()[0].subscription_id, region);
+    assert_eq!(notifs.stopped()[0].consumer_id, 9);
+    assert!(matches!(
+        notifs.stopped()[0].error,
+        DispatchError::Value(ValueError::Builtin { column: 1, .. })
+    ));
+    // match_rows leaves the engine as it found it, so the subscription is
+    // still registered and a real unregistration finds it.
+    assert!(engine.unregister_subscription(region));
 }

@@ -325,15 +325,29 @@ where
             &mut self.vm,
             arity,
             &self.database,
-        )?;
+        );
+
+        // A stopped subscription is ended before any other stop can claim it,
+        // and takes the delta it folded with it.
+        let stopped = computation.stopped;
+        let stopped_ids: alloc::collections::BTreeSet<SubscriptionId> =
+            stopped.iter().map(|entry| entry.subscription_id).collect();
+        for entry in &stopped {
+            self.unregister_subscription(entry.subscription_id);
+        }
 
         let cap = self.max_changes_during_aggregate_read;
         let at = event.checkpoint();
         let mut output: crate::AggregateMaintenanceOutput<I, E::Backend, E::Checkpoint> =
             crate::AggregateMaintenanceOutput::empty();
+        output.stopped = stopped;
         let mut group_limit = Vec::new();
         let mut sum_out_of_range = Vec::new();
-        for delta in computation.deltas {
+        for delta in computation
+            .deltas
+            .into_iter()
+            .filter(|delta| !stopped_ids.contains(&delta.subscription))
+        {
             if let Some(group) = delta.group {
                 let Some(total) = self.grouped_aggregates.get_mut(&delta.subscription) else {
                     continue;
@@ -392,12 +406,28 @@ where
         self.push_aggregate_stops(
             table_id,
             AggregateStops {
-                missing_old: computation.missing_old,
-                group_key_failed: computation.group_key_failed,
-                evaluation_refused: computation.evaluation_refused,
+                missing_old: computation
+                    .missing_old
+                    .into_iter()
+                    .filter(|id| !stopped_ids.contains(id))
+                    .collect(),
+                group_key_failed: computation
+                    .group_key_failed
+                    .into_iter()
+                    .filter(|id| !stopped_ids.contains(id))
+                    .collect(),
+                evaluation_refused: computation
+                    .evaluation_refused
+                    .into_iter()
+                    .filter(|(id, _)| !stopped_ids.contains(id))
+                    .collect(),
                 group_limit,
                 sum_out_of_range,
-                unanswered_filter: computation.unanswered_filter,
+                unanswered_filter: computation
+                    .unanswered_filter
+                    .into_iter()
+                    .filter(|(id, _)| !stopped_ids.contains(id))
+                    .collect(),
             },
             at.as_ref(),
             &mut output,

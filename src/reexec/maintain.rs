@@ -1004,8 +1004,13 @@ impl<B: Backend + SqlLiteralParse, C: Checkpoint> GroupedMinMaxQuery<B, C> {
         true
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one maintenance pass takes the event, database and tuning caps together"
+    )]
     pub fn on_event<E, DB>(
         &mut self,
+        subscription: crate::SubscriptionId,
         event: &E,
         vm: &mut Vm<B>,
         db: &DB,
@@ -1039,7 +1044,7 @@ impl<B: Backend + SqlLiteralParse, C: Checkpoint> GroupedMinMaxQuery<B, C> {
         let change = self.event_changes(event, vm, db)?;
         self.apply_event(&change, group_limit, at.as_ref(), pending_cap, latest)
             .map_err(|error| crate::DispatchError::TierTransition {
-                subscription: 0,
+                subscription,
                 message: error.to_string(),
             })
     }

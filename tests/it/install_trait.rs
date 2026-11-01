@@ -3,29 +3,20 @@
 #![allow(clippy::unwrap_used)]
 
 use sql_traits::structs::ParserDB;
-use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, ScalarFamily, Value};
 use subql::testing::TestEvent;
 use subql::{
-    catalog_helpers, AggValue, AggregateSeedInstall, DefaultIds, Install, InstallError,
-    InstalledPage, InstalledRowDelta, KeyedRowsInstall, ScalarInstall, SubscriptionEngine,
-    SubscriptionRequest, TableId, Tier, WholeRowsInstall,
+    AggValue, AggregateSeedInstall, DefaultIds, Install, InstallError, InstalledPage,
+    InstalledRowDelta, KeyedRowsInstall, ScalarInstall, SubscriptionEngine, SubscriptionRequest,
+    TableId, Tier, WholeRowsInstall,
 };
+
+use crate::common::postgres_engine;
 
 const DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, price FLOAT, status TEXT);\
                    CREATE TABLE managers (id INT PRIMARY KEY);";
 
 type Engine = SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB>;
-
-fn engine() -> (Engine, TableId) {
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
-    let table =
-        catalog_helpers::table_id::<Postgres, _>(&catalog, "orders").expect("orders resolves");
-    (
-        SubscriptionEngine::new(catalog, PostgreSqlDialect {}),
-        table,
-    )
-}
 
 fn register(engine: &mut Engine, consumer: u64, sql: &str) -> subql::Registered {
     engine
@@ -35,7 +26,7 @@ fn register(engine: &mut Engine, consumer: u64, sql: &str) -> subql::Registered 
 
 #[test]
 fn scalar_install_returns_the_typed_scalar_update() {
-    let (mut engine, _) = engine();
+    let (mut engine, _) = postgres_engine(DDL);
     let registered = register(&mut engine, 7, "SELECT MIN(price) FROM orders");
     assert!(matches!(
         registered.tier,
@@ -70,7 +61,7 @@ fn scalar_install_returns_the_typed_scalar_update() {
 
 #[test]
 fn whole_rows_install_adds_the_registered_identity_to_each_page() {
-    let (mut engine, _) = engine();
+    let (mut engine, _) = postgres_engine(DDL);
     let registered = register(
         &mut engine,
         8,
@@ -106,7 +97,7 @@ fn whole_rows_install_adds_the_registered_identity_to_each_page() {
 
 #[test]
 fn row_delta_install_adds_the_registered_identity_and_consumer() {
-    let (mut engine, _) = engine();
+    let (mut engine, _) = postgres_engine(DDL);
     let registered = register(
         &mut engine,
         9,
@@ -142,7 +133,7 @@ fn row_delta_install_adds_the_registered_identity_and_consumer() {
 
 #[test]
 fn aggregate_seed_install_keeps_its_own_output_and_error_type() {
-    let (mut engine, _) = engine();
+    let (mut engine, _) = postgres_engine(DDL);
     let registered = register(&mut engine, 10, "SELECT COUNT(*) FROM orders");
     assert!(matches!(registered.tier, Tier::InProcess(_)));
 
@@ -166,7 +157,7 @@ fn aggregate_seed_install_keeps_its_own_output_and_error_type() {
 
 #[test]
 fn a_concrete_input_for_the_wrong_tier_is_rejected() {
-    let (mut engine, _) = engine();
+    let (mut engine, _) = postgres_engine(DDL);
     let registered = register(&mut engine, 11, "SELECT MIN(price) FROM orders");
 
     let wrong = Install::install(
@@ -200,7 +191,7 @@ fn insert(table: TableId, id: i64, price: f64) -> TestEvent<Postgres> {
 
 #[test]
 fn an_unseeded_aggregate_is_a_registry_trigger() {
-    let (mut engine, table) = engine();
+    let (mut engine, table) = postgres_engine(DDL);
     let registered = register(&mut engine, 12, "SELECT COUNT(*) FROM orders");
 
     let output = engine.dispatch(&insert(table, 1, 5.0)).expect("dispatch");
@@ -218,7 +209,7 @@ fn an_unseeded_aggregate_is_a_registry_trigger() {
 
 #[test]
 fn a_seeded_aggregate_updates_without_a_trigger() {
-    let (mut engine, table) = engine();
+    let (mut engine, table) = postgres_engine(DDL);
     let registered = register(&mut engine, 13, "SELECT COUNT(*) FROM orders");
     Install::install(
         &mut engine,
@@ -245,7 +236,7 @@ const GROUPED_COUNT: &str = "SELECT status, COUNT(*) FROM orders GROUP BY status
 
 #[test]
 fn an_unseeded_grouped_aggregate_is_a_registry_trigger() {
-    let (mut engine, table) = engine();
+    let (mut engine, table) = postgres_engine(DDL);
     let registered = register(&mut engine, 14, GROUPED_COUNT);
 
     let output = engine.dispatch(&insert(table, 1, 5.0)).expect("dispatch");
@@ -263,7 +254,7 @@ fn an_unseeded_grouped_aggregate_is_a_registry_trigger() {
 
 #[test]
 fn a_seeded_grouped_aggregate_updates_without_a_trigger() {
-    let (mut engine, table) = engine();
+    let (mut engine, table) = postgres_engine(DDL);
     let registered = register(&mut engine, 15, GROUPED_COUNT);
     Install::install(
         &mut engine,
@@ -287,7 +278,7 @@ fn a_seeded_grouped_aggregate_updates_without_a_trigger() {
 
 #[test]
 fn an_unknown_scalar_is_a_registry_trigger() {
-    let (mut engine, table) = engine();
+    let (mut engine, table) = postgres_engine(DDL);
     let registered = register(&mut engine, 14, "SELECT MIN(price) FROM orders");
 
     let output = engine.dispatch(&insert(table, 1, 5.0)).expect("dispatch");

@@ -4,28 +4,19 @@
 #![allow(clippy::unwrap_used)]
 
 use sql_traits::structs::ParserDB;
-use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, ScalarFamily, Value};
 use subql::testing::TestEvent;
 use subql::{
-    catalog_helpers, AggValue, AggregateSeedInstall, AggregateValueChange, DefaultIds, Install,
-    NumericValue, PgLsn, SubscriptionEngine, SubscriptionRequest, TableId, Tier,
+    AggValue, AggregateSeedInstall, AggregateValueChange, DefaultIds, Install, NumericValue, PgLsn,
+    SubscriptionEngine, SubscriptionRequest, TableId, Tier,
 };
+
+use crate::common::postgres_engine;
 
 const DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, region TEXT, amount INT, status TEXT);";
 
 type Event = TestEvent<Postgres, PgLsn>;
 type Engine = SubscriptionEngine<Event, DefaultIds, ParserDB>;
-
-fn engine() -> (Engine, TableId) {
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
-    let table =
-        catalog_helpers::table_id::<Postgres, _>(&catalog, "orders").expect("orders resolves");
-    (
-        SubscriptionEngine::new(catalog, PostgreSqlDialect {}),
-        table,
-    )
-}
 
 /// Register `sql` expecting the in-process fold tier, returning the seed
 /// bundle so a test can pin what the caller is told to run.
@@ -93,7 +84,7 @@ mod registration {
     use super::*;
     #[test]
     fn a_having_over_the_projected_aggregate_registers_in_process() {
-        let (mut engine, _) = engine();
+        let (mut engine, _) = postgres_engine(DDL);
         let (_, bootstrap) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) > 10",
@@ -113,7 +104,7 @@ mod registration {
 
     #[test]
     fn a_sibling_having_widens_the_seed_components() {
-        let (mut engine, _) = engine();
+        let (mut engine, _) = postgres_engine(DDL);
         let (_, bootstrap) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING AVG(amount) > 3",
@@ -130,7 +121,7 @@ mod registration {
     /// 20 satisfies `10 < SUM(amount)`, and a backwards mirror would hide it.
     #[test]
     fn a_reversed_operand_having_compares_the_right_way_around() {
-        let (mut engine, _) = engine();
+        let (mut engine, _) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING 10 < SUM(amount)",
@@ -155,7 +146,7 @@ mod registration {
 
     #[test]
     fn a_count_star_having_needs_no_widening() {
-        let (mut engine, _) = engine();
+        let (mut engine, _) = postgres_engine(DDL);
         let (_, bootstrap) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING COUNT(*) > 2",
@@ -199,7 +190,7 @@ mod registration {
             "SELECT region, COUNT(status) FROM orders GROUP BY region HAVING SUM(status) > 1",
         ];
         for sql in refused {
-            let (mut engine, _) = engine();
+            let (mut engine, _) = postgres_engine::<Event>(DDL);
             let registered = engine
                 .register(SubscriptionRequest::new(7u64, sql))
                 .unwrap_or_else(|e| panic!("`{sql}` should still register somewhere, got {e:?}"));
@@ -216,7 +207,7 @@ mod crossing {
     use super::*;
     #[test]
     fn a_group_crossing_the_threshold_emits_entering_and_leaving() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) > 10",
@@ -267,7 +258,7 @@ mod crossing {
 
     #[test]
     fn a_hidden_group_folds_in_silence_and_enters_with_the_full_sum() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) > 10",
@@ -302,7 +293,7 @@ mod crossing {
 
     #[test]
     fn a_hidden_group_that_empties_stays_silent() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) > 10",
@@ -329,7 +320,7 @@ mod crossing {
 
     #[test]
     fn entering_without_a_value_change_still_emits() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING COUNT(*) > 2",
@@ -357,7 +348,7 @@ mod crossing {
 
     #[test]
     fn a_sibling_having_evaluates_from_widened_components() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING AVG(amount) > 3",
@@ -392,7 +383,7 @@ mod crossing {
 
     #[test]
     fn an_unknown_average_stays_outside_the_result() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, AVG(amount) FROM orders GROUP BY region HAVING AVG(amount) > 3",
@@ -419,7 +410,7 @@ mod crossing {
 
     #[test]
     fn hidden_groups_count_against_the_group_budget() {
-        let (engine, orders) = engine();
+        let (engine, orders) = postgres_engine(DDL);
         let mut engine = engine.with_max_groups_per_aggregate(1);
         let (subscription, _) = register_fold(
             &mut engine,
@@ -448,7 +439,7 @@ mod crossing {
 
     #[test]
     fn a_keyed_shape_with_having_rides_the_whole_reread() {
-        let (mut engine, _) = engine();
+        let (mut engine, _) = postgres_engine::<Event>(DDL);
         let registered = engine
             .register(SubscriptionRequest::new(
                 7u64,
@@ -464,7 +455,7 @@ mod crossing {
 
     #[test]
     fn a_sibling_average_counts_its_contributions() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING AVG(amount) > 3",
@@ -495,7 +486,7 @@ mod crossing {
 
     #[test]
     fn a_filtered_and_an_unfiltered_fold_do_not_share_an_identity() {
-        let (mut engine, _) = engine();
+        let (mut engine, _) = postgres_engine(DDL);
         let (unfiltered, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region",
@@ -516,7 +507,7 @@ mod crossing {
     /// subject widens to carry its contribution count.
     #[test]
     fn an_all_null_sum_stays_outside_the_result() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) < 10",
@@ -556,7 +547,7 @@ mod crossing {
     /// never delivered, so its disappearance announces nothing.
     #[test]
     fn truncate_removes_only_announced_groups() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let (subscription, _) = register_fold(
             &mut engine,
             "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) > 10",
@@ -597,7 +588,7 @@ mod crossing {
     /// condition still gates announcement.
     #[test]
     fn a_multi_column_group_crosses_like_a_single_one() {
-        let (mut engine, orders) = engine();
+        let (mut engine, orders) = postgres_engine(DDL);
         let registered = engine
             .register(SubscriptionRequest::new(
                 7u64,
