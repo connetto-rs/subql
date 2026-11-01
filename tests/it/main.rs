@@ -32,6 +32,8 @@ mod agg_sum_nullability;
 
 mod aggregate_bootstrap;
 
+mod aggregate_restart_maintenance;
+
 mod aggregate_totals;
 
 mod aggregate_transition;
