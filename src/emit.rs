@@ -38,13 +38,15 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+#[cfg(feature = "pgoutput-emit")]
+use alloc::sync::Arc;
 use hashbrown::HashMap;
 use maxwell_cdc::Message as MaxwellMessage;
 use sql_traits::prelude::{ColumnLike, DataTypeLike, DatabaseLike, TableLike, VectorKind};
 use sqlite_diff_rs::maxwell::{ConversionError as MaxwellConversionError, Maxwell};
 #[cfg(feature = "pgoutput-emit")]
 use sqlite_diff_rs::pg_walstream::{
-    ChangeEvent, ConversionError as PgConversionError, PgWalstream,
+    ChangeEvent, ConversionError as PgConversionError, EventType, PgWalstream, RowData,
 };
 use sqlite_diff_rs::wal2json::{ConversionError, Wal2Json};
 use sqlite_diff_rs::{
@@ -308,25 +310,163 @@ fn build_wire_table<DB: DatabaseLike>(
 /// each event's table through a [`WireCatalog`] and decoding its columns
 /// through `adapter`.
 ///
+/// Resolve `database` into a [`WireCatalog`], the one spelling of the
+/// catalog failure that every vehicle below shares.
+fn wire_catalog<DB: DatabaseLike>(database: &DB) -> Result<WireCatalog, ConversionError> {
+    WireCatalog::from_database(database).map_err(|e| ConversionError::TableNotFound(e.to_string()))
+}
+
 /// The one procedure behind every vehicle below: the format, the wire source
 /// and the decoder registry are the only things that differ. Every source in
 /// `sqlite-diff-rs` 0.12 reports the same [`ConversionError`], so the catalog
 /// failure has one spelling here rather than one per vehicle.
-fn fold_events<'a, F, DB, E>(
-    database: &DB,
+fn fold_events<'a, F, E>(
+    catalog: &WireCatalog,
     adapter: &impl WireAdapter<E::Src, String, Vec<u8>>,
     events: impl IntoIterator<Item = &'a E>,
 ) -> Result<DiffSetBuilder<F, WireTable, String, Vec<u8>>, ConversionError>
 where
     F: DiffFormat<String, Vec<u8>>,
-    DB: DatabaseLike,
     E: Digestable<F, WireTable, String, Vec<u8>, Error = ConversionError> + 'a,
 {
-    let catalog = WireCatalog::from_database(database)
-        .map_err(|e| ConversionError::TableNotFound(e.to_string()))?;
     let mut builder = DiffSetBuilder::<F, WireTable, String, Vec<u8>>::new();
     for event in events {
-        builder = builder.digest(event, &catalog, adapter)?;
+        builder = builder.digest(event, catalog, adapter)?;
+    }
+    Ok(builder)
+}
+
+/// Rebuild `row` without the names `table` does not know, or `None` when
+/// `row` names only columns `table` has. The check walks the row's own
+/// names, so a row the catalog fully knows allocates nothing.
+#[cfg(feature = "pgoutput-emit")]
+fn project_row(row: &RowData, table: &WireTable) -> Option<RowData> {
+    let unknown = row
+        .iter()
+        .any(|(name, _)| table.column_index(name).is_none());
+    if !unknown {
+        return None;
+    }
+    let mut projected = RowData::new();
+    for (name, value) in row.iter() {
+        if table.column_index(name).is_some() {
+            projected.push(Arc::clone(name), value.clone());
+        }
+    }
+    Some(projected)
+}
+
+/// Project a row event onto the columns of its table in `catalog`, returning
+/// the rebuilt event when a row names a column the catalog's table lacks and
+/// `None` when the event folds as is.
+///
+/// The fold is strict about columns its table lacks, which is the right
+/// contract for the library. Projecting onto subql's own catalog is subql's
+/// policy for a server built from an older schema whose database picked up a
+/// column afterwards. A table the catalog lacks stays for the fold to
+/// report, and destructive changes are not this path's concern, since
+/// connetto detects them from the `Relation` item and refuses the table
+/// first.
+#[cfg(feature = "pgoutput-emit")]
+fn project_event(event: &EventType, catalog: &WireCatalog) -> Option<EventType> {
+    match event {
+        EventType::Insert {
+            schema,
+            table,
+            relation_oid,
+            data,
+        } => {
+            let wire = catalog.get(Some(schema.as_ref()), table)?;
+            let data = project_row(data, wire)?;
+            Some(EventType::Insert {
+                schema: Arc::clone(schema),
+                table: Arc::clone(table),
+                relation_oid: *relation_oid,
+                data,
+            })
+        }
+        EventType::Update {
+            schema,
+            table,
+            relation_oid,
+            old_data,
+            new_data,
+            replica_identity,
+            key_columns,
+        } => {
+            let wire = catalog.get(Some(schema.as_ref()), table)?;
+            let new_data = project_row(new_data, wire)?;
+            let old_data = old_data.as_ref().and_then(|row| project_row(row, wire));
+            Some(EventType::Update {
+                schema: Arc::clone(schema),
+                table: Arc::clone(table),
+                relation_oid: *relation_oid,
+                old_data,
+                new_data,
+                replica_identity: *replica_identity,
+                key_columns: key_columns
+                    .iter()
+                    .filter(|name| wire.column_index(name).is_some())
+                    .cloned()
+                    .collect(),
+            })
+        }
+        EventType::Delete {
+            schema,
+            table,
+            relation_oid,
+            old_data,
+            replica_identity,
+            key_columns,
+        } => {
+            let wire = catalog.get(Some(schema.as_ref()), table)?;
+            let old_data = project_row(old_data, wire)?;
+            Some(EventType::Delete {
+                schema: Arc::clone(schema),
+                table: Arc::clone(table),
+                relation_oid: *relation_oid,
+                old_data,
+                replica_identity: *replica_identity,
+                key_columns: key_columns
+                    .iter()
+                    .filter(|name| wire.column_index(name).is_some())
+                    .cloned()
+                    .collect(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Fold a batch of pgoutput events over `catalog`, projecting each event's
+/// rows onto the catalog's columns first, through `adapter`.
+///
+/// The pg builders project before folding because the fold is strict about
+/// columns its table lacks. The common event, whose rows the catalog fully
+/// knows, folds as is, and the projected event borrows from the batch-local
+/// buffer until its digest, which one buffer serves.
+#[cfg(feature = "pgoutput-emit")]
+fn fold_pg_events<'a, F>(
+    catalog: &WireCatalog,
+    adapter: &impl WireAdapter<
+        <EventType as Digestable<F, WireTable, String, Vec<u8>>>::Src,
+        String,
+        Vec<u8>,
+    >,
+    events: impl IntoIterator<Item = &'a EventType>,
+) -> Result<DiffSetBuilder<F, WireTable, String, Vec<u8>>, ConversionError>
+where
+    F: DiffFormat<String, Vec<u8>>,
+    EventType: Digestable<F, WireTable, String, Vec<u8>, Error = ConversionError>,
+{
+    let mut builder = DiffSetBuilder::<F, WireTable, String, Vec<u8>>::new();
+    let mut cache: Vec<EventType> = Vec::new();
+    for event in events {
+        let event = project_event(event, catalog).map_or(event, |projected| {
+            cache.push(projected);
+            cache.last().expect("the projected event was just pushed")
+        });
+        builder = builder.digest(event, catalog, adapter)?;
     }
     Ok(builder)
 }
@@ -381,7 +521,8 @@ where
         Error = ConversionError,
     >,
 {
-    fold_events(database, &wal2json_adapter(), events)
+    let catalog = wire_catalog(database)?;
+    fold_events(&catalog, &wal2json_adapter(), events)
 }
 
 /// Fold a batch of wal2json CDC events into one [`PatchsetFormat`]
@@ -439,7 +580,8 @@ where
         Error = ConversionError,
     >,
 {
-    fold_events(database, &wal2json_adapter(), events)
+    let catalog = wire_catalog(database)?;
+    fold_events(&catalog, &wal2json_adapter(), events)
 }
 
 /// Fold a batch of wal2json CDC events into one [`ChangesetFormat`]
@@ -496,8 +638,9 @@ pub fn pgoutput_patchset_builder<DB: DatabaseLike>(
     database: &DB,
     events: &[ChangeEvent],
 ) -> Result<PatchSet<WireTable, String, Vec<u8>>, PgConversionError> {
-    fold_events(
-        database,
+    let catalog = wire_catalog(database)?;
+    fold_pg_events(
+        &catalog,
         &pgoutput_adapter(),
         events.iter().map(|event| &event.event_type),
     )
@@ -533,8 +676,9 @@ pub fn pgoutput_changeset_builder<DB: DatabaseLike>(
     database: &DB,
     events: &[ChangeEvent],
 ) -> Result<ChangeSet<WireTable, String, Vec<u8>>, PgConversionError> {
-    fold_events(
-        database,
+    let catalog = wire_catalog(database)?;
+    fold_pg_events(
+        &catalog,
         &pgoutput_adapter(),
         events.iter().map(|event| &event.event_type),
     )
@@ -581,7 +725,8 @@ pub fn maxwell_patchset_builder<DB: DatabaseLike>(
     database: &DB,
     events: &[MaxwellMessage],
 ) -> Result<PatchSet<WireTable, String, Vec<u8>>, MaxwellConversionError> {
-    fold_events(database, &maxwell_adapter(), events)
+    let catalog = wire_catalog(database)?;
+    fold_events(&catalog, &maxwell_adapter(), events)
 }
 
 /// Serialize [`maxwell_patchset_builder`] to wire bytes.
@@ -612,7 +757,8 @@ pub fn maxwell_changeset_builder<DB: DatabaseLike>(
     database: &DB,
     events: &[MaxwellMessage],
 ) -> Result<ChangeSet<WireTable, String, Vec<u8>>, MaxwellConversionError> {
-    fold_events(database, &maxwell_adapter(), events)
+    let catalog = wire_catalog(database)?;
+    fold_events(&catalog, &maxwell_adapter(), events)
 }
 
 /// Serialize [`maxwell_changeset_builder`] to wire bytes.
@@ -1685,5 +1831,87 @@ mod tests {
             unreachable!("parse_patchset asserted the Patchset variant");
         };
         assert_eq!(diff.iter().count(), 1);
+    }
+
+    /// An event naming a column the catalog's table lacks folds into a patch
+    /// holding only the catalog's columns. The fold is strict about columns
+    /// its schema lacks, so subql projects the event onto its own catalog
+    /// before handing it over, the policy for a server built from an older
+    /// schema whose database picked up a column afterwards.
+    ///
+    /// The common event, one whose row names only columns the catalog knows,
+    /// allocates nothing on this path. The check compares the row's own
+    /// column names against the catalog's table, and a row is rebuilt only
+    /// when a column is genuinely unknown, which a schema change makes rare
+    /// in a stream.
+    #[cfg(feature = "pgoutput-emit")]
+    #[test]
+    fn pgoutput_fold_projects_an_event_onto_the_catalogs_columns() {
+        use sqlite_diff_rs::pg_walstream::{ColumnValue, EventType, Lsn, ReplicaIdentity, RowData};
+
+        // The catalog was built before the server added `status`.
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE orders (id INT PRIMARY KEY, amount INT);",
+        )
+        .unwrap();
+        let insert = ChangeEvent {
+            event_type: EventType::Insert {
+                schema: "public".into(),
+                table: "orders".into(),
+                relation_oid: 1,
+                data: RowData::from_pairs(vec![
+                    ("id", ColumnValue::text("1")),
+                    ("amount", ColumnValue::text("100")),
+                    ("status", ColumnValue::text("new")),
+                ]),
+            },
+            lsn: Lsn::new(1),
+            metadata: None,
+            xid: None,
+        };
+        let update = ChangeEvent {
+            event_type: EventType::Update {
+                schema: "public".into(),
+                table: "orders".into(),
+                relation_oid: 1,
+                // A distinct key, so the fold reports both events rather
+                // than the coalesced final state of one key.
+                old_data: Some(RowData::from_pairs(vec![
+                    ("id", ColumnValue::text("2")),
+                    ("amount", ColumnValue::text("100")),
+                    ("status", ColumnValue::text("new")),
+                ])),
+                new_data: RowData::from_pairs(vec![
+                    ("id", ColumnValue::text("2")),
+                    ("amount", ColumnValue::text("200")),
+                    ("status", ColumnValue::text("paid")),
+                ]),
+                replica_identity: ReplicaIdentity::Full,
+                key_columns: alloc::vec!["id".into()],
+            },
+            lsn: Lsn::new(2),
+            metadata: None,
+            xid: None,
+        };
+
+        let bytes = pgoutput_patchset(&db, &[insert, update]).unwrap();
+        let parsed = parse_patchset(&bytes);
+        let ParsedDiffSet::Patchset(diff) = &parsed else {
+            unreachable!("parse_patchset asserted the Patchset variant");
+        };
+        let ops: Vec<RowOp<'_>> = diff.iter().collect();
+        assert_eq!(ops.len(), 2, "one op per row event: {ops:?}");
+        let PatchsetOp::Insert { values, .. } = &ops[0] else {
+            panic!("expected an insert op, got {:?}", ops[0]);
+        };
+        assert_eq!(
+            values.to_vec(),
+            vec![WireValue::Integer(1), WireValue::Integer(100)],
+            "the patch holds only the catalog's columns, in catalog order"
+        );
+        let PatchsetOp::Update { pk, .. } = &ops[1] else {
+            panic!("expected an update op, got {:?}", ops[1]);
+        };
+        assert_eq!(pk.to_vec(), vec![WireValue::Integer(2)]);
     }
 }

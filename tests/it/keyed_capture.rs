@@ -392,7 +392,11 @@ fn a_change_with_no_readable_key_transitions_to_whole_rows() {
     let Tier::WholeRows { query, .. } = &transition.to else {
         panic!("expected whole-row transition")
     };
-    assert_eq!(query.sql(), bound_sql);
+    // The keyed read names the catalog's columns instead of the wildcard.
+    assert_eq!(
+        query.sql(),
+        "SELECT `id`, `status` FROM orders WHERE lower(status) = ?"
+    );
     assert_eq!(query.binds(), &[Value::String("paid".into())]);
     assert_eq!(
         output.triggers()[0].subscription_id,

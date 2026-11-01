@@ -466,6 +466,81 @@ fn a_key_column_needing_quotes_is_still_readable() {
     );
 }
 
+/// A re-read names the catalog's columns, so a column the server adds under
+/// it cannot widen the rows the re-read delivers.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_reread_names_the_catalogs_columns_not_a_wildcard() {
+    use subql::testing::TestEvent;
+
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    sql_query(r#"CREATE TABLE quoted ("OrderId" INT PRIMARY KEY, status TEXT)"#)
+        .execute(&mut setup)
+        .expect("create");
+    sql_query("INSERT INTO quoted VALUES (1, 'paid'), (2, 'void')")
+        .execute(&mut setup)
+        .expect("seed");
+
+    let cat = ParserDB::parse::<PostgreSqlDialect>(
+        r#"CREATE TABLE quoted ("OrderId" INT PRIMARY KEY, status TEXT);"#,
+    )
+    .expect("catalog");
+    let table = subql::catalog_helpers::table_id::<subql::backend::Postgres, _>(&cat, "quoted")
+        .expect("quoted");
+    let inner = SubscriptionEngine::<TestEvent<Postgres>, DefaultIds, ParserDB>::new(
+        cat,
+        PostgreSqlDialect {},
+    );
+    let mut engine =
+        AutoResolvingEngine::new(inner, SyncMode(PgDieselConnector::new(db.connect())));
+    engine
+        .register(
+            SubscriptionRequest::<DefaultIds, Postgres>::new(
+                1u64,
+                "SELECT * FROM quoted WHERE lower(status) = 'paid'",
+            ),
+            (),
+        )
+        .expect("captured");
+
+    // A schema change under the server, after the catalog was built.
+    sql_query("ALTER TABLE quoted ADD COLUMN extra TEXT")
+        .execute(&mut setup)
+        .expect("add a column the catalog lacks");
+
+    let event = TestEvent::<Postgres>::update(
+        table,
+        vec![Value::Int(1), Value::String("paid".into())],
+        vec![Value::Int(1), Value::String("paid".into())],
+    )
+    .with_pk_columns([0u16]);
+    let settled = engine
+        .apply(&event)
+        .expect("apply dispatch")
+        .resolve_collect();
+    let notifications = settled.reads.expect("the re-read resolves");
+
+    assert_eq!(notifications.row_deltas.len(), 1);
+    assert_eq!(notifications.row_deltas[0].key, vec![Value::Int(1)]);
+    assert!(
+        notifications.row_deltas[0].row.is_some(),
+        "the row still matches, so it arrives as itself"
+    );
+    assert_eq!(
+        notifications.row_deltas[0].row.as_ref().map(Vec::len),
+        Some(2),
+        "the re-read returns the catalog's width, not the server's: {:?}",
+        notifications.row_deltas[0].row
+    );
+    assert_eq!(
+        notifications.row_deltas[0].columns.as_ref(),
+        std::sync::Arc::from_iter(["OrderId".to_string(), "status".to_string()]).as_ref(),
+        "the re-read names the catalog's columns"
+    );
+}
+
 /// Every read reports the fence of its own snapshot.
 ///
 /// The contract a caller judges changes against: a change the snapshot

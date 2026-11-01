@@ -186,6 +186,11 @@ mod persistence_column_kinds_regression;
 #[cfg(feature = "pg-sqlite-emu")]
 mod pg_sqlite_emu_dml;
 
+// The emulator's `Relation` frame, written inside the drain's transaction
+// ahead of the table's first data frame, the shape a server writes.
+#[cfg(feature = "pg-sqlite-emu")]
+mod pg_sqlite_emu_relation;
+
 // Smoke integration test for the fake-Postgres-over-SQLite CDC source.
 // Gated behind `pg-sqlite-emu` so default `cargo test` skips it.
 #[cfg(feature = "pg-sqlite-emu")]

@@ -230,9 +230,15 @@ proptest! {
                 }
             };
 
-            let event = source
-                .poll_next_item()
-                .unwrap()
+            // The table's relation may lead the fresh source's first drain.
+            let mut item = source.poll_next_item().unwrap();
+            while item
+                .as_ref()
+                .is_some_and(|item| matches!(item, SourceItem::Relation(_)))
+            {
+                item = source.poll_next_item().unwrap();
+            }
+            let event = item
                 .and_then(SourceItem::into_event)
                 .expect("op should produce a drained event");
             prop_assert!(

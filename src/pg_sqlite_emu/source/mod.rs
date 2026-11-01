@@ -5,7 +5,8 @@
 //! surrounding orchestration: PG DDL translation via [`pg2sqlite`],
 //! session lifecycle, per-table [`RelationSchema`] cache, the
 //! unchanged-column row lookup, and the `PgOutputDecoder` feedback loop
-//! that turns the encoded frames back into [`crate::PgChangeEvent`]s and
+//! that turns the encoded frames back into the [`crate::PgRelation`]
+//! ahead of each table's first frame, the [`crate::PgChangeEvent`]s, and
 //! the [`crate::PgCommit`] ending each transaction.
 
 use alloc::collections::VecDeque;
@@ -45,10 +46,10 @@ const PROTOCOL_VERSION: u8 = 1;
 /// # Examples
 ///
 /// Build a source, drive one INSERT through the wrapped connection,
-/// and inspect the [`PgChangeEvent`] the source materialises
-/// from SQLite's session changeset, then the [`crate::PgCommit`] ending
-/// its transaction. Full engine-dispatch pipeline lives in the
-/// [module docs](super#quickstart).
+/// and inspect the table's [`crate::PgRelation`], then the
+/// [`PgChangeEvent`] the source materialises from SQLite's session
+/// changeset, then the [`crate::PgCommit`] ending its transaction. Full
+/// engine-dispatch pipeline lives in the [module docs](super#quickstart).
 ///
 /// ```
 /// use subql::backend::{RowKind, Value};
@@ -59,6 +60,12 @@ const PROTOCOL_VERSION: u8 = 1;
 ///     "CREATE TABLE orders (id INT PRIMARY KEY, amount INT);",
 /// )?;
 /// source.execute_sql("INSERT INTO orders (id, amount) VALUES (7, 250)")?;
+///
+/// let relation = source
+///     .poll_next_item()?
+///     .and_then(SourceItem::into_relation)
+///     .expect("the table's relation leads the stream");
+/// assert_eq!(relation.table(), "orders");
 ///
 /// let event = source
 ///     .poll_next_item()?
@@ -208,9 +215,10 @@ impl PgSqliteEmuSource {
     ///
     /// # Examples
     ///
-    /// Shortest usable pipeline: open, run one DML, drain one event.
-    /// The typed row image round-trips through the pgoutput wire and
-    /// back into a `PgChangeEvent` before the assertion sees it.
+    /// The shortest usable pipeline opens, runs one DML, and drains the
+    /// table's relation and then one event. The typed row image round-trips
+    /// through the pgoutput wire and back into a `PgChangeEvent` before
+    /// the assertion sees it.
     ///
     /// ```
     /// use subql::backend::{CdcEvent, RowKind, Value};
@@ -220,6 +228,12 @@ impl PgSqliteEmuSource {
     ///     "CREATE TABLE orders (id INT PRIMARY KEY, status TEXT);",
     /// )?;
     /// source.execute_sql("INSERT INTO orders VALUES (1, 'paid')")?;
+    ///
+    /// let relation = source
+    ///     .poll_next_item()?
+    ///     .and_then(SourceItem::into_relation)
+    ///     .expect("the table's relation leads the stream");
+    /// assert_eq!(relation.table(), "orders");
     ///
     /// let event = source
     ///     .poll_next_item()?
@@ -289,10 +303,11 @@ impl PgSqliteEmuSource {
     /// # Examples
     ///
     /// Changes accumulated between two drains form one transaction, so
-    /// three inserts yield three rows and then one commit.
+    /// three inserts yield the table's relation, three rows, and then
+    /// one commit.
     ///
     /// ```
-    /// use subql::{PgSqliteEmuSource, SourceItem};
+    /// use subql::{PgSqliteEmuError, PgSqliteEmuSource, SourceItem};
     ///
     /// let mut source = PgSqliteEmuSource::open_in_memory(
     ///     "CREATE TABLE items (id INT PRIMARY KEY);",
@@ -301,10 +316,11 @@ impl PgSqliteEmuSource {
     ///     source.execute_sql(&format!("INSERT INTO items VALUES ({id})"))?;
     /// }
     /// let items = source.drain()?;
-    /// assert_eq!(items.len(), 4);
-    /// assert!(matches!(items[3], SourceItem::Commit(_)));
+    /// assert_eq!(items.len(), 5);
+    /// assert!(matches!(items[0], SourceItem::Relation(_)));
+    /// assert!(matches!(items[4], SourceItem::Commit(_)));
     /// assert!(source.drain()?.is_empty(), "queue is now flushed");
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # Ok::<(), PgSqliteEmuError>(())
     /// ```
     pub fn drain(&mut self) -> Result<Vec<PgSourceItem>, PgSqliteEmuError> {
         let mut out = Vec::new();
@@ -380,6 +396,11 @@ impl PgSqliteEmuSource {
     /// let table_id = catalog_helpers::table_id::<subql::backend::Postgres, _>(source.pg_catalog(), "items")
     ///     .expect("items table resolves");
     /// source.inject_truncate(table_id)?;
+    /// let relation = source
+    ///     .poll_next_item()?
+    ///     .and_then(SourceItem::into_relation)
+    ///     .expect("the table's relation leads the stream");
+    /// assert_eq!(relation.table(), "items");
     /// let event = source
     ///     .poll_next_item()?
     ///     .and_then(SourceItem::into_event)
@@ -397,12 +418,15 @@ impl PgSqliteEmuSource {
             .get(&table_name)
             .cloned()
             .ok_or(PgSqliteEmuError::UnknownTable(table_name.clone()))?;
-        self.announce_if_needed(&meta);
-        let msg = LogicalReplicationMessage::Truncate {
+        let mut messages: alloc::vec::Vec<LogicalReplicationMessage> = alloc::vec::Vec::new();
+        if let Some(relation_msg) = self.announce_if_needed(&meta) {
+            messages.push(relation_msg);
+        }
+        messages.push(LogicalReplicationMessage::Truncate {
             relation_ids: alloc::vec![meta.oid],
             flags: 0,
-        };
-        self.push_transaction(&[msg])
+        });
+        self.push_transaction(&messages)
     }
 
     /// Mutable access to the underlying [`SqliteConnection`].
@@ -441,7 +465,9 @@ impl PgSqliteEmuSource {
                 .get(&name)
                 .cloned()
                 .ok_or(PgSqliteEmuError::UnknownTable(name))?;
-            self.announce_if_needed(&meta);
+            if let Some(relation_msg) = self.announce_if_needed(&meta) {
+                messages.push(relation_msg);
+            }
             let fallback = self.fallback_row_for(&op, &meta)?;
             let cols = meta.column_schemas();
             let schema = RelationSchema {
@@ -459,12 +485,15 @@ impl PgSqliteEmuSource {
         self.push_transaction(&messages)
     }
 
-    /// Emit the `Relation` frame for a table the first time it appears
-    /// in a drain. The parser needs it before any data frame for the
-    /// same OID decodes.
-    fn announce_if_needed(&mut self, meta: &TableMeta) {
+    /// Frame the `Relation` message for a table the first time it appears
+    /// in a drain, where the server writes it, inside the transaction,
+    /// ahead of the table's first data frame.
+    ///
+    /// The message is owned and its names are `Arc`, so it outlives this
+    /// call's borrow of `meta`.
+    fn announce_if_needed(&mut self, meta: &TableMeta) -> Option<LogicalReplicationMessage> {
         if !self.announced.insert(meta.oid) {
-            return;
+            return None;
         }
         let cols = meta.column_schemas();
         let schema = RelationSchema {
@@ -473,12 +502,7 @@ impl PgSqliteEmuSource {
             relation_name: meta.sqlite_table.as_str(),
             columns: cols.as_slice(),
         };
-        let msg = relation_message(&schema);
-        let mut buf = BytesMut::new();
-        encode_message(&msg, PROTOCOL_VERSION, &mut buf);
-        // Relation frames prime the decoder's relation cache and never
-        // emit a data event, so we discard the decode result.
-        let _ = self.decoder.decode_message(buf, Lsn::new(0));
+        Some(relation_message(&schema))
     }
 
     /// Frame `messages` as one transaction and queue the rows it carries.
@@ -518,9 +542,7 @@ impl PgSqliteEmuSource {
         encode_message(msg, PROTOCOL_VERSION, &mut buf);
         self.next_lsn += 1;
         if let Some(decoded) = self.decoder.decode_message(buf, Lsn::new(self.next_lsn))? {
-            let commit = self
-                .order
-                .apply(decoded, &mut AsEvents(&mut self.pending))?;
+            let commit = self.order.apply(decoded, &mut self.pending)?;
             self.pending.extend(commit.map(SourceItem::Commit));
         }
         Ok(())
@@ -602,18 +624,10 @@ impl TableMeta {
     }
 }
 
-/// Queues the row events a frame carries as source items.
-struct AsEvents<'a>(&'a mut VecDeque<PgSourceItem>);
-
-impl Extend<PgChangeEvent> for AsEvents<'_> {
-    fn extend<I: IntoIterator<Item = PgChangeEvent>>(&mut self, rows: I) {
-        self.0.extend(rows.into_iter().map(SourceItem::Event));
-    }
-}
-
 impl crate::CdcSource for PgSqliteEmuSource {
     type Event = PgChangeEvent;
     type Commit = crate::PgCommit;
+    type Relation = crate::wal::PgRelation;
     type Error = PgSqliteEmuError;
 
     fn next_item(
@@ -702,6 +716,12 @@ mod tests {
         sql_query("INSERT INTO orders (id, amount, status) VALUES (1, 250, 'paid')")
             .execute(src.connection())
             .unwrap();
+        let relation = src
+            .poll_next_item()
+            .unwrap()
+            .and_then(SourceItem::into_relation)
+            .expect("the table's relation leads the stream");
+        assert_eq!(relation.table(), "orders");
         let ev = src
             .poll_next_item()
             .unwrap()
@@ -736,6 +756,7 @@ mod tests {
         sql_query("INSERT INTO orders (id, amount, status) VALUES (5, 100, 'pending')")
             .execute(src.connection())
             .unwrap();
+        let _ = src.poll_next_item().unwrap(); // INSERT relation
         let _ = src.poll_next_item().unwrap(); // INSERT event
         let _ = src.poll_next_item().unwrap(); // INSERT commit
         sql_query("UPDATE orders SET status = 'shipped' WHERE id = 5")
@@ -781,6 +802,7 @@ mod tests {
         sql_query("INSERT INTO orders (id, amount, status) VALUES (7, 500, 'paid')")
             .execute(src.connection())
             .unwrap();
+        let _ = src.poll_next_item().unwrap(); // INSERT relation
         let _ = src.poll_next_item().unwrap(); // INSERT event
         let _ = src.poll_next_item().unwrap(); // INSERT commit
         sql_query("UPDATE orders SET id = 8 WHERE id = 7")
@@ -849,6 +871,7 @@ mod tests {
         sql_query("INSERT INTO orders (id, amount, status) VALUES (9, 500, 'paid')")
             .execute(src.connection())
             .unwrap();
+        let _ = src.poll_next_item().unwrap(); // INSERT relation
         let _ = src.poll_next_item().unwrap(); // INSERT event
         let _ = src.poll_next_item().unwrap(); // INSERT commit
         sql_query("DELETE FROM orders WHERE id = 9")
@@ -881,6 +904,12 @@ mod tests {
             catalog_helpers::table_id::<crate::backend::Postgres, _>(src.pg_catalog(), "orders")
                 .expect("orders id");
         src.inject_truncate(table_id).expect("truncate");
+        // A fresh source states the table's relation ahead of its first frame.
+        let first = src.poll_next_item().unwrap();
+        assert!(
+            matches!(first, Some(SourceItem::Relation(_))),
+            "the fresh source states its table first, got {first:?}"
+        );
         let ev = src
             .poll_next_item()
             .unwrap()

@@ -13,7 +13,7 @@ use diesel::{sql_query, RunQueryDsl};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::CdcEvent;
-use subql::{CdcSource, EventKind, PollingPgCdcConfig, PollingPgCdcSource};
+use subql::{CdcSource, EventKind, PollingPgCdcConfig, PollingPgCdcSource, SourceItem};
 
 const DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, price FLOAT);";
 const PG_DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, price DOUBLE PRECISION)";
@@ -59,6 +59,16 @@ fn polling_source_drains_insert_and_updates_counters() {
             .execute(&mut dml)
             .expect("insert");
 
+        // A fresh slot states the table's relation ahead of its first row.
+        let first = tokio::time::timeout(Duration::from_secs(2), source.next_item())
+            .await
+            .expect("next_item timeout")
+            .expect("next_item err")
+            .expect("source closed");
+        assert!(
+            matches!(first, SourceItem::Relation(_)),
+            "the fresh slot states its table first, got {first:?}"
+        );
         let item = tokio::time::timeout(Duration::from_secs(2), source.next_item())
             .await
             .expect("next_item timeout")
@@ -66,7 +76,7 @@ fn polling_source_drains_insert_and_updates_counters() {
             .expect("source closed");
         let event = item
             .into_event()
-            .expect("first item from a single INSERT is the event");
+            .expect("the insert follows its table's relation");
         assert_eq!(event.kind(), EventKind::Insert);
 
         assert!(source.events_received() >= 1);
