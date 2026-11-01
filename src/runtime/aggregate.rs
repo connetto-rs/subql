@@ -696,7 +696,8 @@ impl Total {
                 parts.finite = boundary.settle(parts.finite)?;
                 Ok(())
             }
-            // The catalog types the column, so only an interval cell reaches here.
+            // A total that keeps interval fields cannot absorb another
+            // family's cell, so a drifted stream cell is refused.
             Self::Interval(total) => {
                 let TotalDelta::Interval(change) = delta else {
                     return Err(SumOutOfRange);
@@ -2417,6 +2418,43 @@ mod tests {
         assert_eq!(
             AggAccumulator::from_snapshot(&accumulator.snapshot(), &spec, rule).err(),
             Some("interval total out of range")
+        );
+    }
+
+    /// A stats seed leaves the interval total untouched, so only the
+    /// interval deltas move it.
+    #[test]
+    fn a_stats_seed_does_not_move_an_interval_total() {
+        let rule = FoldRule {
+            total: crate::backend::SumRule::Interval,
+            ..RULE
+        };
+        let spec = AggSpec::Sum { column: 0 };
+        let mut accumulator = AggAccumulator::seed_stats_row::<crate::backend::Postgres>(
+            &spec,
+            rule,
+            &[
+                crate::backend::Value::Interval(
+                    crate::backend::Interval::parse("1 mon").expect("a month parses"),
+                ),
+                crate::backend::Value::Float(1.5),
+                crate::backend::Value::Int(3),
+            ],
+        );
+        accumulator
+            .apply(&AggDelta::Totalled {
+                value: super::TotalDelta::Interval(crate::backend::IntervalSum::of(
+                    crate::backend::Interval::parse("1 mon").expect("a month parses"),
+                    1,
+                )),
+                count_delta: 1,
+            })
+            .expect("a month fits the ported range");
+        assert_eq!(
+            accumulator.value(),
+            crate::AggValue::Sum(Some(crate::NumericValue::Interval(
+                crate::backend::Interval::parse("1 mon").expect("a month parses")
+            ))),
         );
     }
 }

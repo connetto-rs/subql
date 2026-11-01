@@ -344,18 +344,22 @@ mod tests {
 
     /// What PostgreSQL's grammar or `interval_in` refuses is refused,
     /// including a value that is not a literal at all and an expression
-    /// that is not an interval.
+    /// that is not an interval, and what it reads is read rather than
+    /// refused with it.
     #[test]
     fn a_typed_interval_postgres_refuses_is_refused() {
-        for sql in [
-            "interval '1' hour(2)",
-            "interval '1 fortnight'",
-            "interval 5 hour",
-            "interval x hour",
-            "1 + 1",
+        for (sql, refused) in [
+            ("interval '1' hour(2)", true),
+            ("interval '1 fortnight'", true),
+            ("interval 5 hour", true),
+            ("interval x hour", true),
+            ("interval '1' year to day", true),
+            ("1 + 1", true),
+            ("interval '1 day 02:03:04.5'", false),
         ] {
-            assert!(
+            assert_eq!(
                 matches!(typed_interval(sql), Err(RegisterError::TypeError(_))),
+                refused,
                 "{sql}"
             );
         }
@@ -416,5 +420,33 @@ mod tests {
             SQLite::parse_literal(&broken, ScalarFamily::Json.into()),
             Err(RegisterError::TypeError(_))
         ));
+    }
+
+    /// A fractional precision on a field list that does not end in `SECOND`
+    /// is refused, whatever shape the parser hands over.
+    #[test]
+    fn a_precision_without_seconds_is_refused() {
+        let interval = |field| sqlparser::ast::Interval {
+            value: alloc::boxed::Box::new(sqlparser::ast::Expr::value(
+                SqlValue::SingleQuotedString("1".into()),
+            )),
+            leading_field: Some(field),
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: Some(3),
+        };
+        for (field, refused) in [
+            (sqlparser::ast::DateTimeField::Day, true),
+            (sqlparser::ast::DateTimeField::Second, false),
+        ] {
+            assert_eq!(
+                matches!(
+                    super::interval_literal(&interval(field.clone())),
+                    Err(RegisterError::TypeError(_))
+                ),
+                refused,
+                "{field:?}"
+            );
+        }
     }
 }

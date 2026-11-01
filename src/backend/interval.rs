@@ -182,7 +182,6 @@ impl Interval {
     /// interval divided by an infinity is zero.
     #[must_use]
     pub fn divided_by(self, factor: f64) -> Option<Self> {
-        debug_assert!(factor != 0.0, "division by zero is the caller's error");
         if factor.is_nan() {
             return None;
         }
@@ -203,7 +202,7 @@ impl Interval {
     /// rounds it.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "C's `(int)` casts of remainders the debug assertions bound"
+        reason = "C's `(int)` casts of remainders under 30 in magnitude"
     )]
     #[expect(
         clippy::suboptimal_flops,
@@ -217,7 +216,7 @@ impl Interval {
         let mut day = fits_i32(scale(f64::from(self.days)))?;
         let month_remainder_days =
             ts_round((scale(f64::from(self.months)) - f64::from(month)) * DAYS_PER_MONTH);
-        debug_assert!(month_remainder_days.abs() < DAYS_PER_MONTH + 1.0);
+        // C's `(int)` cast, truncating toward zero, of a value under 30 in magnitude.
         let whole_remainder_days = month_remainder_days as i32;
         let mut sec_remainder = ts_round(
             (scale(f64::from(self.days)) - f64::from(day) + month_remainder_days
@@ -225,8 +224,9 @@ impl Interval {
                 * SECS_PER_DAY,
         );
         if sec_remainder.abs() >= SECS_PER_DAY {
-            debug_assert!(sec_remainder.abs() < 4.0 * SECS_PER_DAY);
+            // Truncating toward zero as C does, of a value under four days in magnitude.
             let whole_days = (sec_remainder / SECS_PER_DAY) as i32;
+            // The carry can push the day field past its range, as the field's ceiling refuses.
             day = day.checked_add(whole_days)?;
             sec_remainder -= f64::from(whole_days) * SECS_PER_DAY;
         }
@@ -323,12 +323,7 @@ pub fn shift_timestamp(
             month = month % 12 + 12;
         }
         // The division above normalises `month` to 1..=12.
-        debug_assert!((1..=12).contains(&month), "the division normalises `month`");
-        #[expect(
-            clippy::cast_sign_loss,
-            reason = "the debug assert bounds `month` to 1..=12"
-        )]
-        let month = month as u32;
+        let month = u32::try_from(month).expect("the division normalises `month` to 1..=12");
         let last = days_in_month(year, month);
         let date = chrono::NaiveDate::from_ymd_opt(year, month, at.day().min(last))
             .ok_or_else(|| past_chrono((1..=294_276).contains(&year)))?;
@@ -346,7 +341,6 @@ pub fn shift_timestamp(
         let date = chrono::NaiveDate::from_num_days_from_ce_opt(julian - JULIAN_OF_DAY_ZERO_CE)
             .ok_or_else(|| past_chrono(julian < TIMESTAMP_END_JULIAN))?;
         at = date.and_time(at.time());
-        pg_timestamp(at).ok_or(TimestampShift::OutOfRange)?;
     }
     let micros = pg_timestamp(at)
         .ok_or(TimestampShift::OutOfRange)?
@@ -384,15 +378,7 @@ pub fn timestamp_difference(
     // share the difference's sign, and nothing carries over.
     let whole_days = time / USECS_PER_DAY;
     // The difference spans at most 97466824 days, under `i32`'s reach.
-    debug_assert!(
-        (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&whole_days),
-        "a difference of timestamps fits whole `i32` days"
-    );
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the debug assert bounds `whole_days`"
-    )]
-    let days = whole_days as i32;
+    let days = i32::try_from(whole_days).expect("a difference of timestamps fits whole `i32` days");
     Some(Interval {
         months: 0,
         days,
@@ -425,18 +411,9 @@ pub fn shift_time(
     };
     let micros = moved.rem_euclid(i128::from(USECS_PER_DAY));
     // `rem_euclid` keeps `micros` under one day, so the clock split fits.
-    debug_assert!(
-        micros < i128::from(USECS_PER_DAY),
-        "rem_euclid keeps `micros` under one day"
-    );
-    #[expect(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "the debug assert bounds `micros` under one day"
-    )]
     let (seconds, nanos) = (
-        (micros / 1_000_000) as u32,
-        (micros % 1_000_000) as u32 * 1_000,
+        u32::try_from(micros / 1_000_000).expect("rem_euclid keeps `micros` under one day"),
+        u32::try_from(micros % 1_000_000).expect("rem_euclid keeps `micros` under one day") * 1_000,
     );
     chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos)
 }
@@ -766,6 +743,38 @@ mod tests {
         assert_eq!(interval("1 day").divided_by(f64::NAN), None);
     }
 
+    /// A quotient whose day field crosses the field's range is refused.
+    #[test]
+    fn a_quotient_past_the_days_field_is_refused() {
+        let both_max = Interval {
+            months: i32::MAX,
+            days: i32::MAX,
+            microseconds: 0,
+        };
+        assert_eq!(both_max.divided_by(1.0 + 1e-11), None);
+    }
+
+    /// A carry of one whole day can push the day field past its range, and
+    /// the refusal is the ported out-of-range.
+    #[test]
+    fn a_carry_past_the_days_field_is_refused() {
+        let near_bound = Interval {
+            months: 1_932_735_283,
+            days: 1_932_735_283,
+            microseconds: 0,
+        };
+        assert_eq!(near_bound.divided_by(0.9), None);
+        let inside = Interval {
+            months: 1_932_735_283,
+            days: 1_932_735_262,
+            microseconds: 0,
+        };
+        assert!(
+            inside.divided_by(0.9).is_some(),
+            "one less carry day lands the field exactly on its ceiling"
+        );
+    }
+
     fn fold(sum: &mut IntervalSum, text: &str, weight: i64) {
         sum.merge(IntervalSum::of(interval(text), weight));
     }
@@ -777,6 +786,7 @@ mod tests {
     fn a_sum_is_its_net_total_when_that_fits() {
         let mut sum = IntervalSum::default();
         assert_eq!(sum.sum(), Ok(None));
+        assert_eq!(sum.mean(), Ok(None), "a mean over no rows answers NULL");
         for text in ["1 mon", "1 day", "1 sec"] {
             fold(&mut sum, text, 1);
         }
@@ -795,6 +805,11 @@ mod tests {
         assert_eq!(wide.sum(), Ok(Some(interval("2000000000 mons"))));
         fold(&mut wide, "-2000000000 mons", -1);
         assert_eq!(wide.sum(), Err(IntervalOutOfRange));
+        assert_eq!(
+            wide.mean(),
+            Err(IntervalOutOfRange),
+            "a total out of range has no mean"
+        );
         assert_eq!(
             IntervalSum::seeded(None, 0, 0, 0).sum(),
             Ok(None),
@@ -1149,6 +1164,20 @@ mod tests {
             shift_timestamp(before_the_first, interval("-1 day")),
             Err(TimestampShift::OutOfRange),
             "a day before the first timestamp leaves PostgreSQL's range"
+        );
+    }
+
+    /// A timestamp PostgreSQL cannot hold is refused where the shift starts,
+    /// even with a no-op span.
+    #[test]
+    fn a_timestamp_postgres_cannot_hold_is_refused() {
+        let out_of_range = chrono::NaiveDate::from_ymd_opt(-10_000, 1, 1)
+            .unwrap()
+            .and_time(chrono::NaiveTime::MIN);
+        assert_eq!(
+            shift_timestamp(out_of_range, interval("00:00:00")),
+            Err(TimestampShift::OutOfRange),
+            "a timestamp outside PostgreSQL's range has no shift to answer"
         );
     }
 

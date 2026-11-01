@@ -157,6 +157,10 @@ fn arithmetic_answers_as_postgres_answers() {
             "zoned + interval '90 minutes' = '2024-03-01 01:30:01+00'",
         ),
         (
+            "zoned - interval '90 minutes' = '2024-02-29 22:30:00+00'",
+            "zoned - interval '90 minutes' = '2024-02-29 22:30:01+00'",
+        ),
+        (
             "zoned + (- interval '90 minutes') = '2024-02-29 22:30:00+00'",
             "zoned + (- interval '90 minutes') = '2024-02-29 22:30:01+00'",
         ),
@@ -262,6 +266,22 @@ fn a_result_postgres_raises_on_is_refused() {
     );
 }
 
+/// Subtracting an interval whose negation leaves its range is refused, as
+/// PostgreSQL 16 and 18 raise there.
+#[test]
+fn subtracting_an_interval_that_cannot_negate_is_refused() {
+    let lowest = Shift {
+        span: "-178956970 years -8 mons",
+        ..SHIFT
+    };
+    assert_eq!(
+        refusals(&lowest, &["start - span IS NOT NULL"]),
+        [EvaluationRefusal::DatetimeOutOfRange {
+            operation: ArithmeticOp::Subtract
+        }]
+    );
+}
+
 /// PostgreSQL holds timestamps to the year 294276 and `chrono` to 262142,
 /// so a result between the two is refused for the row. Answering it as a
 /// null would leave `IS NOT NULL` false where PostgreSQL keeps the row.
@@ -297,6 +317,38 @@ fn a_timestamp_past_the_last_chrono_year_is_refused() {
         [EvaluationRefusal::DatetimeUnrepresentable {
             operation: ArithmeticOp::Add
         }]
+    );
+}
+
+/// A number no double precision holds, on which PostgreSQL raises scaling
+/// an interval by it.
+const HUGE_AMOUNT: &str = concat!(
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999999999999999",
+);
+
+/// A number no double holds is refused, and PostgreSQL raises scaling an
+/// interval by it in either direction.
+#[test]
+fn a_number_no_double_holds_is_refused() {
+    let big = Shift {
+        amount: HUGE_AMOUNT,
+        ..SHIFT
+    };
+    assert_eq!(
+        refusals(
+            &big,
+            &["span * amount > '1 day'", "span / amount > '1 day'"]
+        ),
+        [
+            EvaluationRefusal::DecimalOutsideFloatRange,
+            EvaluationRefusal::DecimalOutsideFloatRange,
+        ]
     );
 }
 

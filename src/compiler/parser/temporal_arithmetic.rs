@@ -332,3 +332,56 @@ pub(super) fn is_interval<B: Backend, DB: DatabaseLike>(
             }
         )
 }
+
+#[cfg(test)]
+mod tests {
+    //! The `MAX_EXPR_DEPTH` ceiling keeps a hand-built AST that the compiler
+    //! itself would refuse from being planned as temporal, so the walker's
+    //! guard is exercised rather than skipped.
+
+    use crate::backend::Postgres;
+    use crate::catalog_helpers;
+    use crate::compiler::sql_shape;
+    use sql_traits::structs::ParserDB;
+    use sqlparser::ast::{Expr, Interval as SqlInterval, Value as SqlValue};
+
+    /// An interval literal wrapped in `nestings` layers of parentheses.
+    fn nested_interval(nestings: usize) -> Expr {
+        let mut expr = Expr::Interval(SqlInterval {
+            value: Box::new(Expr::Value(
+                SqlValue::SingleQuotedString(alloc::string::String::from("1 day"))
+                    .with_empty_span(),
+            )),
+            leading_field: None,
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        });
+        for _ in 0..nestings {
+            expr = Expr::Nested(Box::new(expr));
+        }
+        expr
+    }
+
+    #[test]
+    fn a_nested_interval_deeper_than_the_parser_ceiling_is_not_temporal() {
+        let database =
+            ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>("CREATE TABLE t (id INT)")
+                .expect("the catalog parses");
+        let table = catalog_helpers::table_id::<Postgres, _>(&database, "t")
+            .expect("the catalog names the table");
+
+        assert!(super::is_interval::<Postgres, _>(
+            &nested_interval(1),
+            table,
+            &database,
+            0,
+        ));
+        assert!(!super::is_interval::<Postgres, _>(
+            &nested_interval(sql_shape::MAX_EXPR_DEPTH + 8),
+            table,
+            &database,
+            0,
+        ));
+    }
+}

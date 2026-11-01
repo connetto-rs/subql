@@ -780,7 +780,8 @@ where
     B: Backend + SqlLiteralParse + 'static,
     B::Dialect: sqlparser::dialect::Dialect + Default,
 {
-    let table_id = catalog_helpers::table_id::<B, _>(&database, table)?;
+    let table_id = catalog_helpers::table_id::<B, _>(&database, table)
+        .expect("the case catalog names the case table");
     let mut subql: SubscriptionEngine<TestEvent<B>, DefaultIds, ParserDB> =
         SubscriptionEngine::new(database, B::Dialect::default());
     let registered = match subql.register(SubscriptionRequest::new(

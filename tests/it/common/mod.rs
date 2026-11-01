@@ -253,6 +253,7 @@ fn fresh_db_name() -> String {
     )
 }
 
+pub mod foreign_carriers;
 pub mod mysql;
 #[cfg(any(
     feature = "executor-diesel-postgres",

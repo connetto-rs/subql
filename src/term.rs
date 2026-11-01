@@ -687,13 +687,24 @@ mod tests {
             |text| crate::backend::Interval::parse(text).expect("PostgreSQL reads this interval");
         let mut map: HashMap<TermKey<Postgres>, u32> = HashMap::new();
         map.insert(TermKey::Interval(interval("1 mon")), 1);
-        let value: Value<Postgres> = Value::Interval(interval("30 days"));
-        assert!(
-            matches!(TermLookup::of(value), TermLookup::Key(TermKey::Interval(_))),
-            "an interval row is keyed by its span"
-        );
+        for (value, keyed) in [
+            (Value::<Postgres>::Interval(interval("30 days")), true),
+            (Value::<Postgres>::Int(7), false),
+        ] {
+            assert_eq!(
+                matches!(TermLookup::of(value), TermLookup::Key(TermKey::Interval(_))),
+                keyed,
+                "an interval row is keyed by its span, and no other kind is"
+            );
+        }
         let key = TermKey::Interval(interval("30 days"));
         assert_eq!(map.get(&key), Some(&1));
+        let cloned = key.clone();
+        assert_eq!(
+            map.get(&cloned),
+            Some(&1),
+            "a cloned key finds the same subscriber"
+        );
         assert!(hashes_alike(
             &key,
             &TermKey::Interval(interval("720:00:00"))

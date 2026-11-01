@@ -1532,6 +1532,50 @@ mod tests {
         );
     }
 
+    /// Registration admits only the interval pairs the VM answers, so a
+    /// program that plans another pair reports the kinds it held rather
+    /// than guessing an answer.
+    #[test]
+    fn a_pair_registration_never_plans_is_refused() {
+        let mut vm: Vm<Postgres> = Vm::new();
+        // `1 + span`, which no registration admits.
+        let add: BytecodeProgram<Postgres> = BytecodeProgram::new(vec![
+            Instruction::LoadColumn(0),
+            Instruction::PushLiteral(Value::Interval(
+                crate::backend::Interval::parse("1 day").unwrap(),
+            )),
+            Instruction::Add(None),
+        ]);
+        let e = insert_pg(vec![Value::Int(1)]);
+        assert_eq!(
+            vm.eval(&add, &e, RowKind::New, &pg_catalog()),
+            Err(VmError::Refused(
+                super::refusal::EvaluationRefusal::OperandKinds {
+                    operation: super::refusal::ArithmeticOp::Add,
+                }
+            ))
+        );
+
+        let mut vm: Vm<Postgres> = Vm::new();
+        // `span * 'a'`, which no registration admits.
+        let multiply: BytecodeProgram<Postgres> = BytecodeProgram::new(vec![
+            Instruction::LoadColumn(0),
+            Instruction::PushLiteral(Value::String("a".into())),
+            Instruction::Multiply(None),
+        ]);
+        let e = insert_pg(vec![Value::Interval(
+            crate::backend::Interval::parse("1 day").unwrap(),
+        )]);
+        assert_eq!(
+            vm.eval(&multiply, &e, RowKind::New, &pg_catalog()),
+            Err(VmError::Refused(
+                super::refusal::EvaluationRefusal::OperandKinds {
+                    operation: super::refusal::ArithmeticOp::Multiply,
+                }
+            ))
+        );
+    }
+
     #[test]
     fn pk_kind_rejects_non_pk_column() {
         let mut vm: Vm<Postgres> = Vm::new();

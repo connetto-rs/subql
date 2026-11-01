@@ -50,11 +50,11 @@ pub(super) fn subtract<B: Backend>(
         (Value::Interval(x), Value::Interval(y)) => interval(x.checked_sub(y), operation),
         (other, Value::Interval(span)) => shifted(other, span, true, operation),
         (Value::Timestamp(x), Value::Timestamp(y)) => {
-            let (x, y) = (naive::<B>(&x, operation)?, naive::<B>(&y, operation)?);
+            let (x, y) = carriers::<NaiveDateTime, _>(&x, &y, operation)?;
             interval(timestamp_difference(x, y), operation)
         }
         (Value::TimestampTz(x), Value::TimestampTz(y)) => {
-            let (x, y) = (instant::<B>(&x, operation)?, instant::<B>(&y, operation)?);
+            let (x, y) = carriers::<DateTime<Utc>, _>(&x, &y, operation)?;
             interval(
                 timestamp_difference(x.naive_utc(), y.naive_utc()),
                 operation,
@@ -191,6 +191,18 @@ fn carrier<T: Any + Copy, C: Any>(
     (value as &dyn Any)
         .downcast_ref::<T>()
         .copied()
+        .ok_or(EvaluationRefusal::OperandKinds { operation })
+}
+
+/// Two carriers of one type read as the `chrono` type PostgreSQL's carries.
+fn carriers<T: Any + Copy, C: Any>(
+    x: &C,
+    y: &C,
+    operation: ArithmeticOp,
+) -> Result<(T, T), EvaluationRefusal> {
+    let read = |value: &C| (value as &dyn Any).downcast_ref::<T>().copied();
+    read(x)
+        .zip(read(y))
         .ok_or(EvaluationRefusal::OperandKinds { operation })
 }
 

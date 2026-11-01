@@ -111,6 +111,8 @@ mod float_remainder_default;
 
 mod arithmetic_operand_kinds;
 
+mod temporal_foreign_carriers;
+
 #[cfg(feature = "testing")]
 mod decoder_roundtrip;
 
