@@ -32,7 +32,7 @@ mod agg_sum_nullability;
 
 mod aggregate_bootstrap;
 
-#[cfg(feature = "executor-diesel")]
+#[cfg(all(feature = "diesel-typed-sqlite", feature = "executor-diesel"))]
 mod aggregate_restart_maintenance;
 
 mod aggregate_totals;
