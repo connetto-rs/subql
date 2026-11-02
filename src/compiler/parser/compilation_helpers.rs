@@ -578,6 +578,12 @@ where
                     out,
                     depth,
                 )?,
+                BinaryOperator::Is | BinaryOperator::IsNot => {
+                    // Refused before the operand walk, which would hard-error on the name after IS as an unknown column.
+                    return Err(RegisterError::UnsupportedSql(format!(
+                        "Binary operator {op:?} not supported"
+                    )));
+                }
                 _ => {
                     // A name resolving to no column falls to the generic arms, whose refusal names it.
                     if caller_term::<B, DB>(expr, table_id, database, out)? {
