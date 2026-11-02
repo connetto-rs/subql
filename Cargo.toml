@@ -16,7 +16,7 @@ members = ["subql-demo"]
 exclude = ["fuzz"]
 
 [patch.crates-io]
-# Tracks upstream main until a release ships owned-connection startup metadata.
+# Followed at main, whose version the `pg_walstream` requirement must match for the patch to apply.
 pg_walstream = { git = "https://github.com/isdaniel/pg-walstream", branch = "main" }
 # diesel-rs main carries the sqlite update hook, the collected-binds accessor
 # and the MySQL `execute_returning_id` subql needs, none yet released. Named
@@ -156,16 +156,8 @@ dhat = { version = "0.3", optional = true }
 arbitrary = { version = "1", features = ["derive"], optional = true }
 tempfile = { version = "3", optional = true }
 
-# PostgreSQL logical-replication decoder plus low-level parser. Carries the
-# connection-independent `PgOutputDecoder` (pgoutput bytes to `ChangeEvent`)
-# that subql reads instead of a bespoke parser, and the `pgoutput_encode`
-# side `pg-sqlite-emu` writes through.
-#
-# Default features (`std`, `rustls-tls`) are off so the base
-# `--no-default-features` build stays `no_std + alloc` with no `tokio`. The
-# `std` feature below propagates `pg_walstream/std`, and `pg-streaming` opts
-# into `pg_walstream/rustls-tls` for the pure-Rust replication client.
-pg_walstream = { version = "0.9", default-features = false }
+# Default features off keep the `--no-default-features` build `no_std + alloc` without `tokio`.
+pg_walstream = { version = "0.10", default-features = false }
 
 # Optional diesel-backed Connector for the auto-resolving re-execution
 # engine. Off by default - the lib's no_std + alloc / wasm32 surface stays
@@ -191,7 +183,7 @@ r2d2 = { version = "0.8", optional = true }
 diesel-async = { version = "0.9", optional = true, default-features = false }
 
 # SQLite patchsets and digest conversion for both CDC wire formats.
-sqlite-diff-rs = { version = "0.18", default-features = false, features = ["wal2json", "maxwell"] }
+sqlite-diff-rs = { version = "0.19", default-features = false, features = ["wal2json", "maxwell"] }
 # PostgreSQL wal2json parser and model.
 wal2json-events = { version = "0.1.0", default-features = false }
 # MySQL Maxwell parser and model. Direct, like `wal2json-events` and for the
@@ -571,18 +563,7 @@ sqlite-cdc = [
     "dep:diesel-sqlite-session",
 ]
 
-# Opt-in: a fake Postgres CDC source layered on SQLite. Owns a diesel
-# `SqliteConnection` with the session extension attached (via
-# `diesel-sqlite-session`), translates the caller's PG DDL to SQLite
-# DDL via `pg2sqlite`, applies it to the local database, and each poll
-# drains a fresh session `changeset()`, re-encodes each row change as
-# `pgoutput` wire bytes (via `sqlite-diff-rs`, which tracks `pg_walstream`
-# 0.7), decodes them with the 0.8 `PgOutputDecoder`, and surfaces the
-# resulting `ChangeEvent` values. They look identical to a real Postgres
-# logical replication stream (`Backend = Postgres`), which lets doctests
-# and fuzz harnesses
-# exercise the pgoutput pipeline end-to-end without Docker. Distinct
-# from `sqlite-cdc` (which is the honest `Backend = SQLite` source).
+# A fake Postgres CDC source on SQLite that round-trips session changesets through pgoutput bytes.
 pg-sqlite-emu = [
     "std",
     "dep:diesel",
@@ -599,11 +580,7 @@ pg-sqlite-emu = [
     "diesel-dynamic-schema?/sqlite",
 ]
 
-# Opt-in: outbound patchset emission from pgoutput `ChangeEvent`s. Turns
-# on sqlite-diff-rs's pg-walstream digest surface so subql's pg_walstream
-# 0.8 events fold through `DiffSetBuilder::digest`. The wal2json and
-# Maxwell emission paths need no feature (their digest surface is
-# unconditional in `sqlite-diff-rs`), only the pg path does.
+# Folds pgoutput `ChangeEvent`s through sqlite-diff-rs's digest surface.
 pgoutput-emit = ["sqlite-diff-rs/pg-walstream"]
 
 # Evaluate visibility records without the translator.
