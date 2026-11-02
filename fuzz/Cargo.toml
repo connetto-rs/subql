@@ -24,7 +24,7 @@ resolver = "3"
 members = ["."]
 
 [patch.crates-io]
-# Tracks upstream main until a release ships owned-connection startup metadata.
+# Followed at main, whose version the `pg_walstream` requirement must match for the patch to apply.
 pg_walstream = { git = "https://github.com/isdaniel/pg-walstream", branch = "main" }
 # Mirror the root Cargo.toml [patch.crates-io] pins. cargo-fuzz's standalone
 # workspace does not inherit the parent's patch table, so every root pin has
