@@ -6,10 +6,11 @@ use sql_traits::{
     prelude::DatabaseLike, structs::TargetName, utils::identifier_resolution::identifiers_match,
 };
 use sqlparser::ast::{
-    BinaryOperator, Distinct, DuplicateTreatment, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, InTarget, LimitClause, ObjectName,
-    Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SelectModifiers, SetExpr,
-    Statement, TableFactor, Visit, Visitor,
+    BinaryOperator, Distinct, DuplicateTreatment, Expr, Fetch, ForClause, FormatClause, Function,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident,
+    InTarget, LimitClause, LockClause, ObjectName, OrderBy, PipeOperator, Query, Select,
+    SelectItem, SelectItemQualifiedWildcardKind, SelectModifiers, SetExpr, Setting, Statement,
+    TableFactor, Visit, Visitor, With,
 };
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
@@ -1977,7 +1978,17 @@ fn single_table_select(
                 .to_string(),
         ));
     };
+    let name = single_table_name(&QueryClauses::of(query), select, grouping)?;
+    Ok((select, name))
+}
 
+/// The one table `select` reads after the clause gate, the shared validation
+/// of the served and keyed tiers.
+fn single_table_name<'s>(
+    clauses: &QueryClauses,
+    select: &'s Select,
+    grouping: Grouping,
+) -> Result<&'s ObjectName, RegisterError> {
     if select.from.len() != 1 {
         return Err(RegisterError::UnsupportedSql(
             "Exactly one table required (no joins)".to_string(),
@@ -2000,41 +2011,64 @@ fn single_table_select(
         ));
     };
 
-    check_served_clauses(query, select, grouping)?;
+    check_served_clauses(clauses, select, grouping)?;
 
-    Ok((select, name))
+    Ok(name)
 }
 
-/// Refuse every clause of `query` and `select` outside the projection, the
-/// table, and the WHERE clause.
+/// The clauses of a `Query` the served-shape gate looks at, everything but
+/// `body` and `order_by`.
+///
+/// Held by field borrows so the gate runs while a caller holds the statement's
+/// `Select` mutably, where a whole-`Query` shared borrow could not.
+struct QueryClauses<'q> {
+    with: &'q Option<With>,
+    limit_clause: &'q Option<LimitClause>,
+    fetch: &'q Option<Fetch>,
+    locks: &'q Vec<LockClause>,
+    for_clause: &'q Option<ForClause>,
+    settings: &'q Option<Vec<Setting>>,
+    format_clause: &'q Option<FormatClause>,
+    pipe_operators: &'q Vec<PipeOperator>,
+}
+
+impl<'q> QueryClauses<'q> {
+    /// The gate's clauses of `query`, destructured exhaustively, no `..`, so a
+    /// clause sqlparser learns to parse arrives as a compile error.
+    const fn of(query: &'q Query) -> Self {
+        let Query {
+            with,
+            // Reduced to `select` by the caller.
+            body: _,
+            // Served, not gated: `ORDER BY` changes arrival order, never membership.
+            order_by: _,
+            limit_clause,
+            fetch,
+            locks,
+            for_clause,
+            settings,
+            format_clause,
+            pipe_operators,
+        } = query;
+        Self {
+            with,
+            limit_clause,
+            fetch,
+            locks,
+            for_clause,
+            settings,
+            format_clause,
+            pipe_operators,
+        }
+    }
+}
+
+/// Refuse every clause outside the projection, the table, and the WHERE clause.
 fn check_served_clauses(
-    query: &Query,
+    clauses: &QueryClauses,
     select: &Select,
     grouping: Grouping,
 ) -> Result<(), RegisterError> {
-    // Destructured exhaustively, no `..`, on purpose: sqlparser is tracked by
-    // branch, so a clause it learns to parse arrives here as a compile error
-    // demanding a decision instead of as a silently dropped clause. sqlparser
-    // guards `SelectModifiers::is_any_set` the same way.
-    let Query {
-        with,
-        // Reduced to `select` by the caller.
-        body: _,
-        // Served, not refused: `ORDER BY` changes the sequence rows arrive in,
-        // never which rows are members, so the in-process row engine matches the
-        // same set and a caller applies the ordering to its own snapshot. A
-        // window (`LIMIT`/`OFFSET`/`FETCH`) does change membership and is refused
-        // on its own line below.
-        order_by: _,
-        limit_clause,
-        fetch,
-        locks,
-        for_clause,
-        settings,
-        format_clause,
-        pipe_operators,
-    } = query;
-
     let Select {
         // Span of the `SELECT` keyword, not a clause.
         select_token: _,
@@ -2093,12 +2127,10 @@ fn check_served_clauses(
         Some(Distinct::Distinct | Distinct::On(_)) => true,
     };
 
-    // Ordered most-written first. Later entries name clauses no backend's
-    // dialect here parses (ClickHouse, Hive, Snowflake, MSSQL, BigQuery), so no
-    // test reaches them: they are the decision the exhaustive destructuring
-    // demands, and refusing is the only safe one to make blind.
+    // Most-written first. Later entries name clauses no backend dialect here
+    // parses, so no test reaches them and refusing is the only safe blind call.
     for (present, clause) in [
-        (with.is_some(), "WITH"),
+        (clauses.with.is_some(), "WITH"),
         (grouping_refused, "GROUP BY"),
         // Like `GROUP BY`: on the served path the projection logic decides,
         // parsing the fast-path comparison and refusing everything else, so
@@ -2107,15 +2139,15 @@ fn check_served_clauses(
         (having.is_some() && grouping == Grouping::Refused, "HAVING"),
         (deduplicating, "DISTINCT"),
         (
-            limit_clause.is_some(),
-            limit_clause_name(limit_clause.as_ref()),
+            clauses.limit_clause.is_some(),
+            limit_clause_name(clauses.limit_clause.as_ref()),
         ),
-        (fetch.is_some(), "FETCH"),
-        (!locks.is_empty(), "FOR UPDATE / FOR SHARE"),
-        (for_clause.is_some(), "FOR XML / FOR JSON"),
-        (settings.is_some(), "SETTINGS"),
-        (format_clause.is_some(), "FORMAT"),
-        (!pipe_operators.is_empty(), "a pipe operator"),
+        (clauses.fetch.is_some(), "FETCH"),
+        (!clauses.locks.is_empty(), "FOR UPDATE / FOR SHARE"),
+        (clauses.for_clause.is_some(), "FOR XML / FOR JSON"),
+        (clauses.settings.is_some(), "SETTINGS"),
+        (clauses.format_clause.is_some(), "FORMAT"),
+        (!clauses.pipe_operators.is_empty(), "a pipe operator"),
         (!optimizer_hints.is_empty(), "an optimizer hint"),
         (
             select_modifiers
@@ -2192,15 +2224,36 @@ pub(crate) fn extract_single_table_and_where(
     extract_table_and_where_with(stmt, Grouping::Served)
 }
 
-/// As [`extract_single_table_and_where`], but refusing a grouped statement.
+/// As [`extract_single_table_and_where`], but refusing a grouped statement and
+/// keeping the statement's `Select` as a mutable borrow, alongside the table
+/// name and the `ORDER BY` clause.
 ///
-/// For callers that do something with the rows themselves rather than build a
-/// fold: a keyed capture asks the database about one changed row, and a
-/// grouping makes that row's membership depend on the others.
-pub(crate) fn extract_ungrouped_table_and_where(
-    stmt: &Statement,
-) -> Result<(ObjectName, Option<Expr>), RegisterError> {
-    extract_table_and_where_with(stmt, Grouping::Refused)
+/// The clause gate runs on the shared borrow before the mutable one, since its
+/// exhaustive destructure cannot coexist with the returned `Select` borrow.
+/// `ORDER BY` is the only relation-bearing scope outside the select once the
+/// gate holds, which is why it comes back too.
+pub(crate) fn extract_ungrouped_select_and_table(
+    stmt: &mut Statement,
+) -> Result<(&mut Select, ObjectName, Option<&OrderBy>), RegisterError> {
+    let Statement::Query(query) = stmt else {
+        return Err(RegisterError::UnsupportedSql(
+            "Only SELECT statements supported - SubQL is for querying CDC events, not modifying data. \
+             For INSERT, UPDATE, DELETE, or DDL operations, use your database directly."
+                .to_string(),
+        ));
+    };
+    // The gate runs first; its destructure cannot coexist with the mutable
+    // borrow of `body` that follows.
+    let name = single_table_select(query, Grouping::Refused)?.1.clone();
+    // The gate has established that `body` is a `Select`.
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        return Err(RegisterError::UnsupportedSql(
+            "Set operations (UNION, INTERSECT, EXCEPT) not supported - SubQL is for single-table CDC event filtering. \
+             For queries combining multiple result sets, run this as a regular SQL query in your database."
+                .to_string(),
+        ));
+    };
+    Ok((select, name, query.order_by.as_ref()))
 }
 
 fn extract_table_and_where_with(

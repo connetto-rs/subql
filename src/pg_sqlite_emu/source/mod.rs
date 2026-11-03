@@ -27,7 +27,7 @@ use sqlite_diff_rs::pg_walstream_reverse::{
 use sqlite_diff_rs::{ChangesetOp, ParsedDiffSet, TableSchema};
 
 use super::error::PgSqliteEmuError;
-use crate::wal::{PgChangeEvent, PgOutputOrder, PgSourceItem, SourceItem};
+use crate::wal::{PgChangeEvent, PgOutputOrder, PgRowItem, PgSourceItem, SourceItem};
 use crate::TableId;
 
 mod row_lookup;
@@ -95,6 +95,7 @@ pub struct PgSqliteEmuSource {
     decoder: PgOutputDecoder,
     order: PgOutputOrder,
     pending: VecDeque<PgSourceItem>,
+    staged: Vec<PgRowItem>,
     announced: HashSet<Oid>,
     tables: HashMap<String, TableMeta>,
     /// WAL position of the last frame, which the next transaction's
@@ -188,6 +189,7 @@ impl PgSqliteEmuSource {
             decoder: PgOutputDecoder::with_protocol_version(u32::from(PROTOCOL_VERSION)),
             order: PgOutputOrder::new(),
             pending: VecDeque::new(),
+            staged: Vec::new(),
             announced: HashSet::new(),
             tables,
             next_lsn: 0,
@@ -542,7 +544,9 @@ impl PgSqliteEmuSource {
         encode_message(msg, PROTOCOL_VERSION, &mut buf);
         self.next_lsn += 1;
         if let Some(decoded) = self.decoder.decode_message(buf, Lsn::new(self.next_lsn))? {
-            let commit = self.order.apply(decoded, &mut self.pending)?;
+            let commit = self.order.apply(decoded, &mut self.staged)?;
+            self.pending
+                .extend(self.staged.drain(..).map(PgSourceItem::from));
             self.pending.extend(commit.map(SourceItem::Commit));
         }
         Ok(())

@@ -24,8 +24,8 @@ use sql_traits::prelude::DatabaseLike;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    PgChangeEvent, PgCommit, PgOutputOrder, PgRelation, PgSourceItem, ReleaseQueue, SourceItem,
-    TransactionOrderError,
+    PgChangeEvent, PgCommit, PgOutputOrder, PgRelation, PgRowItem, PgSourceItem, ReleaseQueue,
+    SourceItem, TransactionOrderError,
 };
 use crate::{PgCommitPosition, PgLsn};
 
@@ -354,6 +354,7 @@ impl crate::CdcSource for PgStreamingCdcSource {
 struct Delivery {
     order: PgOutputOrder,
     items: VecDeque<PgSourceItem>,
+    staged: Vec<PgRowItem>,
     releases: ReleaseQueue,
     start: Option<PgCommitPosition>,
 }
@@ -363,6 +364,7 @@ impl Delivery {
         Self {
             order: PgOutputOrder::new(),
             items: VecDeque::new(),
+            staged: Vec::new(),
             releases: ReleaseQueue::new(),
             start,
         }
@@ -371,7 +373,9 @@ impl Delivery {
     /// Place `change` in the transaction frame and stage its fanout, the
     /// items first and a commit ending a transaction after them.
     fn stage(&mut self, change: pg_walstream::ChangeEvent) -> Result<(), TransactionOrderError> {
-        let commit = self.order.apply(change, &mut self.items)?;
+        let commit = self.order.apply(change, &mut self.staged)?;
+        self.items
+            .extend(self.staged.drain(..).map(PgSourceItem::from));
         self.items.extend(commit.map(SourceItem::Commit));
         Ok(())
     }

@@ -50,6 +50,30 @@ fn register(engine: &mut Engine, consumer: u64, sql: &str) -> (SubscriptionId, T
     (registered.subscription_id, registered.tier)
 }
 
+/// A union body and a derived table reach the whole-rows tier, unrewritten.
+#[test]
+fn unrewritable_shapes_still_reach_the_whole_rows_tier() {
+    let mut engine = engine();
+    let (_, tier) = register(
+        &mut engine,
+        1,
+        "SELECT id FROM orders UNION ALL SELECT id FROM managers",
+    );
+    assert!(
+        matches!(tier, Tier::WholeRows { .. }),
+        "a union body reaches the whole-rows tier, got {tier:?}"
+    );
+    let (_, tier) = register(
+        &mut engine,
+        2,
+        "SELECT * FROM (SELECT id, price FROM orders) AS x",
+    );
+    assert!(
+        matches!(tier, Tier::WholeRows { .. }),
+        "a derived table reaches the whole-rows tier, got {tier:?}"
+    );
+}
+
 /// One statement per tier, and each names its own tier.
 #[test]
 fn every_shape_reports_the_tier_that_maintains_it() {

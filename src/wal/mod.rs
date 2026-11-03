@@ -20,11 +20,11 @@ mod transaction_order;
 mod wal2json;
 pub(crate) mod wire_event;
 
-#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
-pub(crate) use change_event::PgOutputOrder;
 #[cfg(feature = "pg-streaming")]
 pub(crate) use change_event::ReleaseQueue;
 pub use change_event::{PgChangeEvent, PgCommit, PgRelation, PgRelationColumn};
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+pub(crate) use change_event::{PgOutputOrder, PgRowItem};
 pub use maxwell::parse_messages as parse_maxwell;
 pub use maxwell::MaxwellEvent;
 pub use maxwell_cdc::Message as MaxwellMessage;

@@ -886,7 +886,9 @@ pub fn pgbinary_patchset<B: crate::backend::Backend, DB: DatabaseLike>(
 mod tests {
     use super::*;
     use sql_traits::structs::ParserDB;
-    use sqlite_diff_rs::{ChangesetOp, ParsedDiffSet, PatchsetOp, TableSchema};
+    use sqlite_diff_rs::{
+        ChangesetOp, DiffSet, ParsedDiffSet, PatchsetFormat, PatchsetOp, TableSchema, Update,
+    };
     use sqlparser::dialect::PostgreSqlDialect;
     use wal2json_events::parse_v2;
 
@@ -897,19 +899,22 @@ mod tests {
         .unwrap()
     }
 
-    /// The wal2json line's patchset bytes, with the marker asserted. The
-    /// emitted ops borrow from the returned value, so the caller still
-    /// matches the `Patchset` variant.
-    fn patchset_for_line(db: &ParserDB, line: &str) -> ParsedDiffSet {
+    /// The parsed patchset, typed for the patchset wire format.
+    type PatchDiff = DiffSet<PatchsetFormat, TableSchema<String>, String, Vec<u8>>;
+
+    /// The wal2json line's patchset bytes, already resolved to the typed
+    /// patchset. The emitted ops borrow from the returned value, so the
+    /// caller keeps it alive.
+    fn patchset_for_line(db: &ParserDB, line: &str) -> PatchDiff {
         let msg = parse_v2(line).unwrap();
         let bytes = wal2json_patchset(db, core::slice::from_ref(&msg)).unwrap();
         parse_patchset(&bytes)
     }
 
     /// Owns the parsed patchset of one wal2json line so a test borrows
-    /// its ops without restating the variant unwrap and collect.
+    /// its ops without restating the collect.
     struct PatchsetOps {
-        parsed: ParsedDiffSet,
+        diff: PatchDiff,
     }
 
     /// The op view of a parsed patchset, spelled once for the test bodies.
@@ -917,16 +922,13 @@ mod tests {
 
     impl PatchsetOps {
         fn ops(&self) -> Vec<RowOp<'_>> {
-            let ParsedDiffSet::Patchset(diff) = &self.parsed else {
-                unreachable!("parse_patchset asserted the Patchset variant");
-            };
-            diff.iter().collect()
+            self.diff.iter().collect()
         }
     }
 
     fn patchset_ops(db: &ParserDB, line: &str) -> PatchsetOps {
         PatchsetOps {
-            parsed: patchset_for_line(db, line),
+            diff: patchset_for_line(db, line),
         }
     }
 
@@ -946,10 +948,15 @@ mod tests {
         pk.to_vec()
     }
 
-    fn parse_patchset(bytes: &[u8]) -> ParsedDiffSet {
+    /// Parse bytes as a patchset, asserting the patchset marker in the one
+    /// match below. The panic arm is the assertion, reached when the bytes
+    /// carry the changeset marker instead.
+    fn parse_patchset(bytes: &[u8]) -> PatchDiff {
         let parsed = ParsedDiffSet::parse(bytes).unwrap();
-        assert!(parsed.is_patchset(), "expected the SQLite patchset marker");
-        parsed
+        let ParsedDiffSet::Patchset(diff) = parsed else {
+            panic!("expected the SQLite patchset marker, got a changeset");
+        };
+        diff
     }
 
     #[test]
@@ -993,7 +1000,7 @@ mod tests {
             .digest_sql("INSERT INTO ledger (id, amount, note) VALUES ('k1', '12.50', 7)")
             .expect("an untyped key is no rowid alias");
         let parsed = PatchsetOps {
-            parsed: parse_patchset(&builder.build()),
+            diff: parse_patchset(&builder.build()),
         };
         let ops = parsed.ops();
         let PatchsetOp::Insert { values, .. } = &ops[0] else {
@@ -1218,9 +1225,7 @@ mod tests {
     }
 
     fn only_insert_values(bytes: &[u8]) -> Vec<WireValue<String, Vec<u8>>> {
-        let ParsedDiffSet::Patchset(diff) = parse_patchset(bytes) else {
-            unreachable!("parse_patchset asserted the Patchset variant");
-        };
+        let diff = parse_patchset(bytes);
         let ops: Vec<_> = diff.iter().collect();
         assert_eq!(ops.len(), 1);
         let PatchsetOp::Insert { values, .. } = &ops[0] else {
@@ -1802,9 +1807,7 @@ mod tests {
             xid: None,
         };
         let bytes = pgoutput_patchset(&db, core::slice::from_ref(&ev)).unwrap();
-        let ParsedDiffSet::Patchset(diff) = parse_patchset(&bytes) else {
-            unreachable!("parse_patchset asserted the Patchset variant");
-        };
+        let diff = parse_patchset(&bytes);
         let ops: Vec<_> = diff.iter().collect();
         assert_eq!(ops.len(), 1);
         let PatchsetOp::Insert { values, .. } = &ops[0] else {
@@ -1827,9 +1830,7 @@ mod tests {
         )
         .unwrap();
         let bytes = maxwell_patchset(&db, core::slice::from_ref(&msg)).unwrap();
-        let ParsedDiffSet::Patchset(diff) = parse_patchset(&bytes) else {
-            unreachable!("parse_patchset asserted the Patchset variant");
-        };
+        let diff = parse_patchset(&bytes);
         assert_eq!(diff.iter().count(), 1);
     }
 
@@ -1895,24 +1896,31 @@ mod tests {
         };
 
         let bytes = pgoutput_patchset(&db, &[insert, update]).unwrap();
-        let parsed = parse_patchset(&bytes);
-        let ParsedDiffSet::Patchset(diff) = &parsed else {
-            unreachable!("parse_patchset asserted the Patchset variant");
-        };
-        let ops: Vec<RowOp<'_>> = diff.iter().collect();
-        assert_eq!(ops.len(), 2, "one op per row event: {ops:?}");
-        let PatchsetOp::Insert { values, .. } = &ops[0] else {
-            panic!("expected an insert op, got {:?}", ops[0]);
-        };
+        let table = catalog_helpers::simple_table(
+            &db,
+            catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "orders").unwrap(),
+        )
+        .unwrap();
+        let expected = PatchSet::<SimpleTable, String, Vec<u8>>::new()
+            .insert(
+                Insert::from(table.clone())
+                    .set(0, 1i64)
+                    .unwrap()
+                    .set(1, 100i64)
+                    .unwrap(),
+            )
+            .update(
+                Update::<_, PatchsetFormat, String, Vec<u8>>::from(table)
+                    .set(0, 2i64)
+                    .unwrap()
+                    .set(1, 200i64)
+                    .unwrap(),
+            )
+            .build();
         assert_eq!(
-            values.to_vec(),
-            vec![WireValue::Integer(1), WireValue::Integer(100)],
+            bytes, expected,
             "the patch holds only the catalog's columns, in catalog order"
         );
-        let PatchsetOp::Update { pk, .. } = &ops[1] else {
-            panic!("expected an update op, got {:?}", ops[1]);
-        };
-        assert_eq!(pk.to_vec(), vec![WireValue::Integer(2)]);
     }
 
     /// An event naming a table the catalog lacks passes the projection
@@ -1988,6 +1996,7 @@ mod tests {
     #[test]
     fn pgoutput_fold_projects_a_delete_onto_the_catalogs_columns() {
         use sqlite_diff_rs::pg_walstream::{ColumnValue, EventType, Lsn, ReplicaIdentity, RowData};
+        use sqlite_diff_rs::PatchDelete;
 
         // The catalog was built before the server added `status`.
         let db = ParserDB::parse::<PostgreSqlDialect>(
@@ -2012,17 +2021,16 @@ mod tests {
             xid: None,
         };
         let bytes = pgoutput_patchset(&db, core::slice::from_ref(&delete)).unwrap();
-        let ParsedDiffSet::Patchset(diff) = parse_patchset(&bytes) else {
-            unreachable!("parse_patchset asserted the Patchset variant");
-        };
-        let ops: Vec<RowOp<'_>> = diff.iter().collect();
-        assert_eq!(ops.len(), 1, "one op for the delete: {ops:?}");
-        let PatchsetOp::Delete { pk, .. } = &ops[0] else {
-            panic!("expected a delete op, got {:?}", ops[0]);
-        };
+        let table = catalog_helpers::simple_table(
+            &db,
+            catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "orders").unwrap(),
+        )
+        .unwrap();
+        let expected = PatchSet::<SimpleTable, String, Vec<u8>>::new()
+            .delete(PatchDelete::new(table, vec![WireValue::Integer(3)]))
+            .build();
         assert_eq!(
-            pk.to_vec(),
-            vec![WireValue::Integer(3)],
+            bytes, expected,
             "the delete keeps the key, in the catalog's spelling"
         );
     }
@@ -2080,28 +2088,29 @@ mod tests {
         };
 
         let bytes = pgoutput_changeset(&db, &[insert, update]).unwrap();
-        let ParsedDiffSet::Changeset(diff) = ParsedDiffSet::parse(&bytes).unwrap() else {
-            panic!("expected a changeset, got a patchset");
-        };
-        let ops: Vec<_> = diff.iter().collect();
-        assert_eq!(ops.len(), 2, "one op per row event: {ops:?}");
-        let ChangesetOp::Insert { values, .. } = &ops[0] else {
-            panic!("expected an insert op, got {:?}", ops[0]);
-        };
+        let table = catalog_helpers::simple_table(
+            &db,
+            catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "orders").unwrap(),
+        )
+        .unwrap();
+        let expected = ChangeSet::<SimpleTable, String, Vec<u8>>::new()
+            .insert(
+                Insert::from(table.clone())
+                    .set(0, 1i64)
+                    .unwrap()
+                    .set(1, 100i64)
+                    .unwrap(),
+            )
+            .update(
+                Update::<_, ChangesetFormat, String, Vec<u8>>::from(table)
+                    .set(0, 2i64, 2i64)
+                    .unwrap()
+                    .set(1, 100i64, 200i64)
+                    .unwrap(),
+            )
+            .build();
         assert_eq!(
-            values.to_vec(),
-            vec![WireValue::Integer(1), WireValue::Integer(100)],
-            "the insert records only the catalog's columns"
-        );
-        let ChangesetOp::Update { values, .. } = &ops[1] else {
-            panic!("expected an update op, got {:?}", ops[1]);
-        };
-        assert_eq!(
-            values.to_vec(),
-            vec![
-                (Some(WireValue::Integer(2)), Some(WireValue::Integer(2))),
-                (Some(WireValue::Integer(100)), Some(WireValue::Integer(200))),
-            ],
+            bytes, expected,
             "the old and new images hold only the catalog's columns"
         );
     }
@@ -2121,36 +2130,33 @@ mod tests {
         )
         .unwrap();
         let bytes = maxwell_changeset(&db, &[insert, update]).unwrap();
-        let ParsedDiffSet::Changeset(diff) = ParsedDiffSet::parse(&bytes).unwrap() else {
-            panic!("expected a changeset, got a patchset");
-        };
-        let ops: Vec<_> = diff.iter().collect();
-        assert_eq!(ops.len(), 2, "one op per row message: {ops:?}");
-        let ChangesetOp::Insert { values, .. } = &ops[0] else {
-            panic!("expected an insert op, got {:?}", ops[0]);
-        };
+        let table = catalog_helpers::simple_table(
+            &db,
+            catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "orders").unwrap(),
+        )
+        .unwrap();
+        let expected = ChangeSet::<SimpleTable, String, Vec<u8>>::new()
+            .insert(
+                Insert::from(table.clone())
+                    .set(0, 1i64)
+                    .unwrap()
+                    .set(1, 100i64)
+                    .unwrap()
+                    .set(2, String::from("new"))
+                    .unwrap(),
+            )
+            .update(
+                Update::<_, ChangesetFormat, String, Vec<u8>>::from(table)
+                    .set(0, 2i64, 2i64)
+                    .unwrap()
+                    .set(1, 100i64, 200i64)
+                    .unwrap()
+                    .set(2, String::from("paid"), String::from("paid"))
+                    .unwrap(),
+            )
+            .build();
         assert_eq!(
-            values.to_vec(),
-            vec![
-                WireValue::Integer(1),
-                WireValue::Integer(100),
-                WireValue::Text(String::from("new")),
-            ],
-            "the insert records the message's columns in catalog order"
-        );
-        let ChangesetOp::Update { values, .. } = &ops[1] else {
-            panic!("expected an update op, got {:?}", ops[1]);
-        };
-        assert_eq!(
-            values.to_vec(),
-            vec![
-                (Some(WireValue::Integer(2)), Some(WireValue::Integer(2))),
-                (Some(WireValue::Integer(100)), Some(WireValue::Integer(200)),),
-                (
-                    Some(WireValue::Text(String::from("paid"))),
-                    Some(WireValue::Text(String::from("paid"))),
-                ),
-            ],
+            bytes, expected,
             "a column absent from the old image keeps the new value in both slots"
         );
     }

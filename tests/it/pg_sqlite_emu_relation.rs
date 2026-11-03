@@ -19,11 +19,28 @@ fn the_first_item_is_the_tables_relation() {
         .execute_sql("INSERT INTO orders VALUES (1, 5.0)")
         .expect("insert");
 
-    let first = source
-        .poll_next_item()
-        .expect("poll succeeds")
-        .expect("an item pending");
-    let relation: PgRelation = first.into_relation().expect("a relation item");
+    let items = source.drain().expect("drain succeeds");
+    assert!(
+        matches!(items.first(), Some(SourceItem::Relation(_))),
+        "the first item is the table's relation, got {items:?}"
+    );
+    let relations: Vec<PgRelation> = items
+        .iter()
+        .cloned()
+        .filter_map(SourceItem::into_relation)
+        .collect();
+    let commits: Vec<_> = items
+        .iter()
+        .cloned()
+        .filter_map(SourceItem::into_commit)
+        .collect();
+    assert_eq!(
+        items.len(),
+        3,
+        "the relation, the first event, and the commit"
+    );
+    assert_eq!(relations.len(), 1, "the table's relation leads the stream");
+    let relation = &relations[0];
     assert_eq!(relation.schema(), "");
     assert_eq!(relation.table(), "orders");
     assert_eq!(relation.oid(), 1000);
@@ -39,23 +56,9 @@ fn the_first_item_is_the_tables_relation() {
     );
     assert_eq!(columns[1].name(), "price");
     assert!(!columns[1].is_key());
-
-    // The table's first event and the transaction's commit follow it.
     assert!(
-        source
-            .poll_next_item()
-            .expect("poll succeeds")
-            .and_then(SourceItem::into_event)
-            .is_some(),
-        "the first event follows its table's relation"
+        matches!(items.last(), Some(SourceItem::Commit(_))),
+        "the transaction's commit follows its rows, got {items:?}"
     );
-    assert!(
-        source
-            .poll_next_item()
-            .expect("poll succeeds")
-            .and_then(SourceItem::into_commit)
-            .is_some(),
-        "the transaction's commit follows"
-    );
-    assert!(source.poll_next_item().expect("poll succeeds").is_none());
+    assert_eq!(commits.len(), 1, "one commit ends the transaction");
 }

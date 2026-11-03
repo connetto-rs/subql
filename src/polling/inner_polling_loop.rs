@@ -12,7 +12,7 @@ use core::time::Duration;
 
 use pg_walstream::{parse_lsn, Lsn, PgOutputDecoder, PgReplicationConnection};
 
-use crate::wal::{PgOutputOrder, PgSourceItem, ReleaseQueue, SourceItem};
+use crate::wal::{PgOutputOrder, PgRowItem, PgSourceItem, ReleaseQueue, SourceItem};
 use crate::PgCommitPosition;
 
 use super::helpers::{hex_decode, render_lsn, sql_string_literal};
@@ -52,13 +52,11 @@ pub(super) fn polling_loop(
 
     let mut decoder = PgOutputDecoder::with_protocol_version(1);
     let mut order = PgOutputOrder::new();
-    let mut items: Vec<PgSourceItem> = Vec::new();
+    let mut items: Vec<PgRowItem> = Vec::new();
     let mut releases = ReleaseQueue::new();
     // A peek re-reads every unacknowledged transaction at the same positions.
     let mut last_delivered: Option<PgCommitPosition> = None;
-    // A peek re-reads every unacknowledged relation at the same message LSN,
-    // which is strictly increasing in WAL order.
-    let mut last_relation_lsn: Option<u64> = None;
+
     let unseen = |last: Option<PgCommitPosition>, position| last.is_none_or(|last| position > last);
     let slot = sql_string_literal(&slot_name);
     let publication = sql_string_literal(&publication_name);
@@ -169,8 +167,8 @@ pub(super) fn polling_loop(
                 reason = "the buffer is reused for every message"
             )]
             for item in items.drain(..) {
-                match item {
-                    SourceItem::Event(ev) => {
+                let outgoing = match item {
+                    PgRowItem::Event(ev) => {
                         if !unseen(last_delivered, ev.position()) {
                             continue;
                         }
@@ -181,24 +179,12 @@ pub(super) fn polling_loop(
                             drain_counted = true;
                             non_empty_drains.fetch_add(1, Ordering::Relaxed);
                         }
-                        if event_tx.blocking_send(Ok(SourceItem::Event(ev))).is_err() {
-                            return;
-                        }
+                        SourceItem::Event(ev)
                     }
-                    SourceItem::Relation(relation) => {
-                        if relation.lsn().0 <= last_relation_lsn.unwrap_or(0) {
-                            continue;
-                        }
-                        last_relation_lsn = Some(relation.lsn().0);
-                        if event_tx
-                            .blocking_send(Ok(SourceItem::Relation(relation)))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    // The commit comes back from `apply`, not the buffer.
-                    SourceItem::Commit(_) => {}
+                    PgRowItem::Relation(relation) => SourceItem::Relation(relation),
+                };
+                if event_tx.blocking_send(Ok(outgoing)).is_err() {
+                    return;
                 }
             }
             if let Some(commit) =
