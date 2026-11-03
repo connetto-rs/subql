@@ -133,6 +133,13 @@ fn shifted<B: Backend>(
     operation: ArithmeticOp,
 ) -> Result<Value<B>, EvaluationRefusal> {
     let out_of_range = EvaluationRefusal::DatetimeOutOfRange { operation };
+    // A time moves by the clock alone, so months and days that cannot be
+    // negated never refuse it.
+    if let Value::Time(at) = at {
+        let at = carrier::<NaiveTime, _>(&at, operation)?;
+        let moved = shift_time(at, span, subtract).ok_or(out_of_range)?;
+        return same::<B::Time, _>(moved, operation).map(Value::Time);
+    }
     let span = if subtract {
         span.checked_neg().ok_or(out_of_range)?
     } else {
@@ -150,11 +157,6 @@ fn shifted<B: Backend>(
                 shift_timestamp(day.and_time(NaiveTime::MIN), span),
                 operation,
             )
-        }
-        Value::Time(at) => {
-            let at = carrier::<NaiveTime, _>(&at, operation)?;
-            let moved = shift_time(at, span, false).ok_or(out_of_range)?;
-            same::<B::Time, _>(moved, operation).map(Value::Time)
         }
         // Only an interval without months or days is admitted, whose result
         // no time zone moves.

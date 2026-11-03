@@ -96,6 +96,7 @@ All notable changes to subql are recorded here. The format follows [Keep a Chang
 
 ### Fixed
 
+- `time - interval` in a PostgreSQL predicate moves the clock by the interval's time alone, as PostgreSQL's `time_mi_interval` does, so `time '00:00:00' - interval '-2147483648 days'` answers `00:00:00`. The interval was negated whole first, so months or days at their minimum refused the row although a time ignores them.
 - A shard saved under an older `sqlparser-canonicalize` restores each predicate under the hash the current canonicalizer gives its saved text, so registering the same query again returns the restored subscription. It kept the saved hash, and a new registration computed another one, so the same consumer and query got a second subscription. Saved spellings that now read alike merge onto one predicate, unless either carries membership terms, whose seeds follow their own predicate's slots.
 - Arithmetic over `NULL` alone in a PostgreSQL predicate, such as `(- NULL) IS NULL` or `(NULL + NULL) IS NULL`, is refused at registration with `RegisterError::RefusedByEngine`, since PostgreSQL has no operand type to pick an operator by and raises `operator is not unique`. It was answered in process as `NULL`, which is MySQL's and SQLite's answer and stays theirs. Backends name the rule with the new required `Backend::NULL_ARITHMETIC_IS_AMBIGUOUS`.
 - `executor-diesel` and `apply-patchset-postgres` compile without `std`, as their feature documentation promises, and CI checks `apply-patchset-postgres` under `--no-default-features`.

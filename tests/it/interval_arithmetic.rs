@@ -282,6 +282,27 @@ fn subtracting_an_interval_that_cannot_negate_is_refused() {
     );
 }
 
+/// A time moves by an interval's clock alone, so subtracting one whose
+/// months or days cannot be negated still answers, as PostgreSQL 16 and 18
+/// answer it.
+#[test]
+fn a_time_minus_an_interval_ignores_its_months_and_days() {
+    for (span, clock, wrong) in [
+        ("-178956970 years -8 mons +01:00:00", "22:30:00", "22:30:01"),
+        ("-2147483648 days", "23:30:00", "23:30:01"),
+    ] {
+        let shift = Shift { span, ..SHIFT };
+        assert!(
+            holds(&shift, &format!("clock - span = '{clock}'")),
+            "{span}"
+        );
+        assert!(
+            !holds(&shift, &format!("clock - span = '{wrong}'")),
+            "{span}"
+        );
+    }
+}
+
 /// PostgreSQL holds timestamps to the year 294276 and `chrono` to 262142,
 /// so a result between the two is refused for the row. Answering it as a
 /// null would leave `IS NOT NULL` false where PostgreSQL keeps the row.
