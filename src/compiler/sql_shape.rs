@@ -1954,6 +1954,12 @@ fn is_operator(token: &Token) -> bool {
     }
 }
 
+/// The refusal for `UNION`, `INTERSECT`, and `EXCEPT`, one statement shape no
+/// re-execution tier can serve.
+const SET_OPERATIONS_NOT_SUPPORTED: &str =
+    "Set operations (UNION, INTERSECT, EXCEPT) not supported - SubQL is for single-table CDC event filtering. \
+     For queries combining multiple result sets, run this as a regular SQL query in your database.";
+
 /// The one `SELECT` a query reduces to, with the table it reads.
 ///
 /// This is SubQL's statement-shape rule: one table, and of the statement only
@@ -1965,20 +1971,24 @@ fn is_operator(token: &Token) -> bool {
 /// [`RegisterError::UnsupportedSql`], so a clause accepted here is a clause no
 /// tier above can serve.
 ///
+/// The gate takes the parts it inspects, the statement's `body` and
+/// [`QueryClauses`], rather than the whole [`Query`], so a caller can match
+/// `body` once and read the clauses through borrows that stay disjoint from
+/// the match's own.
+///
 /// Stated once and applied both to the subscription statement and to the inner
 /// query of a membership subquery, so the two cannot drift apart.
-fn single_table_select(
-    query: &Query,
+fn single_table_select<'s>(
+    body: &'s SetExpr,
+    clauses: &QueryClauses,
     grouping: Grouping,
-) -> Result<(&Select, &ObjectName), RegisterError> {
-    let SetExpr::Select(select) = query.body.as_ref() else {
+) -> Result<(&'s Select, &'s ObjectName), RegisterError> {
+    let SetExpr::Select(select) = body else {
         return Err(RegisterError::UnsupportedSql(
-            "Set operations (UNION, INTERSECT, EXCEPT) not supported - SubQL is for single-table CDC event filtering. \
-             For queries combining multiple result sets, run this as a regular SQL query in your database."
-                .to_string(),
+            SET_OPERATIONS_NOT_SUPPORTED.to_string(),
         ));
     };
-    let name = single_table_name(&QueryClauses::of(query), select, grouping)?;
+    let name = single_table_name(clauses, select, grouping)?;
     Ok((select, name))
 }
 
@@ -2228,8 +2238,8 @@ pub(crate) fn extract_single_table_and_where(
 /// keeping the statement's `Select` as a mutable borrow, alongside the table
 /// name and the `ORDER BY` clause.
 ///
-/// The clause gate runs on the shared borrow before the mutable one, since its
-/// exhaustive destructure cannot coexist with the returned `Select` borrow.
+/// The clause gate reads the statement's fields through disjoint borrows,
+/// which the match on `body` below leaves untouched.
 /// `ORDER BY` is the only relation-bearing scope outside the select once the
 /// gate holds, which is why it comes back too.
 pub(crate) fn extract_ungrouped_select_and_table(
@@ -2242,17 +2252,24 @@ pub(crate) fn extract_ungrouped_select_and_table(
                 .to_string(),
         ));
     };
-    // The gate runs first; its destructure cannot coexist with the mutable
-    // borrow of `body` that follows.
-    let name = single_table_select(query, Grouping::Refused)?.1.clone();
-    // The gate has established that `body` is a `Select`.
+    let clauses = QueryClauses {
+        with: &query.with,
+        limit_clause: &query.limit_clause,
+        fetch: &query.fetch,
+        locks: &query.locks,
+        for_clause: &query.for_clause,
+        settings: &query.settings,
+        format_clause: &query.format_clause,
+        pipe_operators: &query.pipe_operators,
+    };
+    // One match settles both the set-operation refusal and the `Select` the
+    // statement reduces to, which the gate then validates.
     let SetExpr::Select(select) = query.body.as_mut() else {
         return Err(RegisterError::UnsupportedSql(
-            "Set operations (UNION, INTERSECT, EXCEPT) not supported - SubQL is for single-table CDC event filtering. \
-             For queries combining multiple result sets, run this as a regular SQL query in your database."
-                .to_string(),
+            SET_OPERATIONS_NOT_SUPPORTED.to_string(),
         ));
     };
+    let name = single_table_name(&clauses, &*select, Grouping::Refused)?.clone();
     Ok((select, name, query.order_by.as_ref()))
 }
 
@@ -2262,7 +2279,8 @@ fn extract_table_and_where_with(
 ) -> Result<(ObjectName, Option<Expr>), RegisterError> {
     match stmt {
         Statement::Query(query) => {
-            let (select, name) = single_table_select(query, grouping)?;
+            let (select, name) =
+                single_table_select(&query.body, &QueryClauses::of(query), grouping)?;
             Ok((name.clone(), select.selection.clone()))
         }
         _ => Err(RegisterError::UnsupportedSql(
@@ -2446,7 +2464,8 @@ pub(super) fn contains_caller_comparison(expr: &Expr) -> bool {
 /// Whether the projected value is a column, and whether the relationship is one
 /// SubQL can serve, are not decided here.
 pub(super) fn check_membership_subquery_bound(query: &Query) -> Result<(), RegisterError> {
-    let (select, _) = single_table_select(query, Grouping::Refused)?;
+    let (select, _) =
+        single_table_select(&query.body, &QueryClauses::of(query), Grouping::Refused)?;
 
     match select.projection.as_slice() {
         [SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. }] => {}
@@ -2602,7 +2621,8 @@ pub(crate) fn membership_exists_parts<'a, B: crate::backend::Backend, DB: Databa
     table_id: crate::TableId,
     database: &DB,
 ) -> Result<ExistsParts<'a>, RegisterError> {
-    let (select, member_name) = single_table_select(query, Grouping::Refused)?;
+    let (select, member_name) =
+        single_table_select(&query.body, &QueryClauses::of(query), Grouping::Refused)?;
     if select.selection.as_ref().is_some_and(contains_subquery) {
         return Err(RegisterError::UnsupportedSql(
             "A membership subquery cannot contain another subquery. SubQL tracks one \

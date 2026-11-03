@@ -72,6 +72,20 @@ fn unrewritable_shapes_still_reach_the_whole_rows_tier() {
         matches!(tier, Tier::WholeRows { .. }),
         "a derived table reaches the whole-rows tier, got {tier:?}"
     );
+    // One table named twice is resolved once and watched once.
+    let (_, tier) = register(
+        &mut engine,
+        3,
+        "SELECT id FROM orders UNION ALL SELECT id FROM orders",
+    );
+    match tier {
+        Tier::WholeRows { tables, .. } => assert_eq!(
+            tables.len(),
+            1,
+            "a table named twice is watched once, not twice"
+        ),
+        other => panic!("a union over one table named twice is captured, got {other:?}"),
+    }
 }
 
 /// One statement per tier, and each names its own tier.

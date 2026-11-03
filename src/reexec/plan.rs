@@ -220,6 +220,11 @@ where
 
     let mut resolved = Vec::new();
     for name in names {
+        // A name the loop already resolved keeps its id without asking the
+        // catalog a second time.
+        if resolved.iter().any(|(seen, _)| *seen == name) {
+            continue;
+        }
         let table_name = crate::compiler::parser::SqlTableName::from_object_name(&name)?;
         let id = crate::table_resolution::resolve_table_reference::<B, DB>(
             table_name.qualified.as_deref(),
