@@ -152,6 +152,7 @@ where
             .expect("source closed before drain target reached")
         {
             SourceItem::Event(event) => events.push(event),
+            SourceItem::Relation(_) => {}
             SourceItem::Commit(commit) => commits.push(commit),
         }
     }

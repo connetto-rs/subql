@@ -25,13 +25,14 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use diesel::{sql_query, Connection, ExpressionMethods, PgConnection, RunQueryDsl};
-use pg_walstream::{error::ReplicationError, ColumnValue, EventType};
+use pg_walstream::{error::ReplicationError, ColumnValue, EventType, ReplicaIdentity};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::CdcEvent;
 use subql::{
-    CdcSource, EventKind, PgChangeEvent, PgCommit, PgCommitPosition, PgLsn, PgStreamingCdcSource,
-    PgStreamingConfig, PgStreamingError, SourceItem, TimelineSwitch,
+    CdcSource, EventKind, PgChangeEvent, PgCommit, PgCommitPosition, PgLsn, PgRelation,
+    PgRelationColumn, PgStreamingCdcSource, PgStreamingConfig, PgStreamingError, SourceItem,
+    TimelineSwitch,
 };
 
 diesel::table! {
@@ -188,6 +189,12 @@ fn next_item_delivers_an_insert_without_waiting_for_a_tick() {
             .execute(&mut dml)
             .expect("insert");
 
+        let _relation = tokio::time::timeout(CEILING, source.next_item())
+            .await
+            .expect("the relation must arrive on the wire, not on the status interval")
+            .expect("next_item must not error")
+            .and_then(SourceItem::into_relation)
+            .expect("the fresh slot states its table first");
         let event = tokio::time::timeout(CEILING, source.next_item())
             .await
             .expect("the event must arrive on the wire, not on the status interval")
@@ -211,6 +218,91 @@ fn next_item_delivers_an_insert_without_waiting_for_a_tick() {
         );
     });
 
+    common::drop_slot(&mut setup, &slot);
+}
+
+/// A fresh slot's stream opens with the published table's `Relation`
+/// message, which states the table's definition ahead of its first change,
+/// and re-states it after the server changes the definition.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_fresh_slot_delivers_the_tables_relation_first() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    let mut dml = db.connect();
+    sql_query(PG_DDL).execute(&mut setup).expect("create table");
+    let slot = db.slot("subql_pg_streaming_relation");
+    let publication = "subql_pg_streaming_relation_pub";
+    common::create_publication(&mut setup, publication, "orders");
+    common::create_pgoutput_slot(&mut setup, &slot);
+
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("parse DDL");
+    let config = PgStreamingConfig::new(db.url(), &slot, publication);
+
+    current_thread_rt().block_on(async move {
+        let mut source = PgStreamingCdcSource::connect(config, catalog)
+            .await
+            .expect("connect");
+        sql_query("INSERT INTO orders VALUES (1, 5.0)")
+            .execute(&mut dml)
+            .expect("insert");
+
+        let first = next_item(&mut source).await;
+        let relation: PgRelation = first
+            .into_relation()
+            .expect("the first item is the table's relation");
+        assert_eq!(relation.schema(), "public");
+        assert_eq!(relation.table(), "orders");
+        assert_eq!(relation.replica_identity(), ReplicaIdentity::Default);
+        let names: Vec<&str> = relation
+            .columns()
+            .iter()
+            .map(PgRelationColumn::name)
+            .collect();
+        assert_eq!(names, vec!["id", "price"]);
+
+        let event = next_item(&mut source).await;
+        assert!(
+            event.into_event().is_some(),
+            "the insert follows its table's relation"
+        );
+        let commit = next_item(&mut source).await;
+        assert!(commit.into_commit().is_some(), "the commit follows");
+
+        // A definition change re-states the relation ahead of the next
+        // change, with the new column and the identity unchanged.
+        sql_query("ALTER TABLE orders ADD COLUMN status TEXT")
+            .execute(&mut dml)
+            .expect("add a column the catalog lacks");
+        sql_query("INSERT INTO orders VALUES (2, 25.0, 'paid')")
+            .execute(&mut dml)
+            .expect("second insert");
+
+        let restated = next_item(&mut source).await;
+        let relation: PgRelation = restated
+            .into_relation()
+            .expect("the change re-states the relation");
+        let names: Vec<&str> = relation
+            .columns()
+            .iter()
+            .map(PgRelationColumn::name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["id", "price", "status"],
+            "the restated relation carries the new column"
+        );
+        assert_eq!(relation.replica_identity(), ReplicaIdentity::Default);
+
+        let event = next_item(&mut source).await;
+        assert!(
+            event.into_event().is_some(),
+            "the second insert follows its restated relation"
+        );
+        let commit = next_item(&mut source).await;
+        assert!(commit.into_commit().is_some(), "its commit follows");
+    });
     common::drop_slot(&mut setup, &slot);
 }
 
@@ -358,7 +450,7 @@ fn acknowledging_every_row_without_the_commit_never_moves_the_slot() {
     common::drop_slot(&mut setup, &slot);
 }
 
-type Item = SourceItem<PgChangeEvent, PgCommit>;
+type Item = SourceItem<PgChangeEvent, PgCommit, PgRelation>;
 
 /// Commit the newer transaction while the older one is open, then the
 /// older, the shape every concurrent writer produces.
@@ -393,6 +485,13 @@ fn interleaved_items(rows_in_the_older: usize) -> Vec<Item> {
         let mut source = connect_when_free(&config).await;
         interleave(&mut older, &mut newer, rows_in_the_older);
         let mut items = Vec::new();
+        // A fresh slot states the table's relation before the first row,
+        // and the commit-order assertions below are about rows and commits.
+        let first = next_item(&mut source).await;
+        assert!(
+            matches!(first, SourceItem::Relation(_)),
+            "the fresh slot states its table first, got {first:?}"
+        );
         // The newer's row and commit, then the older's rows and commit.
         for _ in 0..rows_in_the_older + 3 {
             items.push(next_item(&mut source).await);
@@ -403,10 +502,15 @@ fn interleaved_items(rows_in_the_older: usize) -> Vec<Item> {
     items
 }
 
-const fn item_position(item: &Item) -> PgCommitPosition {
+fn item_position(item: &Item) -> PgCommitPosition {
     match item {
         SourceItem::Event(event) => event.position(),
         SourceItem::Commit(commit) => commit.position(),
+        // A relation carries a message LSN, not a commit position, so a
+        // test that positions items must consume it on its own first.
+        SourceItem::Relation(_) => {
+            panic!("a relation has no commit position, got {item:?}")
+        }
     }
 }
 
@@ -419,19 +523,26 @@ async fn next_item(source: &mut PgStreamingCdcSource) -> Item {
         .expect("source must not have shut down")
 }
 
-/// The next item, which must be a row.
+/// The next row, skipping the table definitions a fresh slot states first.
 async fn next_row(source: &mut PgStreamingCdcSource) -> PgChangeEvent {
-    match next_item(source).await {
-        SourceItem::Event(event) => event,
-        SourceItem::Commit(commit) => panic!("expected a row, got {commit:?}"),
+    loop {
+        match next_item(source).await {
+            SourceItem::Event(event) => return event,
+            SourceItem::Relation(_) => {}
+            SourceItem::Commit(commit) => panic!("expected a row, got {commit:?}"),
+        }
     }
 }
 
-/// The next item, which must be a commit.
+/// The next commit, skipping the table definitions a fresh slot states
+/// first.
 async fn next_commit(source: &mut PgStreamingCdcSource) -> PgCommit {
-    match next_item(source).await {
-        SourceItem::Commit(commit) => commit,
-        SourceItem::Event(event) => panic!("expected a commit, got {event:?}"),
+    loop {
+        match next_item(source).await {
+            SourceItem::Commit(commit) => return commit,
+            SourceItem::Relation(_) => {}
+            SourceItem::Event(event) => panic!("expected a commit, got {event:?}"),
+        }
     }
 }
 
@@ -882,13 +993,20 @@ fn connection_survives_wal_sender_timeout() {
         // The pull reader only stays alive while it is polled, so poll it
         // across the whole idle window and issue the insert from a
         // parallel branch.
-        let (item, ()) = tokio::join!(tokio::time::timeout(ARRIVAL, source.next_item()), async {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            sql_query("INSERT INTO orders VALUES (1, 5.0)")
-                .execute(&mut dml)
-                .expect("insert after idle");
-        },);
-        let ev = item
+        let (relation, ()) =
+            tokio::join!(tokio::time::timeout(ARRIVAL, source.next_item()), async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                sql_query("INSERT INTO orders VALUES (1, 5.0)")
+                    .execute(&mut dml)
+                    .expect("insert after idle");
+            },);
+        relation
+            .expect("next_item timeout: connection likely torn down")
+            .expect("next_item err: connection likely torn down")
+            .and_then(SourceItem::into_relation)
+            .expect("the fresh slot states its table first");
+        let ev = tokio::time::timeout(ARRIVAL, source.next_item())
+            .await
             .expect("next_item timeout: connection likely torn down")
             .expect("next_item err: connection likely torn down")
             .and_then(SourceItem::into_event)

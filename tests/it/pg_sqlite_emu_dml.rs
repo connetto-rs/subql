@@ -25,12 +25,24 @@ const COMPOSITE_PK_PG_DDL: &str = "CREATE TABLE items (\
     region_id INT, item_id INT, name TEXT, \
     PRIMARY KEY (region_id, item_id));";
 
+/// The next event, skipping the table's relation when it leads a fresh
+/// source's first drain of that table.
+fn next_event(source: &mut PgSqliteEmuSource) -> PgChangeEvent {
+    loop {
+        let item = source
+            .poll_next_item()
+            .expect("poll succeeds")
+            .expect("an item on the queue");
+        match item {
+            SourceItem::Event(ev) => return ev,
+            SourceItem::Relation(_) => {}
+            SourceItem::Commit(_) => panic!("expected an event, got a commit"),
+        }
+    }
+}
+
 fn drain_one(source: &mut PgSqliteEmuSource) -> PgChangeEvent {
-    let ev = source
-        .poll_next_item()
-        .expect("poll succeeds")
-        .and_then(SourceItem::into_event)
-        .expect("expected an event on the queue");
+    let ev = next_event(source);
     assert!(
         matches!(source.poll_next_item(), Ok(Some(SourceItem::Commit(_)))),
         "the row's commit follows it"
@@ -358,11 +370,7 @@ fn a_quoted_column_survives_the_update_fallback() {
             "INSERT INTO orders (\"a\"\"b\", \"lab\"\"el\", note) VALUES (1, 'hi', 'keep')",
         )
         .unwrap();
-    let insert = source
-        .poll_next_item()
-        .expect("the INSERT drains without touching the fallback")
-        .and_then(SourceItem::into_event)
-        .expect("an insert event");
+    let insert = next_event(&mut source);
     assert_eq!(insert.kind(), EventKind::Insert);
     assert!(matches!(
         source.poll_next_item(),
@@ -406,11 +414,7 @@ fn the_update_fallback_preserves_storage_classes() {
     source
         .execute_sql("INSERT INTO blobs (id, raw, maybe, note) VALUES (1, X'0102', NULL, 'keep')")
         .unwrap();
-    let insert = source
-        .poll_next_item()
-        .expect("the INSERT drains without touching the fallback")
-        .and_then(SourceItem::into_event)
-        .expect("an insert event");
+    let insert = next_event(&mut source);
     assert_eq!(insert.kind(), EventKind::Insert);
     assert!(matches!(
         source.poll_next_item(),

@@ -40,7 +40,7 @@ fn next_event(source: &mut PgSqliteEmuSource) -> PgChangeEvent {
             .expect("an event in the queue")
         {
             SourceItem::Event(ev) => return ev,
-            SourceItem::Commit(_) => {}
+            SourceItem::Relation(_) | SourceItem::Commit(_) => {}
         }
     }
 }

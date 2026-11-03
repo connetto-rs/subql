@@ -17,7 +17,10 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
-use sqlparser::ast::{BinaryOperator, Expr, Ident, InTarget, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Ident, InTarget, ObjectName, OrderBy, Select, SelectItem, SetExpr,
+    Statement, TableFactor,
+};
 use sqlparser::dialect::Dialect;
 
 /// Column alias the re-execution query projects its scalar result under, so the
@@ -51,7 +54,8 @@ pub struct TotalPlan<B: Backend> {
     /// Every column of every one of those tables: a computed projection can
     /// depend on any of them, so narrowing this would mean guessing.
     pub dependency_columns: Vec<ColumnId>,
-    /// The executable query re-read without rewriting.
+    /// The executable query re-read, a lone wildcard projection over one
+    /// table already named as the catalog's columns.
     pub read_query: crate::reexec::BoundQuery<B>,
 }
 
@@ -197,7 +201,7 @@ where
 {
     use core::ops::ControlFlow;
 
-    let statement =
+    let mut statement =
         crate::compiler::sql_shape::parse_single_statement(query.sql(), dialect as &dyn Dialect)?;
     if !matches!(statement, Statement::Query(_)) {
         return Err(RegisterError::UnsupportedSql(
@@ -214,19 +218,25 @@ where
         ControlFlow::Continue(())
     });
 
-    let mut tables = Vec::new();
-    for name in &names {
-        let table_name = crate::compiler::parser::SqlTableName::from_object_name(name)?;
+    let mut resolved = Vec::new();
+    for name in names {
+        // A name the loop already resolved keeps its id without asking the
+        // catalog a second time.
+        if resolved.iter().any(|(seen, _)| *seen == name) {
+            continue;
+        }
+        let table_name = crate::compiler::parser::SqlTableName::from_object_name(&name)?;
         let id = crate::table_resolution::resolve_table_reference::<B, DB>(
             table_name.qualified.as_deref(),
             &table_name.unqualified,
             database,
         )
         .map_err(|_| RegisterError::UnknownTable(table_name.unqualified.clone()))?;
-        if !tables.contains(&id) {
-            tables.push(id);
+        if !resolved.iter().any(|(_, table)| *table == id) {
+            resolved.push((name, id));
         }
     }
+    let tables: Vec<TableId> = resolved.iter().map(|(_, table)| *table).collect();
     if tables.is_empty() {
         return Err(RegisterError::UnsupportedSql(
             "a captured query must read at least one table, or no change could \
@@ -249,10 +259,33 @@ where
         }
     }
 
+    let expanded = if let Some(select) = crate::compiler::sql_shape::select_mut(&mut statement) {
+        let table = if select.from.len() == 1 && select.from[0].joins.is_empty() {
+            match &select.from[0].relation {
+                TableFactor::Table { name, .. } => resolved
+                    .iter()
+                    .find(|(from_name, _)| from_name == name)
+                    .map(|(_, table)| *table),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match table {
+            Some(table) => expand_wildcard_projection::<B, DB>(select, dialect, database, table)?,
+            None => false,
+        }
+    } else {
+        false
+    };
     Ok(QueryPlan::Total(TotalPlan {
         tables,
         dependency_columns,
-        read_query: query.clone(),
+        read_query: if expanded {
+            crate::reexec::BoundQuery::new(statement.to_string(), query.binds().to_vec())
+        } else {
+            query.clone()
+        },
     }))
 }
 
@@ -701,8 +734,10 @@ pub struct KeyedPlan {
     /// column created as `"OrderId"` is not found, and the subscription
     /// registers cleanly and then fails on every change.
     pub key_idents: Vec<Ident>,
-    /// The statement as parsed, so a scoped read can be built by adding a
-    /// predicate to its WHERE rather than by rebuilding the query from parts.
+    /// The statement as planned, a lone wildcard projection over the table
+    /// already named as the catalog's columns, so a scoped read can be built
+    /// by adding a predicate to its WHERE rather than by rebuilding the
+    /// query from parts.
     pub statement: Statement,
     /// Every column of the table: a filter the engine could not compile may
     /// read any of them, so narrowing this would mean guessing which UPDATEs
@@ -732,12 +767,12 @@ where
     B: Backend + SqlLiteralParse,
     DB: DatabaseLike,
 {
-    let statement =
+    let mut statement =
         crate::compiler::sql_shape::parse_single_statement(sql, dialect as &dyn Dialect)?;
     // Succeeds only for a clause-free single-table SELECT, which is exactly the
     // shape whose rows can be asked about individually.
-    let (table_name, _) =
-        crate::compiler::sql_shape::extract_ungrouped_table_and_where(&statement)?;
+    let (select, table_name, order_by) =
+        crate::compiler::sql_shape::extract_ungrouped_select_and_table(&mut statement)?;
     let name = crate::compiler::parser::SqlTableName::from_object_name(&table_name)?;
     let table = crate::table_resolution::resolve_table_reference::<B, DB>(
         name.qualified.as_deref(),
@@ -753,7 +788,7 @@ where
         ));
     }
     let Some(key_positions) =
-        key_projection_positions::<B, _>(&statement, table, &key_columns, database)
+        key_projection_positions::<B, _>(select, table, &key_columns, database)
     else {
         return Err(RegisterError::UnsupportedSql(
             "a keyed read needs the projection to carry the primary key, since that key is \
@@ -777,7 +812,7 @@ where
     // One table in the whole statement, not just in FROM. A subquery reading
     // another table makes membership depend on rows this tier never watches, so
     // a change over there would never be delivered at all.
-    if statement_reads_more_than(&statement, &table_name) {
+    if statement_reads_more_than(select, order_by, &table_name) {
         return Err(RegisterError::UnsupportedSql(
             "a keyed read must depend on one table only: membership that also depends on \
              another table cannot be maintained by asking about this table's changed rows"
@@ -799,6 +834,9 @@ where
     let dependency_columns = (0..arity)
         .filter_map(|o| ColumnId::try_from(o).ok())
         .collect();
+
+    // The rewrite keeps key positions valid, so its result goes unused.
+    expand_wildcard_projection::<B, DB>(select, dialect, database, table)?;
 
     Ok(QueryPlan::Keyed(alloc::boxed::Box::new(KeyedPlan {
         table,
@@ -848,18 +886,72 @@ const fn key_kind_has_literal_spelling(kind: Option<crate::backend::ScalarFamily
 /// Walks every relation the statement names, including ones inside subqueries,
 /// which is the point: `FROM` alone would miss `WHERE id IN (SELECT ...)`, and
 /// a change to that other table can move a row of this answer in or out.
+///
+/// The walk covers the select and the `ORDER BY` clause. For a statement that
+/// the clause gate has validated, that is the statement's whole relation
+/// scope, every clause besides the projection, the table, the filter, and the
+/// ordering having been refused.
 fn statement_reads_more_than(
-    statement: &Statement,
-    table_name: &sqlparser::ast::ObjectName,
+    select: &Select,
+    order_by: Option<&OrderBy>,
+    table_name: &ObjectName,
 ) -> bool {
     let mut other = false;
-    let _ = sqlparser::ast::visit_relations(statement, |name| {
+    let mut note = |name: &ObjectName| {
         if name != table_name {
             other = true;
         }
         core::ops::ControlFlow::<()>::Continue(())
-    });
+    };
+    let _ = sqlparser::ast::visit_relations(select, &mut note);
+    if let Some(order_by) = order_by {
+        let _ = sqlparser::ast::visit_relations(order_by, &mut note);
+    }
     other
+}
+
+/// Replace a lone wildcard projection with the columns of `table`, so a
+/// re-read returns the catalog's columns, quoted, in catalog order, and a
+/// column the server adds under the table afterwards cannot widen the rows
+/// the re-read delivers.
+///
+/// Both callers hand over a select that reads `table` as its single table. A
+/// plain wildcard, and a qualified wildcard naming `table`, are rewritten,
+/// while a join, or a projection the wildcard does not answer, is left as
+/// written, and the result says whether the select was rewritten.
+///
+/// # Errors
+///
+/// When the catalog cannot supply the table's columns.
+fn expand_wildcard_projection<B, DB>(
+    select: &mut Select,
+    dialect: &B::Dialect,
+    database: &DB,
+    table: TableId,
+) -> Result<bool, RegisterError>
+where
+    B: Backend + SqlLiteralParse,
+    DB: DatabaseLike,
+{
+    if select.from.len() != 1 || !select.from[0].joins.is_empty() || select.projection.len() != 1 {
+        return Ok(false);
+    }
+    let item = &select.projection[0];
+    if !matches!(item, SelectItem::Wildcard(_))
+        && !crate::compiler::sql_shape::wildcard_of_read_table::<B, DB>(
+            item, select, table, database,
+        )
+    {
+        return Ok(false);
+    }
+    let mut columns = Vec::new();
+    for column in crate::catalog_helpers::table_columns(database, table)? {
+        columns.push(SelectItem::UnnamedExpr(Expr::Identifier(
+            crate::compiler::quoted_ident(dialect as &dyn Dialect, column.column_name()),
+        )));
+    }
+    select.projection = columns;
+    Ok(true)
 }
 
 /// Where in the projection each primary key column lands under the engine's
@@ -869,12 +961,11 @@ fn statement_reads_more_than(
 /// and comparing names under anything looser than the engine's rule can put
 /// a different column's value in the key slot.
 fn key_projection_positions<B: Backend, DB: DatabaseLike>(
-    statement: &Statement,
+    select: &Select,
     table: TableId,
     key_columns: &[ColumnId],
     database: &DB,
 ) -> Option<Vec<usize>> {
-    let select = crate::compiler::sql_shape::select_of(statement)?;
     // A wildcard, or one qualified by the table read, returns the table's
     // columns in the table's own order, so a key column's ordinal is its position.
     if select.projection.iter().any(|item| {
@@ -1271,21 +1362,20 @@ mod key_projection_tests {
         )
         .expect("DDL parses");
         let table = crate::catalog_helpers::table_id::<Postgres, _>(&db, "t").expect("t exists");
-        let pg = |sql: &str| statement(&sqlparser::dialect::PostgreSqlDialect {}, sql);
-        assert_eq!(
-            key_projection_positions::<Postgres, _>(&pg("SELECT id FROM t"), table, &[0], &db),
-            Some(vec![0]),
-        );
-        assert_eq!(
-            key_projection_positions::<Postgres, _>(&pg("SELECT \"id\" FROM t"), table, &[0], &db),
-            Some(vec![0]),
-        );
+        let positions = |sql: &str| {
+            let stmt = statement(&sqlparser::dialect::PostgreSqlDialect {}, sql);
+            key_projection_positions::<Postgres, _>(
+                crate::compiler::sql_shape::select_of(&stmt).expect("a plain select"),
+                table,
+                &[0],
+                &db,
+            )
+        };
+        assert_eq!(positions("SELECT id FROM t"), Some(vec![0]));
+        assert_eq!(positions("SELECT \"id\" FROM t"), Some(vec![0]));
         // `"Id"` names the second column, so the projection carries no key
         // and a keyed read would ask about the wrong row.
-        assert_eq!(
-            key_projection_positions::<Postgres, _>(&pg("SELECT \"Id\" FROM t"), table, &[0], &db),
-            None,
-        );
+        assert_eq!(positions("SELECT \"Id\" FROM t"), None);
     }
 
     #[test]
@@ -1296,25 +1386,17 @@ mod key_projection_tests {
         .expect("DDL parses");
         let table = crate::catalog_helpers::table_id::<MySql<NamesStoredAsWritten>, _>(&db, "t")
             .expect("t exists");
-        let my = |sql: &str| statement(&sqlparser::dialect::MySqlDialect {}, sql);
-        assert_eq!(
+        let positions = |sql: &str| {
+            let stmt = statement(&sqlparser::dialect::MySqlDialect {}, sql);
             key_projection_positions::<MySql<NamesStoredAsWritten>, _>(
-                &my("SELECT owner FROM t"),
+                crate::compiler::sql_shape::select_of(&stmt).expect("a plain select"),
                 table,
                 &[0],
-                &db
-            ),
-            Some(vec![0]),
-        );
-        assert_eq!(
-            key_projection_positions::<MySql<NamesStoredAsWritten>, _>(
-                &my(r"SELECT `OWNER` FROM t"),
-                table,
-                &[0],
-                &db
-            ),
-            Some(vec![0]),
-        );
+                &db,
+            )
+        };
+        assert_eq!(positions("SELECT owner FROM t"), Some(vec![0]));
+        assert_eq!(positions(r"SELECT `OWNER` FROM t"), Some(vec![0]));
     }
 
     #[test]
@@ -1324,17 +1406,18 @@ mod key_projection_tests {
         )
         .expect("DDL parses");
         let table = crate::catalog_helpers::table_id::<Postgres, _>(&db, "t").expect("t exists");
-        let pg = |sql: &str| statement(&sqlparser::dialect::PostgreSqlDialect {}, sql);
+        let positions = |sql: &str, keys: &[u16]| {
+            let stmt = statement(&sqlparser::dialect::PostgreSqlDialect {}, sql);
+            key_projection_positions::<Postgres, _>(
+                crate::compiler::sql_shape::select_of(&stmt).expect("a plain select"),
+                table,
+                keys,
+                &db,
+            )
+        };
         for sql in ["SELECT t.* FROM t", "SELECT x.* FROM t x"] {
-            assert_eq!(
-                key_projection_positions::<Postgres, _>(&pg(sql), table, &[1], &db),
-                Some(vec![1]),
-                "{sql}",
-            );
+            assert_eq!(positions(sql, &[1]), Some(vec![1]), "{sql}");
         }
-        assert_eq!(
-            key_projection_positions::<Postgres, _>(&pg("SELECT m.* FROM t"), table, &[1], &db),
-            None,
-        );
+        assert_eq!(positions("SELECT m.* FROM t", &[1]), None);
     }
 }

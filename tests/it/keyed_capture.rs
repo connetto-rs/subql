@@ -392,7 +392,11 @@ fn a_change_with_no_readable_key_transitions_to_whole_rows() {
     let Tier::WholeRows { query, .. } = &transition.to else {
         panic!("expected whole-row transition")
     };
-    assert_eq!(query.sql(), bound_sql);
+    // The keyed read names the catalog's columns instead of the wildcard.
+    assert_eq!(
+        query.sql(),
+        "SELECT `id`, `status` FROM orders WHERE lower(status) = ?"
+    );
     assert_eq!(query.binds(), &[Value::String("paid".into())]);
     assert_eq!(
         output.triggers()[0].subscription_id,
@@ -593,6 +597,67 @@ fn a_filter_reading_a_second_table_is_not_served_by_the_keyed_tier() {
         }
         other => panic!("expected a capture, got {other:?}"),
     }
+}
+
+/// An `ORDER BY` that reads a second table also moves the order the rows
+/// arrive in, which a keyed read never watches, so a change over there must
+/// be seen rather than silently kept in the caller's order. The statement
+/// lands on the whole re-read, which re-reads the catalog's columns and keeps
+/// the ordering as written.
+#[test]
+fn an_order_by_reading_a_second_table_is_served_by_the_whole_reread() {
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    for ddl in [
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT)",
+        "CREATE TABLE managers (id INTEGER PRIMARY KEY, bonus INTEGER)",
+        "INSERT INTO orders VALUES (1, 'paid')",
+        "INSERT INTO managers VALUES (1, 5)",
+    ] {
+        diesel::sql_query(ddl).execute(&mut conn).unwrap();
+    }
+    let catalog = ParserDB::parse::<SQLiteDialect>(
+        "CREATE TABLE orders (id INT PRIMARY KEY, status TEXT); \
+         CREATE TABLE managers (id INT PRIMARY KEY, bonus INT);",
+    )
+    .expect("catalog");
+    let inner = SubscriptionEngine::<TestEvent<SQLite>, DefaultIds, ParserDB>::new(
+        catalog,
+        SQLiteDialect {},
+    );
+    let mut engine: Engine = AutoResolvingEngine::new(inner, SyncMode(DieselConnector::new(conn)));
+
+    let sql = "SELECT * FROM orders WHERE lower(status) = 'paid' \
+               ORDER BY (SELECT bonus FROM managers WHERE managers.id = orders.id)";
+    let Registered {
+        tier: Tier::WholeRows { query, tables },
+        ..
+    } = engine
+        .register(
+            SubscriptionRequest::<DefaultIds, SQLite>::new(6u64, sql),
+            (),
+        )
+        .expect("captured")
+    else {
+        panic!("the keyed tier must refuse an ORDER BY that reads a second table");
+    };
+    assert_eq!(
+        tables.len(),
+        2,
+        "both tables must trigger, else a change to the ORDER BY's table is never seen"
+    );
+    let reread = query.sql();
+    assert!(
+        !reread.contains('*'),
+        "the re-read names the catalog's columns, not a wildcard: {reread}"
+    );
+    assert!(
+        reread.starts_with("SELECT `id`, `status` FROM orders"),
+        "the re-read names the catalog's columns, quoted, in catalog order: {reread}"
+    );
+    assert!(
+        reread.ends_with("ORDER BY (SELECT bonus FROM managers WHERE managers.id = orders.id)"),
+        "the re-read keeps the ordering as written: {reread}"
+    );
 }
 
 /// A key this tier cannot spell as a SQL literal must be refused at

@@ -14,10 +14,11 @@
 //! to the engine, so [`CdcEvent::kind`] is only ever called on an Insert,
 //! Update, Delete, or Truncate.
 
-#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+use pg_walstream::RelationColumn;
 use pg_walstream::{ChangeEvent, ColumnValue, EventType, ReplicaIdentity, RowData};
 use sql_traits::prelude::DatabaseLike;
 
@@ -25,6 +26,8 @@ use super::pg_type::text_to_pg_value_by_kind;
 use super::resolve_table;
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 use super::transaction_order::{TransactionOrder, TransactionOrderError};
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+use super::PgSourceItem;
 use crate::backend::{Postgres, RowKind, Value};
 use crate::catalog_helpers;
 use crate::types::{ColumnId, EventKind, TableId};
@@ -119,6 +122,133 @@ impl PgCommit {
     }
 }
 
+/// The column of a table definition a pgoutput `Relation` message states.
+///
+/// `type_oid` is the server's type oid, which subql's catalog does not
+/// resolve. `is_key` flags the columns the identity uses, which a consumer
+/// that detects schema changes from the definition checks against its own
+/// catalog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PgRelationColumn {
+    name: Arc<str>,
+    type_oid: u32,
+    type_modifier: i32,
+    is_key: bool,
+}
+
+impl PgRelationColumn {
+    /// The column `name` of the server type `type_oid`, a key when `is_key`.
+    #[must_use]
+    pub const fn new(name: Arc<str>, type_oid: u32, type_modifier: i32, is_key: bool) -> Self {
+        Self {
+            name,
+            type_oid,
+            type_modifier,
+            is_key,
+        }
+    }
+
+    /// The column's name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The server's type oid of the column.
+    #[must_use]
+    pub const fn type_oid(&self) -> u32 {
+        self.type_oid
+    }
+
+    /// The server's type modifier of the column, negative when the type
+    /// carries none.
+    #[must_use]
+    pub const fn type_modifier(&self) -> i32 {
+        self.type_modifier
+    }
+
+    /// Whether the column is part of the table's identity.
+    #[must_use]
+    pub const fn is_key(&self) -> bool {
+        self.is_key
+    }
+}
+
+/// A table definition a pgoutput `Relation` message states.
+///
+/// The server sends one for a table ahead of its first row change in a
+/// session and again after the table's definition changes, so a consumer
+/// holding an older schema detects a destructive change from it. `lsn` is
+/// the message's WAL position, which the polling source dedups redelivered
+/// messages on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PgRelation {
+    lsn: PgLsn,
+    oid: u32,
+    schema: Arc<str>,
+    table: Arc<str>,
+    replica_identity: ReplicaIdentity,
+    columns: Vec<PgRelationColumn>,
+}
+
+impl PgRelation {
+    /// The definition of `schema`.`table` under `oid`, stated at `lsn`.
+    #[must_use]
+    pub const fn new(
+        lsn: PgLsn,
+        oid: u32,
+        schema: Arc<str>,
+        table: Arc<str>,
+        replica_identity: ReplicaIdentity,
+        columns: Vec<PgRelationColumn>,
+    ) -> Self {
+        Self {
+            lsn,
+            oid,
+            schema,
+            table,
+            replica_identity,
+            columns,
+        }
+    }
+
+    /// The message's WAL position.
+    #[must_use]
+    pub const fn lsn(&self) -> PgLsn {
+        self.lsn
+    }
+
+    /// The table's server-side oid.
+    #[must_use]
+    pub const fn oid(&self) -> u32 {
+        self.oid
+    }
+
+    /// The table's namespace.
+    #[must_use]
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// The table's name.
+    #[must_use]
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    /// The identity the server applies to the table's updates and deletes.
+    #[must_use]
+    pub const fn replica_identity(&self) -> ReplicaIdentity {
+        self.replica_identity
+    }
+
+    /// The table's columns in definition order.
+    #[must_use]
+    pub fn columns(&self) -> &[PgRelationColumn] {
+        &self.columns
+    }
+}
+
 /// Delivered commits the slot still holds, and how far the consumer has
 /// acknowledged.
 ///
@@ -174,9 +304,9 @@ impl ReleaseQueue {
 /// Insert, Update, and Delete become one event each. A `Truncate` naming
 /// several tables fans out into one single-table `Truncate` per table, since
 /// a subql event is always about one table, and each takes its own ordinal.
-/// Relation, type, origin and logical messages yield nothing. Streaming and
-/// two-phase messages are refused, since the sources decode protocol 1
-/// without either.
+/// A `Relation` message becomes a relation item at the place it decodes,
+/// type, origin and logical messages yield nothing. Streaming and two-phase
+/// messages are refused, since the sources decode protocol 1 without either.
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 pub struct PgOutputOrder {
     order: TransactionOrder<(PgLsn, PgXid)>,
@@ -190,20 +320,24 @@ impl PgOutputOrder {
         }
     }
 
-    /// Place `change`, appending the row events it carries to `rows`, and
+    /// Place `change`, appending the items it carries to `items`, and
     /// report the commit when `change` ends a transaction that carried rows.
+    ///
+    /// A `Relation` message becomes a [`SourceItem::Relation`] at the place
+    /// it decodes, inside a transaction or outside one, since the server
+    /// sends one ahead of a table's first row change.
     pub fn apply(
         &mut self,
         change: ChangeEvent,
-        rows: &mut impl Extend<PgChangeEvent>,
+        items: &mut impl Extend<PgRowItem>,
     ) -> Result<Option<PgCommit>, TransactionOrderError> {
         match &change.event_type {
             EventType::Insert { .. } | EventType::Update { .. } | EventType::Delete { .. } => {
                 let ((commit, xid), ordinal) = self.order.next_row()?;
-                rows.extend([PgChangeEvent::new(
+                items.extend([PgRowItem::Event(PgChangeEvent::new(
                     change,
                     PgCommitPosition::new(commit, xid, ordinal),
-                )]);
+                ))]);
             }
             EventType::Truncate {
                 tables,
@@ -222,12 +356,26 @@ impl PgOutputOrder {
                         metadata: change.metadata.clone(),
                         xid: change.xid,
                     };
-                    rows.extend([PgChangeEvent::new(
+                    items.extend([PgRowItem::Event(PgChangeEvent::new(
                         single,
                         PgCommitPosition::new(commit, xid, ordinal),
-                    )]);
+                    ))]);
                 }
             }
+            EventType::Relation {
+                relation_id,
+                namespace,
+                relation_name,
+                replica_identity,
+                columns,
+            } => items.extend([PgRowItem::Relation(relation_item(
+                PgLsn(change.lsn.value()),
+                *relation_id,
+                namespace,
+                relation_name,
+                *replica_identity,
+                columns,
+            ))]),
             EventType::Begin {
                 transaction_id,
                 final_lsn,
@@ -257,10 +405,7 @@ impl PgOutputOrder {
                     )
                 }));
             }
-            EventType::Relation { .. }
-            | EventType::Type { .. }
-            | EventType::Origin { .. }
-            | EventType::Message { .. } => {}
+            EventType::Type { .. } | EventType::Origin { .. } | EventType::Message { .. } => {}
             EventType::StreamStart { .. }
             | EventType::StreamStop
             | EventType::StreamCommit { .. }
@@ -276,6 +421,63 @@ impl PgOutputOrder {
             }
         }
         Ok(None)
+    }
+}
+
+/// The item a `Relation` message becomes, built from the fields the
+/// `EventType::Relation` arm destructures.
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+fn relation_item(
+    lsn: PgLsn,
+    relation_id: u32,
+    namespace: &Arc<str>,
+    relation_name: &Arc<str>,
+    replica_identity: ReplicaIdentity,
+    columns: &[RelationColumn],
+) -> PgRelation {
+    PgRelation::new(
+        lsn,
+        relation_id,
+        Arc::clone(namespace),
+        Arc::clone(relation_name),
+        replica_identity,
+        columns
+            .iter()
+            .map(|column| {
+                PgRelationColumn::new(
+                    Arc::clone(&column.name),
+                    column.type_id,
+                    column.type_modifier,
+                    column.is_key,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The items a decoded `pgoutput` stream appends to the caller's buffer, a
+/// row event at its position or a table relation. Commits come back from
+/// [`PgOutputOrder::apply`] instead, so a buffer of these holds no commit.
+#[derive(Debug)]
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "`Event` holds the decoder's row, which a box would allocate per item"
+)]
+pub enum PgRowItem {
+    /// A row change, at the position it commits at.
+    Event(PgChangeEvent),
+    /// A table relation the server announced ahead of the table's rows.
+    Relation(PgRelation),
+}
+
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+impl From<PgRowItem> for PgSourceItem {
+    fn from(item: PgRowItem) -> Self {
+        match item {
+            PgRowItem::Event(event) => Self::Event(event),
+            PgRowItem::Relation(relation) => Self::Relation(relation),
+        }
     }
 }
 
@@ -770,12 +972,14 @@ mod tests {
 
     #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
     mod order {
-        use super::super::{PgChangeEvent, PgCommit, PgOutputOrder};
-        use crate::wal::TransactionOrderError;
+        use super::super::{PgChangeEvent, PgCommit, PgOutputOrder, PgRelationColumn, PgRowItem};
+        use crate::wal::{PgSourceItem, SourceItem, TransactionOrderError};
         use crate::{PgCommitPosition, PgLsn, PgXid};
         use alloc::sync::Arc;
         use bytes::Bytes;
-        use pg_walstream::{ChangeEvent, ColumnValue, Lsn, RowData};
+        use pg_walstream::{
+            ChangeEvent, ColumnValue, Lsn, RelationColumn, ReplicaIdentity, RowData,
+        };
 
         fn begin(xid: u32, commit: u64) -> ChangeEvent {
             ChangeEvent::begin(
@@ -806,15 +1010,51 @@ mod tests {
             )
         }
 
+        /// The relation that leads the table's rows, at its decode position.
+        fn relation(lsn: u64) -> ChangeEvent {
+            ChangeEvent::relation(
+                1,
+                "public",
+                "orders",
+                ReplicaIdentity::Default,
+                vec![RelationColumn {
+                    name: "id".into(),
+                    type_id: 20,
+                    type_modifier: -1,
+                    is_key: true,
+                }],
+                Lsn::new(lsn),
+            )
+        }
+
+        /// The truncate an event carries, `None` for every other event type.
+        fn truncate_of(event: &PgChangeEvent) -> Option<(Vec<Arc<str>>, bool, bool)> {
+            match &event.change().event_type {
+                pg_walstream::EventType::Truncate {
+                    tables,
+                    cascade,
+                    restart_identity,
+                } => Some((tables.clone(), *cascade, *restart_identity)),
+                _ => None,
+            }
+        }
+
         fn positions(
             order: &mut PgOutputOrder,
             changes: Vec<ChangeEvent>,
         ) -> Vec<PgCommitPosition> {
-            let mut rows = Vec::new();
+            let mut items: Vec<PgRowItem> = Vec::new();
             for change in changes {
-                order.apply(change, &mut rows).expect("frames in place");
+                order.apply(change, &mut items).expect("frames in place");
             }
-            rows.iter().map(PgChangeEvent::position).collect()
+            items
+                .into_iter()
+                .filter_map(|item| match item {
+                    PgRowItem::Event(event) => Some(event.position()),
+                    // A relation states the table, not a row position.
+                    PgRowItem::Relation(_) => None,
+                })
+                .collect()
         }
 
         /// T1, xid 3, writes at 1000 and commits at 1500, and T2, xid 4,
@@ -847,12 +1087,14 @@ mod tests {
         #[test]
         fn a_commit_reports_its_position_after_its_rows_and_where_it_ends() {
             let mut order = PgOutputOrder::new();
-            let mut rows = Vec::new();
-            for change in [begin(3, 1500), insert(1000), insert(1100)] {
-                assert_eq!(order.apply(change, &mut rows), Ok(None));
+            let mut items: Vec<PgRowItem> = Vec::new();
+            // The server states the table's relation ahead of its first row,
+            // and the row-position mapping below drops it.
+            for change in [relation(900), begin(3, 1500), insert(1000), insert(1100)] {
+                assert_eq!(order.apply(change, &mut items), Ok(None));
             }
             let commit = order
-                .apply(commit(1500, 1510), &mut rows)
+                .apply(commit(1500, 1510), &mut items)
                 .expect("frames in place")
                 .expect("a transaction with rows reports its commit");
             assert_eq!(
@@ -862,7 +1104,17 @@ mod tests {
                     PgLsn(1510)
                 )
             );
-            assert!(rows.iter().all(|row| row.position() < commit.position()));
+            let ordinals: Vec<PgCommitPosition> = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    PgRowItem::Event(event) => Some(event.position()),
+                    // A relation states the table, not a row position.
+                    PgRowItem::Relation(_) => None,
+                })
+                .collect();
+            assert!(ordinals
+                .iter()
+                .all(|position| *position < commit.position()));
         }
 
         #[test]
@@ -876,7 +1128,7 @@ mod tests {
         #[test]
         fn a_truncate_of_several_tables_takes_an_ordinal_per_table() {
             let mut order = PgOutputOrder::new();
-            let mut rows = Vec::new();
+            let mut items: Vec<PgRowItem> = Vec::new();
             for change in [
                 begin(5, 1500),
                 ChangeEvent::truncate(
@@ -887,20 +1139,25 @@ mod tests {
                 ),
                 insert(1100),
             ] {
-                order.apply(change, &mut rows).unwrap();
+                order.apply(change, &mut items).unwrap();
             }
-            let tables: Vec<_> = rows
-                .iter()
-                .map(|row| match &row.change().event_type {
-                    pg_walstream::EventType::Truncate {
-                        tables,
-                        cascade,
-                        restart_identity,
-                    } => (tables.clone(), *cascade, *restart_identity),
-                    other => panic!("expected a truncate, got {other:?}"),
+            let events: Vec<PgChangeEvent> = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    PgRowItem::Event(event) => Some(event),
+                    PgRowItem::Relation(_) => None,
                 })
+                .collect();
+            let tables: Vec<_> = events
+                .iter()
+                .map(|event| truncate_of(event).expect("the fanout emits one truncate per table"))
                 .take(2)
                 .collect();
+            assert_eq!(
+                truncate_of(&events[2]),
+                None,
+                "the insert after the fanout keeps its own event type"
+            );
             let orders: Arc<str> = "public.orders".into();
             let items: Arc<str> = "public.items".into();
             assert_eq!(
@@ -908,7 +1165,10 @@ mod tests {
                 vec![(vec![orders], true, false), (vec![items], true, false)],
                 "each table keeps the statement's CASCADE and RESTART IDENTITY"
             );
-            let ordinals: Vec<u64> = rows.iter().map(|row| row.position().ordinal()).collect();
+            let ordinals: Vec<u64> = events
+                .iter()
+                .map(|event| event.position().ordinal())
+                .collect();
             assert_eq!(ordinals, vec![1, 2, 3]);
         }
 
@@ -988,6 +1248,118 @@ mod tests {
                     Err(TransactionOrderError::UnexpectedMessage(kind))
                 );
             }
+        }
+
+        /// A `Relation` message states the table's definition and takes the
+        /// place the frame decodes at, ahead of the rows that follow it.
+        #[test]
+        fn a_relation_states_the_table_before_the_rows_that_follow_it() {
+            let mut order = PgOutputOrder::new();
+            let mut items: Vec<PgRowItem> = Vec::new();
+            let relation_event = ChangeEvent::relation(
+                1,
+                "public",
+                "orders",
+                ReplicaIdentity::Default,
+                vec![
+                    RelationColumn {
+                        name: "id".into(),
+                        type_id: 20,
+                        type_modifier: -1,
+                        is_key: true,
+                    },
+                    RelationColumn {
+                        name: "price".into(),
+                        type_id: 701,
+                        type_modifier: 22,
+                        is_key: false,
+                    },
+                ],
+                Lsn::new(1000),
+            );
+            for change in [
+                relation_event,
+                begin(3, 1500),
+                insert(1000),
+                commit(1500, 1510),
+            ] {
+                order.apply(change, &mut items).expect("frames in place");
+            }
+            let source_items: Vec<PgSourceItem> =
+                items.into_iter().map(PgSourceItem::from).collect();
+            let relations: Vec<_> = source_items
+                .iter()
+                .cloned()
+                .filter_map(SourceItem::into_relation)
+                .collect();
+            let events: Vec<_> = source_items
+                .iter()
+                .cloned()
+                .filter_map(SourceItem::into_event)
+                .collect();
+            assert!(
+                matches!(source_items.first(), Some(PgSourceItem::Relation(_)))
+                    && relations.len() == 1
+                    && events.len() == 1,
+                "the relation leads the rows, got {source_items:?}"
+            );
+            let relation = &relations[0];
+            assert_eq!(relation.lsn(), PgLsn(1000));
+            assert_eq!(relation.oid(), 1);
+            assert_eq!(relation.schema(), "public");
+            assert_eq!(relation.table(), "orders");
+            assert_eq!(relation.replica_identity(), ReplicaIdentity::Default);
+            let columns = relation.columns();
+            let names: Vec<&str> = columns.iter().map(PgRelationColumn::name).collect();
+            assert_eq!(names, alloc::vec!["id", "price"]);
+            assert!(columns[0].is_key());
+            assert!(!columns[1].is_key());
+            // The server's type oids and modifiers ride the definition, which
+            // a consumer holding an older schema diffs against its catalog.
+            assert_eq!(columns[0].type_oid(), 20);
+            assert_eq!(columns[0].type_modifier(), -1);
+            assert_eq!(columns[1].type_oid(), 701);
+            assert_eq!(columns[1].type_modifier(), 22);
+            let row = &events[0];
+            assert!(row.position() < PgCommitPosition::at_commit(PgLsn(1500), PgXid(3)));
+        }
+
+        /// A `Relation` outside any transaction still gets delivered, because
+        /// real pgoutput sends it while the first row's transaction is still
+        /// open.
+        #[test]
+        fn a_relation_outside_a_transaction_still_delivers() {
+            let mut order = PgOutputOrder::new();
+            let mut items: Vec<PgRowItem> = Vec::new();
+            let change = ChangeEvent::relation(
+                1,
+                "public",
+                "orders",
+                ReplicaIdentity::Full,
+                vec![RelationColumn {
+                    name: "id".into(),
+                    type_id: 20,
+                    type_modifier: -1,
+                    is_key: true,
+                }],
+                Lsn::new(1000),
+            );
+            order
+                .apply(change, &mut items)
+                .expect("a relation needs no transaction");
+            let source_items: Vec<PgSourceItem> =
+                items.into_iter().map(PgSourceItem::from).collect();
+            let relations: Vec<_> = source_items
+                .iter()
+                .cloned()
+                .filter_map(SourceItem::into_relation)
+                .collect();
+            assert_eq!(
+                (source_items.len(), relations.len()),
+                (1, 1),
+                "the relation alone is delivered, got {source_items:?}"
+            );
+            assert_eq!(relations[0].replica_identity(), ReplicaIdentity::Full);
         }
     }
 
