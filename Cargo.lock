@@ -939,7 +939,7 @@ dependencies = [
 [[package]]
 name = "diesel"
 version = "2.3.14"
-source = "git+https://github.com/diesel-rs/diesel#a43c41419c4e38b83da86d7eb844c61db3859b8c"
+source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
 dependencies = [
  "bigdecimal",
  "bitflags 2.13.2",
@@ -1004,7 +1004,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel#a43c41419c4e38b83da86d7eb844c61db3859b8c"
+source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1014,7 +1014,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.3.10"
-source = "git+https://github.com/diesel-rs/diesel#a43c41419c4e38b83da86d7eb844c61db3859b8c"
+source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -1027,7 +1027,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#a43c41419c4e38b83da86d7eb844c61db3859b8c"
+source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
 dependencies = [
  "syn 3.0.9",
 ]
@@ -1085,7 +1085,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#a43c41419c4e38b83da86d7eb844c61db3859b8c"
+source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
 dependencies = [
  "darling",
  "either",
@@ -2574,7 +2574,7 @@ dependencies = [
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#a35307fed13b9dd024c0fd6ae99b71f7836d45c6"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#73324f8743982e51bb3b507542d3293a66682668"
 dependencies = [
  "sql-traits",
  "sqlparser",
@@ -2585,7 +2585,7 @@ dependencies = [
 [[package]]
 name = "pg_walstream"
 version = "0.10.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#c0249dae9d026e2a124f775e788f76b6f19a21e3"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#c4da9fc66e39df64b4017e6bfdb7ce0ba2d66d3a"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -3668,22 +3668,24 @@ dependencies = [
 
 [[package]]
 name = "sql-scalar-text"
-version = "0.2.0"
-source = "git+https://github.com/connetto-rs/sql-scalar-text?branch=main#db1be3824f3c7be5e97293d3d01982897196ef9d"
+version = "0.3.0"
+source = "git+https://github.com/connetto-rs/sql-scalar-text?branch=main#583aca9a50dc88deef3a26df64f1579e86aa3f25"
 dependencies = [
  "bigdecimal",
  "chrono",
+ "thiserror",
 ]
 
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#56d654414836baee4e59af2222f0897940f6e6b3"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#8e3bf8974cf556c7c8e33d9f43a106c6a924b95b"
 dependencies = [
  "geometric-traits",
  "serde",
  "sha2 0.10.9",
  "sqlparser",
+ "sqlparser-plpgsql",
  "thiserror",
  "unicode-normalization",
 ]
@@ -3720,7 +3722,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.63.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#ce12f1f63e0a50259d646cd587d0643e415646b3"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#1071d75faddd239341a69ff997caa003690e5cae"
 dependencies = [
  "log",
  "recursive",
@@ -3741,7 +3743,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#6caa0cec7051bb14da114f5730b1dea6b59f95e8"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#657a7dff12df8ae92bf226218e73a9ec1087dc79"
 dependencies = [
  "sqlparser",
  "thiserror",
@@ -3750,7 +3752,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.6.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#ce12f1f63e0a50259d646cd587d0643e415646b3"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#1071d75faddd239341a69ff997caa003690e5cae"
 dependencies = [
  "proc-macro2",
  "quote",
