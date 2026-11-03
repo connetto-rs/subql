@@ -296,7 +296,7 @@ where
             Some(ScalarFamily::Interval) => {
                 text_scalar_bind(col_name, value, "interval TEXT or NULL", |s| {
                     Some(bind_as::<Interval, DieselInterval>(diesel_interval(
-                        parse_interval(s)?,
+                        parse_interval(s).ok()?,
                     )))
                 })
             }

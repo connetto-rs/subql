@@ -136,7 +136,7 @@ pub(crate) fn interval_literal(
     let typmod = IntervalTypmod::new(fields, precision).ok_or_else(refused)?;
     sql_scalar_text::parse_interval_typmod(text, typmod)
         .map(crate::backend::Interval::from)
-        .ok_or_else(refused)
+        .map_err(|_| refused())
 }
 
 #[cfg(test)]

@@ -202,7 +202,7 @@ fn encode_date(value: &Json) -> Option<Vec<u8>> {
 
 /// An interval element, its binary format being microseconds, days, then months.
 fn encode_interval(value: &Json) -> Option<Vec<u8>> {
-    let interval = sql_scalar_text::parse_interval(value.as_str()?)?;
+    let interval = sql_scalar_text::parse_interval(value.as_str()?).ok()?;
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&interval.microseconds.to_be_bytes());
     bytes.extend_from_slice(&interval.days.to_be_bytes());

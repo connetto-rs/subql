@@ -25,7 +25,7 @@ impl Interval {
     /// PostgreSQL raises an error.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        sql_scalar_text::parse_interval(text).map(Self::from)
+        sql_scalar_text::parse_interval(text).ok().map(Self::from)
     }
 
     /// The months, twelve of which print as a year.
