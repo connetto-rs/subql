@@ -437,6 +437,41 @@ CREATE POLICY docs_owner ON docs USING (owner = current_user);";
     }
 
     #[test]
+    fn null_test_guards_admit_by_nullness_and_refuse_unreadable_columns() {
+        let db = catalog();
+        for (test, on_null, on_set) in [
+            (AttributeTest::IsNull, 1, 0),
+            (AttributeTest::IsNotNull, 0, 1),
+        ] {
+            let described = guarded(typed_column("public", ColumnKind::Bool), test.clone());
+            assert!(is_evaluable::<Postgres, _>(&described, &db));
+            let mut row = row_of(Value::String("alice".into()));
+            row[2] = Value::Null;
+            assert_eq!(records(&described, row.clone()).unwrap().len(), on_null);
+            row[2] = Value::Bool(false);
+            assert_eq!(records(&described, row.clone()).unwrap().len(), on_set);
+            row[2] = Value::Missing;
+            assert_eq!(
+                records(&described, row),
+                Err(RowRecordError::Refused(RecordError::ColumnAbsent(
+                    "public".into()
+                )))
+            );
+            for unreadable in [
+                typed_column("note", ColumnKind::Json),
+                typed_column("score", ColumnKind::Unsupported),
+            ] {
+                let described = guarded(unreadable, test.clone());
+                assert!(!is_evaluable::<Postgres, _>(&described, &db));
+                assert!(matches!(
+                    records(&described, row_of(Value::String("alice".into()))),
+                    Err(RowRecordError::UnreadableColumn(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn literal_membership_guards_refuse_incompatible_literals_before_matching() {
         let db = catalog();
         for (column, values) in [
