@@ -972,7 +972,7 @@ fn having_from_expr<B: crate::backend::Backend, DB: DatabaseLike>(
                 ))
             }
         };
-    if sql_scalar_text::parse_f64(&threshold).is_none() {
+    if sql_values::parse_f64(&threshold).is_none() {
         return Err(RegisterError::UnsupportedSql(alloc::format!(
             "HAVING threshold {threshold} is not a numeric constant"
         )));

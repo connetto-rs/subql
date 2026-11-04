@@ -303,7 +303,7 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> Backend for Postgres<V> {
     }
 
     fn numeric_literal_family(text: &str) -> ScalarFamily {
-        if sql_scalar_text::parse_i64(text).is_some() {
+        if sql_values::parse_i64(text).is_some() {
             ScalarFamily::Int
         } else {
             ScalarFamily::Decimal
@@ -664,7 +664,7 @@ impl<C: MySqlTableNameCase> Backend for MySql<C> {
     fn numeric_literal_family(text: &str) -> ScalarFamily {
         if text.contains(['e', 'E']) {
             ScalarFamily::Float
-        } else if sql_scalar_text::parse_i64(text).is_some() {
+        } else if sql_values::parse_i64(text).is_some() {
             ScalarFamily::Int
         } else {
             ScalarFamily::Decimal
@@ -951,7 +951,7 @@ impl Backend for SQLite {
     }
 
     fn numeric_literal_family(text: &str) -> ScalarFamily {
-        if sql_scalar_text::parse_i64(text).is_some() {
+        if sql_values::parse_i64(text).is_some() {
             ScalarFamily::Int
         } else {
             ScalarFamily::Float
@@ -1121,19 +1121,19 @@ impl Backend for SQLite {
             (Some(ScalarFamily::Bool), Value::Int(value)) => Some(Value::Bool(value)),
             (Some(ScalarFamily::Uuid), Value::String(value)) => Some(Value::Uuid(value)),
             (Some(ScalarFamily::Timestamp), Value::String(value)) => {
-                sql_scalar_text::parse_timestamp(&value).map(Value::Timestamp)
+                sql_values::parse_timestamp(&value).map(Value::Timestamp)
             }
             (Some(ScalarFamily::TimestampTz), Value::String(value)) => {
-                sql_scalar_text::parse_timestamp_tz(&value).map(Value::TimestampTz)
+                sql_values::parse_timestamp_tz(&value).map(Value::TimestampTz)
             }
             (Some(ScalarFamily::Date), Value::String(value)) => {
-                sql_scalar_text::parse_date(&value).map(Value::Date)
+                sql_values::parse_date(&value).map(Value::Date)
             }
             (Some(ScalarFamily::Time), Value::String(value)) => {
-                sql_scalar_text::parse_time(&value).map(Value::Time)
+                sql_values::parse_time(&value).map(Value::Time)
             }
             (Some(ScalarFamily::Decimal), Value::String(value)) => {
-                sql_scalar_text::parse_decimal(&value).map(Value::Decimal)
+                sql_values::parse_decimal(&value).map(Value::Decimal)
             }
             (Some(ScalarFamily::Float), Value::Int(value)) => {
                 Some(Value::Float(widen_i64_to_f64(value)))

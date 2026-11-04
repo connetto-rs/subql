@@ -1270,16 +1270,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sql-scalar-text"
-version = "0.3.0"
-source = "git+https://github.com/connetto-rs/sql-scalar-text?branch=main#583aca9a50dc88deef3a26df64f1579e86aa3f25"
-dependencies = [
- "bigdecimal",
- "chrono",
- "thiserror",
-]
-
-[[package]]
 name = "sql-traits"
 version = "0.1.0"
 source = "git+https://github.com/connetto-rs/sql-traits?branch=main#8e3bf8974cf556c7c8e33d9f43a106c6a924b95b"
@@ -1291,6 +1281,16 @@ dependencies = [
  "sqlparser-plpgsql",
  "thiserror",
  "unicode-normalization",
+]
+
+[[package]]
+name = "sql-values"
+version = "0.3.0"
+source = "git+https://github.com/connetto-rs/sql-scalar-text?branch=main#967befc24e3f0eb30b9c578b698b02b9a9187b4f"
+dependencies = [
+ "bigdecimal",
+ "chrono",
+ "thiserror",
 ]
 
 [[package]]
@@ -1413,8 +1413,8 @@ dependencies = [
  "serde",
  "serde_json",
  "slab",
- "sql-scalar-text",
  "sql-traits",
+ "sql-values",
  "sqlite-diff-rs",
  "sqlparser",
  "sqlparser-canonicalize",

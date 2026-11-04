@@ -133,11 +133,11 @@ impl serde::Serialize for NumericThreshold {
 impl NumericThreshold {
     fn new<B: Backend>(text: &str) -> Option<Self> {
         let family = B::numeric_literal_family(text);
-        let float = sql_scalar_text::parse_f64(text)?;
+        let float = sql_values::parse_f64(text)?;
         let exact = if family == ScalarFamily::Float {
             BigDecimal::from_f64(float)
         } else {
-            Some(sql_scalar_text::parse_decimal(text)?)
+            Some(sql_values::parse_decimal(text)?)
         };
         let integer = exact.as_ref().map(IntegerThreshold::new);
         let float_residual = exact.as_ref().map_or(Ordering::Equal, |exact| {

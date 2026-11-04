@@ -1021,7 +1021,7 @@ impl AggAccumulator {
             // num-traits import.
             Value::Decimal(d) => (d as &dyn Any)
                 .downcast_ref::<bigdecimal::BigDecimal>()
-                .and_then(|x| sql_scalar_text::parse_f64(&x.to_string())),
+                .and_then(|x| sql_values::parse_f64(&x.to_string())),
             _ => None,
         }
     }

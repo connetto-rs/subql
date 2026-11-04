@@ -96,7 +96,7 @@ pub fn parse_custom_literal<B: SqlLiteralParse>(
 pub(crate) fn interval_literal(
     interval: &sqlparser::ast::Interval,
 ) -> Result<crate::backend::Interval, RegisterError> {
-    use sql_scalar_text::{IntervalFields, IntervalTypmod};
+    use sql_values::{IntervalFields, IntervalTypmod};
     use sqlparser::ast::DateTimeField as Field;
 
     let refused = || RegisterError::TypeError(format!("cannot read {interval} as an interval"));
@@ -134,7 +134,7 @@ pub(crate) fn interval_literal(
     // PostgreSQL clamps a precision above six, so any wider one reads as six.
     let precision = precision.map(|precision| u8::try_from(precision).unwrap_or(u8::MAX));
     let typmod = IntervalTypmod::new(fields, precision).ok_or_else(refused)?;
-    sql_scalar_text::parse_interval_typmod(text, typmod)
+    sql_values::parse_interval_typmod(text, typmod)
         .map(crate::backend::Interval::from)
         .map_err(|_| refused())
 }

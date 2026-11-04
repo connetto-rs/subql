@@ -289,13 +289,11 @@ pub fn pg_canonical(bytes: Option<&[u8]>, type_oid: u32) -> Result<Canonical, Re
             let interval = pg_from_sql::<sql_types::Interval, diesel::pg::data_types::PgInterval>(
                 b, type_oid, "interval",
             )?;
-            Canonical::Interval(crate::backend::Interval::from(
-                sql_scalar_text::PgInterval {
-                    months: interval.months,
-                    days: interval.days,
-                    microseconds: interval.microseconds,
-                },
-            ))
+            Canonical::Interval(crate::backend::Interval::from(sql_values::PgInterval {
+                months: interval.months,
+                days: interval.days,
+                microseconds: interval.microseconds,
+            }))
         }
         other => {
             return Err(RegisterError::UnsupportedSql(format!(

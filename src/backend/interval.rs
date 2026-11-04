@@ -3,7 +3,7 @@
 use core::cmp::Ordering;
 use core::fmt;
 
-use sql_scalar_text::PgInterval;
+use sql_values::PgInterval;
 
 /// A PostgreSQL `interval` as its months, days and microseconds.
 ///
@@ -25,7 +25,7 @@ impl Interval {
     /// PostgreSQL raises an error.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        sql_scalar_text::parse_interval(text).ok().map(Self::from)
+        sql_values::parse_interval(text).ok().map(Self::from)
     }
 
     /// The months, twelve of which print as a year.
@@ -869,7 +869,7 @@ mod tests {
         assert_eq!(
             interval("178956970 years 7 mons 2147483647 days 9223372036854775807 microseconds")
                 .span(),
-            sql_scalar_text::PgInterval::INFINITY
+            sql_values::PgInterval::INFINITY
         );
     }
 
