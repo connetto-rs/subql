@@ -392,13 +392,13 @@ mod tests {
         let mut accumulator = AggAccumulator::from_spec(&AggSpec::Sum { column: 0 }, INTERVAL_RULE);
         accumulator
             .apply(&AggDelta::Totalled {
-                value: TotalDelta::Interval(crate::backend::IntervalSum::of(
-                    crate::backend::Interval::parse("1 mon").expect("a month parses"),
+                value: TotalDelta::Interval(sql_values::IntervalSum::of(
+                    sql_values::parse_interval("1 mon").expect("a month parses"),
                     1,
                 )),
                 count_delta: 1,
             })
-            .expect("a month fits the ported range");
+            .expect("a month fits the range");
         assert_eq!(
             having_condition(HavingFunction::Sum).passes::<Postgres>(0, &accumulator),
             Ok(false),

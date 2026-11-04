@@ -303,6 +303,28 @@ fn a_time_minus_an_interval_ignores_its_months_and_days() {
     }
 }
 
+/// A clock moved past the range of PostgreSQL's 64-bit microseconds wraps in
+/// that range before it is reduced to the day, as PostgreSQL 16 and 18 answer
+/// it.
+#[test]
+fn a_time_moved_past_the_clock_range_wraps() {
+    let shift = Shift {
+        clock: "23:59:59",
+        span: "2562047788:00:54.775807",
+        ..SHIFT
+    };
+    for moved in ["clock + span", "clock - (-span)"] {
+        assert!(
+            holds(&shift, &format!("{moved} = '19:59:04.224191'")),
+            "{moved}"
+        );
+        assert!(
+            !holds(&shift, &format!("{moved} = '19:59:04.224192'")),
+            "{moved}"
+        );
+    }
+}
+
 /// PostgreSQL holds timestamps to the year 294276 and `chrono` to 262142,
 /// so a result between the two is refused for the row. Answering it as a
 /// null would leave `IS NOT NULL` false where PostgreSQL keeps the row.
