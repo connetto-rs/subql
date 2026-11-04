@@ -463,10 +463,11 @@ CREATE POLICY docs_owner ON docs USING (owner = current_user);";
             ] {
                 let described = guarded(unreadable, test.clone());
                 assert!(!is_evaluable::<Postgres, _>(&described, &db));
-                assert!(matches!(
-                    records(&described, row_of(Value::String("alice".into()))),
-                    Err(RowRecordError::UnreadableColumn(_))
-                ));
+                let refusal = records(&described, row_of(Value::String("alice".into())));
+                assert_eq!(
+                    core::mem::discriminant(&refusal.unwrap_err()),
+                    core::mem::discriminant(&RowRecordError::UnreadableColumn(String::new()))
+                );
             }
         }
     }
