@@ -266,6 +266,22 @@ fn a_result_postgres_raises_on_is_refused() {
     );
 }
 
+/// A timestamp before PostgreSQL's first, 4714-11-24 BC, which `chrono`
+/// holds and PostgreSQL never sends, has no difference to answer.
+#[test]
+fn a_difference_from_before_the_first_timestamp_is_refused() {
+    let shift = Shift {
+        start: "-10000-01-01 00:00:00",
+        ..SHIFT
+    };
+    assert_eq!(
+        refusals(&shift, &["start - '2024-01-01 00:00:00' > '1 day'"]),
+        [EvaluationRefusal::DatetimeOutOfRange {
+            operation: ArithmeticOp::Subtract
+        }]
+    );
+}
+
 /// Subtracting an interval whose negation leaves its range is refused, as
 /// PostgreSQL 16 and 18 raise there.
 #[test]
