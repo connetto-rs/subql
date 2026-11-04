@@ -454,18 +454,15 @@ mod tests {
     #[test]
     fn a_malformed_number_token_is_a_type_error() {
         let sql = SqlValue::Number("1.2.3".to_string(), false);
+        let type_error = core::mem::discriminant(&RegisterError::TypeError(String::default()));
         for family in [
             ScalarFamily::Int,
             ScalarFamily::Float,
             ScalarFamily::Decimal,
         ] {
-            assert!(
-                matches!(
-                    Postgres::<Pg18>::parse_literal(&sql, family.into()),
-                    Err(RegisterError::TypeError(_))
-                ),
-                "{family:?}"
-            );
+            let refused = Postgres::<Pg18>::parse_literal(&sql, family.into())
+                .map_err(|error| core::mem::discriminant(&error));
+            assert_eq!(refused, Err(type_error), "{family:?}");
         }
     }
 }
