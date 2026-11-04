@@ -1648,7 +1648,7 @@ fn append_sqlite_json(
         SqliteJsonStorage::Real(value) => {
             let canonical = canonical_f64(*value);
             if canonical.fract() == 0.0 {
-                if let Some(integer) = sql_scalar_text::parse_i64(&canonical.to_string()) {
+                if let Some(integer) = sql_values::parse_i64(&canonical.to_string()) {
                     return append_tagged(output, 1, &integer);
                 }
             }

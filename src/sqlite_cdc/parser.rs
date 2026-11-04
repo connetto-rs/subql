@@ -308,19 +308,19 @@ fn decode_wire_value(
             Some(ScalarFamily::String) | None => Value::String(s.clone()),
             Some(ScalarFamily::Uuid) => Value::Uuid(s.clone()),
             Some(ScalarFamily::Timestamp) => {
-                sql_scalar_text::parse_timestamp(s).map_or(Value::Missing, Value::Timestamp)
+                sql_values::parse_timestamp(s).map_or(Value::Missing, Value::Timestamp)
             }
             Some(ScalarFamily::TimestampTz) => {
-                sql_scalar_text::parse_timestamp_tz(s).map_or(Value::Missing, Value::TimestampTz)
+                sql_values::parse_timestamp_tz(s).map_or(Value::Missing, Value::TimestampTz)
             }
             Some(ScalarFamily::Date) => {
-                sql_scalar_text::parse_date(s).map_or(Value::Missing, Value::Date)
+                sql_values::parse_date(s).map_or(Value::Missing, Value::Date)
             }
             Some(ScalarFamily::Time) => {
-                sql_scalar_text::parse_time(s).map_or(Value::Missing, Value::Time)
+                sql_values::parse_time(s).map_or(Value::Missing, Value::Time)
             }
             Some(ScalarFamily::Decimal) => {
-                sql_scalar_text::parse_decimal(s).map_or(Value::Missing, Value::Decimal)
+                sql_values::parse_decimal(s).map_or(Value::Missing, Value::Decimal)
             }
             Some(ScalarFamily::Json) => Value::Json(SqliteJson::text(s.clone())),
             Some(ScalarFamily::Jsonb) => Value::Jsonb(SqliteJson::text(s.clone())),

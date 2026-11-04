@@ -29,7 +29,7 @@
 //!   binds when the wire carries a `Value::Text` holding the replica's
 //!   temporal text (`YYYY-MM-DD HH:MM:SS.ffffff+00:00` for a
 //!   `TIMESTAMPTZ`) or Postgres's own text output, parsed through
-//!   `sql_scalar_text`. `TIMESTAMPTZ` normalizes to a UTC instant.
+//!   `sql_values`. `TIMESTAMPTZ` normalizes to a UTC instant.
 //!   Each column is classified through the catalog's [`crate::backend::ScalarKind`],
 //!   since Postgres has no implicit assignment cast from text to these
 //!   types. Any other wire shape on such a column is rejected.
@@ -41,7 +41,7 @@
 //!   shape on such a column is rejected.
 //! * An `INTERVAL` column, restricted or not, gets a native bind when the
 //!   wire carries a `Value::Text` holding the text PostgreSQL prints for
-//!   it, parsed through `sql_scalar_text::parse_interval`. Any other wire
+//!   it, parsed through `sql_values::parse_interval`. Any other wire
 //!   shape on such a column is rejected.
 //! * An array column gets a native array bind when the wire carries a
 //!   `Value::Text` holding the replica's JSON array text, of any number of
@@ -75,12 +75,10 @@ use diesel::result::Error as DieselError;
 use diesel::sql_types::{
     Bool, Date, Interval, Json, Jsonb, Numeric, Time, Timestamp, Timestamptz, Uuid as UuidSqlType,
 };
-use sql_scalar_text::{
-    parse_date, parse_interval, parse_time, parse_timestamp, parse_timestamp_tz,
-};
 use sql_traits::prelude::{
     ColumnLike, DataTypeLike, DatabaseLike, DialectLike, TypeMatchLike, VectorKind,
 };
+use sql_values::{parse_date, parse_interval, parse_time, parse_timestamp, parse_timestamp_tz};
 use sqlite_diff_rs::{Adapter, Binder, DefaultBinder, Value};
 
 use crate::backend::ScalarFamily;
@@ -296,7 +294,7 @@ where
             Some(ScalarFamily::Interval) => {
                 text_scalar_bind(col_name, value, "interval TEXT or NULL", |s| {
                     Some(bind_as::<Interval, DieselInterval>(diesel_interval(
-                        parse_interval(s)?,
+                        parse_interval(s).ok()?,
                     )))
                 })
             }
@@ -358,15 +356,15 @@ where
             None => Box::new(DefaultBinder::from(value)),
         }),
         None => text_scalar_bind(col_name, value, "decimal TEXT or NULL", |s| {
-            Some(bind_as::<Numeric, BigDecimal>(
-                sql_scalar_text::parse_decimal(s)?,
-            ))
+            Some(bind_as::<Numeric, BigDecimal>(sql_values::parse_decimal(
+                s,
+            )?))
         }),
     }
 }
 
 /// diesel's form of a parsed interval, the same three fields.
-const fn diesel_interval(interval: sql_scalar_text::PgInterval) -> DieselInterval {
+const fn diesel_interval(interval: sql_values::PgInterval) -> DieselInterval {
     DieselInterval::new(interval.microseconds, interval.days, interval.months)
 }
 

@@ -96,7 +96,7 @@ pub fn parse_custom_literal<B: SqlLiteralParse>(
 pub(crate) fn interval_literal(
     interval: &sqlparser::ast::Interval,
 ) -> Result<crate::backend::Interval, RegisterError> {
-    use sql_scalar_text::{IntervalFields, IntervalTypmod};
+    use sql_values::{IntervalFields, IntervalTypmod};
     use sqlparser::ast::DateTimeField as Field;
 
     let refused = || RegisterError::TypeError(format!("cannot read {interval} as an interval"));
@@ -134,9 +134,9 @@ pub(crate) fn interval_literal(
     // PostgreSQL clamps a precision above six, so any wider one reads as six.
     let precision = precision.map(|precision| u8::try_from(precision).unwrap_or(u8::MAX));
     let typmod = IntervalTypmod::new(fields, precision).ok_or_else(refused)?;
-    sql_scalar_text::parse_interval_typmod(text, typmod)
+    sql_values::parse_interval_typmod(text, typmod)
         .map(crate::backend::Interval::from)
-        .ok_or_else(refused)
+        .map_err(|_| refused())
 }
 
 #[cfg(test)]
@@ -447,6 +447,22 @@ mod tests {
                 refused,
                 "{field:?}"
             );
+        }
+    }
+
+    /// A hand-built number token the parsers reject is a type error, whatever the target.
+    #[test]
+    fn a_malformed_number_token_is_a_type_error() {
+        let sql = SqlValue::Number("1.2.3".to_string(), false);
+        let type_error = core::mem::discriminant(&RegisterError::TypeError(String::default()));
+        for family in [
+            ScalarFamily::Int,
+            ScalarFamily::Float,
+            ScalarFamily::Decimal,
+        ] {
+            let refused = Postgres::<Pg18>::parse_literal(&sql, family.into())
+                .map_err(|error| core::mem::discriminant(&error));
+            assert_eq!(refused, Err(type_error), "{family:?}");
         }
     }
 }

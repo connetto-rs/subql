@@ -133,11 +133,11 @@ impl serde::Serialize for NumericThreshold {
 impl NumericThreshold {
     fn new<B: Backend>(text: &str) -> Option<Self> {
         let family = B::numeric_literal_family(text);
-        let float = sql_scalar_text::parse_f64(text)?;
+        let float = sql_values::parse_f64(text)?;
         let exact = if family == ScalarFamily::Float {
             BigDecimal::from_f64(float)
         } else {
-            Some(sql_scalar_text::parse_decimal(text)?)
+            Some(sql_values::parse_decimal(text)?)
         };
         let integer = exact.as_ref().map(IntegerThreshold::new);
         let float_residual = exact.as_ref().map_or(Ordering::Equal, |exact| {
@@ -417,5 +417,21 @@ mod tests {
                 .number::<Postgres>(&value),
             Ok(None),
         );
+    }
+
+    /// Replay refuses a restored threshold that is not a number, rather than comparing against it.
+    #[test]
+    fn a_restored_threshold_that_is_not_a_number_builds_no_filter() {
+        for threshold in ["eleven", "NaN", "Infinity"] {
+            let having = AggHaving {
+                subject: HavingSubject::RowCount,
+                op: HavingOp::Gt,
+                threshold: threshold.to_string(),
+            };
+            assert!(
+                GroupHaving::new::<Postgres>(&having).is_none(),
+                "{threshold}"
+            );
+        }
     }
 }

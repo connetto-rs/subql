@@ -26,7 +26,7 @@ fn parse_float_at_width(text: &str, width: FloatWidth) -> Value<Postgres> {
         FloatWidth::Single => text
             .parse::<f32>()
             .map_or(Value::Missing, |single| Value::Float(f64::from(single))),
-        FloatWidth::Double => sql_scalar_text::parse_f64(text).map_or(Value::Missing, Value::Float),
+        FloatWidth::Double => sql_values::parse_f64(text).map_or(Value::Missing, Value::Float),
     }
 }
 
@@ -41,28 +41,28 @@ pub(super) fn text_to_pg_value_by_kind(text: &str, kind: DeclaredType) -> Value<
     match kind.family() {
         ScalarFamily::Bool => {
             if matches!(text, "t" | "f") {
-                sql_scalar_text::parse_bool(text).map_or(Value::Missing, Value::Bool)
+                sql_values::parse_bool(text).map_or(Value::Missing, Value::Bool)
             } else {
                 Value::Missing
             }
         }
-        ScalarFamily::Int => sql_scalar_text::parse_i64(text).map_or(Value::Missing, Value::Int),
+        ScalarFamily::Int => sql_values::parse_i64(text).map_or(Value::Missing, Value::Int),
         ScalarFamily::Decimal => {
-            sql_scalar_text::parse_decimal(text).map_or(Value::Missing, Value::Decimal)
+            sql_values::parse_decimal(text).map_or(Value::Missing, Value::Decimal)
         }
         ScalarFamily::String => Value::String(text.to_string()),
         ScalarFamily::Bytes => {
-            sql_scalar_text::parse_pg_bytea_hex(text).map_or(Value::Missing, Value::Bytes)
+            sql_values::parse_pg_bytea_hex(text).map_or(Value::Missing, Value::Bytes)
         }
         ScalarFamily::Uuid => Uuid::parse_str(text).map_or(Value::Missing, Value::Uuid),
         ScalarFamily::Timestamp => {
-            sql_scalar_text::parse_timestamp(text).map_or(Value::Missing, Value::Timestamp)
+            sql_values::parse_timestamp(text).map_or(Value::Missing, Value::Timestamp)
         }
         ScalarFamily::TimestampTz => {
-            sql_scalar_text::parse_timestamp_tz(text).map_or(Value::Missing, Value::TimestampTz)
+            sql_values::parse_timestamp_tz(text).map_or(Value::Missing, Value::TimestampTz)
         }
-        ScalarFamily::Date => sql_scalar_text::parse_date(text).map_or(Value::Missing, Value::Date),
-        ScalarFamily::Time => sql_scalar_text::parse_time(text).map_or(Value::Missing, Value::Time),
+        ScalarFamily::Date => sql_values::parse_date(text).map_or(Value::Missing, Value::Date),
+        ScalarFamily::Time => sql_values::parse_time(text).map_or(Value::Missing, Value::Time),
         ScalarFamily::Json => serde_json::from_str(text).map_or(Value::Missing, Value::Json),
         ScalarFamily::Jsonb => serde_json::from_str(text).map_or(Value::Missing, Value::Jsonb),
         // Answered above, where the width decides.
@@ -244,7 +244,7 @@ fn json_i64(value: &serde_json::Value) -> Option<i64> {
                 })
             }
         }
-        serde_json::Value::String(s) => sql_scalar_text::parse_i64(s),
+        serde_json::Value::String(s) => sql_values::parse_i64(s),
         _ => None,
     }
 }
@@ -252,15 +252,15 @@ fn json_i64(value: &serde_json::Value) -> Option<i64> {
 fn json_f64(value: &serde_json::Value) -> Option<f64> {
     match value {
         serde_json::Value::Number(n) => n.as_f64(),
-        serde_json::Value::String(s) => sql_scalar_text::parse_f64(s),
+        serde_json::Value::String(s) => sql_values::parse_f64(s),
         _ => None,
     }
 }
 
 fn json_bigdecimal(value: &serde_json::Value) -> Option<BigDecimal> {
     match value {
-        serde_json::Value::String(s) => sql_scalar_text::parse_decimal(s),
-        serde_json::Value::Number(n) => sql_scalar_text::parse_decimal(&n.to_string()),
+        serde_json::Value::String(s) => sql_values::parse_decimal(s),
+        serde_json::Value::Number(n) => sql_values::parse_decimal(&n.to_string()),
         _ => None,
     }
 }
@@ -273,13 +273,11 @@ fn json_bool(value: &serde_json::Value) -> Option<bool> {
             Some(1) => Some(true),
             _ => None,
         },
-        serde_json::Value::String(s) => {
-            sql_scalar_text::parse_bool(s.as_str()).or(match s.as_str() {
-                "true" | "TRUE" | "True" => Some(true),
-                "false" | "FALSE" | "False" => Some(false),
-                _ => None,
-            })
-        }
+        serde_json::Value::String(s) => sql_values::parse_bool(s.as_str()).or(match s.as_str() {
+            "true" | "TRUE" | "True" => Some(true),
+            "false" | "FALSE" | "False" => Some(false),
+            _ => None,
+        }),
         _ => None,
     }
 }
@@ -292,9 +290,9 @@ fn json_string(value: &serde_json::Value) -> alloc::string::String {
 }
 
 fn json_pg_bytea(value: &serde_json::Value) -> Option<alloc::vec::Vec<u8>> {
-    value.as_str().and_then(|text| {
-        sql_scalar_text::parse_pg_bytea_hex(text).or_else(|| decode_hex_bytes(text))
-    })
+    value
+        .as_str()
+        .and_then(|text| sql_values::parse_pg_bytea_hex(text).or_else(|| decode_hex_bytes(text)))
 }
 
 /// Standard base64 with its `=` padding, as Java's encoder writes it.
@@ -331,19 +329,19 @@ fn decode_base64(text: &str) -> Option<alloc::vec::Vec<u8>> {
 }
 
 fn json_timestamp(value: &serde_json::Value) -> Option<NaiveDateTime> {
-    value.as_str().and_then(sql_scalar_text::parse_timestamp)
+    value.as_str().and_then(sql_values::parse_timestamp)
 }
 
 fn json_timestamptz(value: &serde_json::Value) -> Option<DateTime<Utc>> {
-    value.as_str().and_then(sql_scalar_text::parse_timestamp_tz)
+    value.as_str().and_then(sql_values::parse_timestamp_tz)
 }
 
 fn json_date(value: &serde_json::Value) -> Option<NaiveDate> {
-    value.as_str().and_then(sql_scalar_text::parse_date)
+    value.as_str().and_then(sql_values::parse_date)
 }
 
 fn json_time(value: &serde_json::Value) -> Option<NaiveTime> {
-    value.as_str().and_then(sql_scalar_text::parse_time)
+    value.as_str().and_then(sql_values::parse_time)
 }
 
 #[cfg(test)]
@@ -770,6 +768,24 @@ mod tests {
             json_value_to_pg_value_by_kind(&serde_json::json!("t"), declared(ScalarFamily::Bool)),
             Value::Bool(true)
         );
+        for (text, expected) in [
+            ("true", Value::Bool(true)),
+            ("TRUE", Value::Bool(true)),
+            ("True", Value::Bool(true)),
+            ("false", Value::Bool(false)),
+            ("FALSE", Value::Bool(false)),
+            ("False", Value::Bool(false)),
+            ("tRUE", Value::Missing),
+        ] {
+            assert_eq!(
+                json_value_to_pg_value_by_kind(
+                    &serde_json::json!(text),
+                    declared(ScalarFamily::Bool)
+                ),
+                expected,
+                "{text}"
+            );
+        }
         // 2 is neither true nor false.
         assert_eq!(
             json_value_to_mysql_value_by_kind::<crate::backend::NamesStoredAsWritten>(

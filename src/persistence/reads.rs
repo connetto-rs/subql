@@ -453,13 +453,11 @@ mod tests {
             arb_json().prop_map(Value::Json),
             arb_json().prop_map(Value::Jsonb),
             any::<(i32, i32, i64)>().prop_map(|(months, days, microseconds)| {
-                Value::Interval(crate::backend::Interval::from(
-                    sql_scalar_text::PgInterval {
-                        months,
-                        days,
-                        microseconds,
-                    },
-                ))
+                Value::Interval(crate::backend::Interval::from(sql_values::PgInterval {
+                    months,
+                    days,
+                    microseconds,
+                }))
             }),
         ]
         .boxed()

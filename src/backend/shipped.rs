@@ -303,7 +303,7 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> Backend for Postgres<V> {
     }
 
     fn numeric_literal_family(text: &str) -> ScalarFamily {
-        if sql_scalar_text::parse_i64(text).is_some() {
+        if sql_values::parse_i64(text).is_some() {
             ScalarFamily::Int
         } else {
             ScalarFamily::Decimal
@@ -664,7 +664,7 @@ impl<C: MySqlTableNameCase> Backend for MySql<C> {
     fn numeric_literal_family(text: &str) -> ScalarFamily {
         if text.contains(['e', 'E']) {
             ScalarFamily::Float
-        } else if sql_scalar_text::parse_i64(text).is_some() {
+        } else if sql_values::parse_i64(text).is_some() {
             ScalarFamily::Int
         } else {
             ScalarFamily::Decimal
@@ -951,7 +951,7 @@ impl Backend for SQLite {
     }
 
     fn numeric_literal_family(text: &str) -> ScalarFamily {
-        if sql_scalar_text::parse_i64(text).is_some() {
+        if sql_values::parse_i64(text).is_some() {
             ScalarFamily::Int
         } else {
             ScalarFamily::Float
@@ -1121,19 +1121,19 @@ impl Backend for SQLite {
             (Some(ScalarFamily::Bool), Value::Int(value)) => Some(Value::Bool(value)),
             (Some(ScalarFamily::Uuid), Value::String(value)) => Some(Value::Uuid(value)),
             (Some(ScalarFamily::Timestamp), Value::String(value)) => {
-                sql_scalar_text::parse_timestamp(&value).map(Value::Timestamp)
+                sql_values::parse_timestamp(&value).map(Value::Timestamp)
             }
             (Some(ScalarFamily::TimestampTz), Value::String(value)) => {
-                sql_scalar_text::parse_timestamp_tz(&value).map(Value::TimestampTz)
+                sql_values::parse_timestamp_tz(&value).map(Value::TimestampTz)
             }
             (Some(ScalarFamily::Date), Value::String(value)) => {
-                sql_scalar_text::parse_date(&value).map(Value::Date)
+                sql_values::parse_date(&value).map(Value::Date)
             }
             (Some(ScalarFamily::Time), Value::String(value)) => {
-                sql_scalar_text::parse_time(&value).map(Value::Time)
+                sql_values::parse_time(&value).map(Value::Time)
             }
             (Some(ScalarFamily::Decimal), Value::String(value)) => {
-                sql_scalar_text::parse_decimal(&value).map(Value::Decimal)
+                sql_values::parse_decimal(&value).map(Value::Decimal)
             }
             (Some(ScalarFamily::Float), Value::Int(value)) => {
                 Some(Value::Float(widen_i64_to_f64(value)))
@@ -1183,5 +1183,52 @@ fn one_escape_character(written: &str) -> Result<Option<char>, &'static str> {
     match (characters.next(), characters.next()) {
         (Some(character), None) => Ok(Some(character)),
         _ => Err("an escape clause names exactly one character"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SQLite;
+    use crate::backend::{Backend, ScalarFamily, Value, ValueKind};
+    use chrono::{NaiveDate, NaiveTime};
+
+    fn decode(family: ScalarFamily, text: &str) -> Option<Value<SQLite>> {
+        SQLite::decode_group_value(ValueKind::from(family), Value::String(text.into()))
+    }
+
+    /// SQLite stores temporals and decimals as TEXT, so a group value read back parses into its family.
+    #[test]
+    fn sqlite_group_text_parses_into_its_family() {
+        let date = NaiveDate::from_ymd_opt(2026, 1, 2).expect("a date");
+        let time = NaiveTime::from_hms_opt(3, 4, 5).expect("a time");
+        assert_eq!(
+            decode(ScalarFamily::Timestamp, "2026-01-02 03:04:05"),
+            Some(Value::Timestamp(date.and_time(time)))
+        );
+        assert_eq!(
+            decode(ScalarFamily::TimestampTz, "2026-01-02 05:04:05+02:00"),
+            Some(Value::TimestampTz(date.and_time(time).and_utc()))
+        );
+        assert_eq!(
+            decode(ScalarFamily::Date, "2026-01-02"),
+            Some(Value::Date(date))
+        );
+        assert_eq!(
+            decode(ScalarFamily::Time, "03:04:05"),
+            Some(Value::Time(time))
+        );
+        assert_eq!(
+            decode(ScalarFamily::Decimal, "12.50"),
+            Some(Value::Decimal("12.50".parse().expect("a decimal")))
+        );
+        for family in [
+            ScalarFamily::Timestamp,
+            ScalarFamily::TimestampTz,
+            ScalarFamily::Date,
+            ScalarFamily::Time,
+            ScalarFamily::Decimal,
+        ] {
+            assert_eq!(decode(family, "noon"), None, "{family:?}");
+        }
     }
 }

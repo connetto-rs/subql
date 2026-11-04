@@ -196,13 +196,13 @@ fn encode_text(value: &Json) -> Option<Vec<u8>> {
 }
 
 fn encode_date(value: &Json) -> Option<Vec<u8>> {
-    let days = (sql_scalar_text::parse_date(value.as_str()?)? - pg_epoch_date()).num_days();
+    let days = (sql_values::parse_date(value.as_str()?)? - pg_epoch_date()).num_days();
     Some(i32::try_from(days).ok()?.to_be_bytes().to_vec())
 }
 
 /// An interval element, its binary format being microseconds, days, then months.
 fn encode_interval(value: &Json) -> Option<Vec<u8>> {
-    let interval = sql_scalar_text::parse_interval(value.as_str()?)?;
+    let interval = sql_values::parse_interval(value.as_str()?).ok()?;
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&interval.microseconds.to_be_bytes());
     bytes.extend_from_slice(&interval.days.to_be_bytes());
@@ -211,7 +211,7 @@ fn encode_interval(value: &Json) -> Option<Vec<u8>> {
 }
 
 fn encode_time(value: &Json) -> Option<Vec<u8>> {
-    let time = sql_scalar_text::parse_time(value.as_str()?)?;
+    let time = sql_values::parse_time(value.as_str()?)?;
     Some(
         (time - NaiveTime::MIN)
             .num_microseconds()?
@@ -221,11 +221,11 @@ fn encode_time(value: &Json) -> Option<Vec<u8>> {
 }
 
 fn encode_timestamp(value: &Json) -> Option<Vec<u8>> {
-    micros_since_pg_epoch(sql_scalar_text::parse_timestamp(value.as_str()?)?)
+    micros_since_pg_epoch(sql_values::parse_timestamp(value.as_str()?)?)
 }
 
 fn encode_timestamptz(value: &Json) -> Option<Vec<u8>> {
-    let instant: DateTime<Utc> = sql_scalar_text::parse_timestamp_tz(value.as_str()?)?;
+    let instant: DateTime<Utc> = sql_values::parse_timestamp_tz(value.as_str()?)?;
     micros_since_pg_epoch(instant.naive_utc())
 }
 
@@ -260,11 +260,16 @@ fn encode_bool(value: &Json) -> Option<Vec<u8>> {
 /// A decimal element, written as a JSON string or number, in `numeric`'s
 /// binary send format.
 fn encode_decimal(value: &Json) -> Option<Vec<u8>> {
-    let decimal = match value {
-        Json::String(text) => sql_scalar_text::parse_decimal(text)?,
-        Json::Number(number) => sql_scalar_text::parse_decimal(&number.to_string())?,
+    let number;
+    let text = match value {
+        Json::String(text) => text.as_str(),
+        Json::Number(written) => {
+            number = written.to_string();
+            number.as_str()
+        }
         _ => return None,
     };
+    let decimal = sql_values::parse_decimal(text)?;
     let numeric = PgNumeric::from(decimal);
     let sign: u16 = if matches!(numeric, PgNumeric::Negative { .. }) {
         0x4000
