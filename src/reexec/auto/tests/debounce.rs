@@ -166,7 +166,7 @@ fn debounce_skips_within_window_and_fires_after() {
 #[test]
 fn debounce_without_clock_is_a_noop() {
     let (e0, tid) = engine_with_values(alloc::vec![Value::Float(9.0), Value::Float(7.0)]);
-    let mut e = e0.with_debounce_per_query(core::time::Duration::from_secs(3600));
+    let mut e = e0.with_debounce_per_query(core::time::Duration::from_hours(1));
 
     crate::reexec::test_fixtures::bootstrap_scalar_query(
         &mut e,

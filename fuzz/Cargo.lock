@@ -910,7 +910,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#66a6f5b7eb1437defcb5ff31d897712c6cfc2cd7"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#f0bcaf7fc06959586914eac6cfe4c6dd6d3dd2ba"
 dependencies = [
  "sql-traits",
  "sqlparser",
@@ -1114,9 +1114,9 @@ dependencies = [
 
 [[package]]
 name = "roaring"
-version = "0.11.3"
+version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ba9ce64a8f45d7fc86358410bb1a82e8c987504c0d4900e9141d69a9f26c885"
+checksum = "18bd8a37d17a58532776dcdf6041ce64929adca78e8489d5cacbafe99229d3e1"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -1272,7 +1272,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#36c6df5b770887e54a55cba14d99648feec44200"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#be47c77bda12e910e7dac56e18e775f357edaf67"
 dependencies = [
  "geometric-traits",
  "serde",
@@ -1611,9 +1611,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.26.1"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
+checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "serde_core",
 ]

@@ -10,7 +10,7 @@
 //! every verdict here came back over the wire.
 //!
 //! Run with:
-//!   cargo +1.88 test --release --test it visibility_openfga_e2e:: \
+//!   cargo +1.95 test --release --test it visibility_openfga_e2e:: \
 //!       --features "visibility-openfga testing" -- --ignored --nocapture
 
 #![allow(clippy::unwrap_used)]

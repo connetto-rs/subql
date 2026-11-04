@@ -23,7 +23,7 @@ sqlparser_derive = { git = "https://github.com/apache/datafusion-sqlparser-rs", 
 name = "subql"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.95"
 authors = ["Luca"]
 license = "MIT"
 description = "SQL subscription dispatch engine for CDC event fanout"
@@ -613,7 +613,7 @@ inherits = "release"
 lto = false
 codegen-units = 16
 
-# Local iteration profile: `cargo +1.88 nextest run --cargo-profile testfast`.
+# Local iteration profile: `cargo +1.95 nextest run --cargo-profile testfast`.
 # Workspace code at opt-level 1 cuts the touch rebuild by 13 to 19 percent
 # with no change to the run phase, dependencies stay at 3.
 [profile.mutants]

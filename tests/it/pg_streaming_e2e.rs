@@ -1272,11 +1272,11 @@ fn an_acknowledgement_the_connection_cannot_send_makes_the_source_terminal() {
         loopback_port(&db.url()),
         loopback_port(&db.url()),
         Duration::ZERO,
-        Instant::now() + Duration::from_secs(120),
+        Instant::now() + Duration::from_mins(2),
         None,
     );
     let config = PgStreamingConfig::new(router.url(db.name()), &slot, publication)
-        .status_interval(Duration::from_secs(3600));
+        .status_interval(Duration::from_hours(1));
     let slot_inner = slot.clone();
 
     let mut setup = current_thread_rt().block_on(async move {
@@ -2017,7 +2017,7 @@ fn a_foreign_baseline_cannot_advance_a_foreign_slot() {
         loopback_port(&db.url()),
         clone.port,
         Duration::ZERO,
-        Instant::now() + Duration::from_secs(120),
+        Instant::now() + Duration::from_mins(2),
         None,
     );
     let config = PgStreamingConfig::new(router.url(db.name()), &slot, publication)
@@ -2097,7 +2097,7 @@ fn startup_never_blocks_the_current_thread_runtime() {
         target,
         target,
         HANDSHAKE_DELAY,
-        Instant::now() + Duration::from_secs(60),
+        Instant::now() + Duration::from_mins(1),
         Some(Arc::clone(&heartbeat)),
     );
     let config = PgStreamingConfig::new(router.url(db.name()), &slot, publication)

@@ -1686,11 +1686,6 @@ pub(super) fn encode_sqlite_component(
 
 /// The custom scalar set of a backend that has none. Uninhabited, so
 /// [`ScalarKind::Custom`] cannot be constructed for such a backend.
-#[allow(
-    unknown_lints,
-    clippy::empty_enums,
-    reason = "an uninhabited type is the point, the never type that would replace it is unstable in a generic argument, and this cannot be an expect because the lint does not exist on the 1.88 toolchain the crate also builds under"
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NoCustom {}
 

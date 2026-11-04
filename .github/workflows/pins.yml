@@ -32,7 +32,7 @@ jobs:
       # supports, which a newer cargo would not guarantee.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: "1.88.0"
+          toolchain: "1.95.0"
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown, wasm32-wasip1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -93,6 +93,6 @@ jobs:
             --base main --head "$branch" \
             --title "Advance the resolved pins to their branch tips" \
             --body "$(printf '%s\n' \
-              'Weekly refresh of the committed lockfiles, resolved by the 1.88 toolchain so the MSRV job stays satisfiable.' \
+              'Weekly refresh of the committed lockfiles, resolved by the 1.95 toolchain so the MSRV job stays satisfiable.' \
               '' \
               'The scheduled job that produced this ran, against these pins, the format check, clippy over every target with all features and warnings denied, the workspace and fuzz checks, both wasm targets under no default features, the documentation build with warnings denied, and the release unit tests and doctests. Checks do not start by themselves on a pull request a workflow opened, so close and reopen this one to run the full suite, including the container groups this job cannot reach.')"
