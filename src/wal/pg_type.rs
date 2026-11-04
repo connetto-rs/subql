@@ -768,6 +768,24 @@ mod tests {
             json_value_to_pg_value_by_kind(&serde_json::json!("t"), declared(ScalarFamily::Bool)),
             Value::Bool(true)
         );
+        for (text, expected) in [
+            ("true", Value::Bool(true)),
+            ("TRUE", Value::Bool(true)),
+            ("True", Value::Bool(true)),
+            ("false", Value::Bool(false)),
+            ("FALSE", Value::Bool(false)),
+            ("False", Value::Bool(false)),
+            ("tRUE", Value::Missing),
+        ] {
+            assert_eq!(
+                json_value_to_pg_value_by_kind(
+                    &serde_json::json!(text),
+                    declared(ScalarFamily::Bool)
+                ),
+                expected,
+                "{text}"
+            );
+        }
         // 2 is neither true nor false.
         assert_eq!(
             json_value_to_mysql_value_by_kind::<crate::backend::NamesStoredAsWritten>(

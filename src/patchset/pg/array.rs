@@ -260,11 +260,16 @@ fn encode_bool(value: &Json) -> Option<Vec<u8>> {
 /// A decimal element, written as a JSON string or number, in `numeric`'s
 /// binary send format.
 fn encode_decimal(value: &Json) -> Option<Vec<u8>> {
-    let decimal = match value {
-        Json::String(text) => sql_values::parse_decimal(text)?,
-        Json::Number(number) => sql_values::parse_decimal(&number.to_string())?,
+    let number;
+    let text = match value {
+        Json::String(text) => text.as_str(),
+        Json::Number(written) => {
+            number = written.to_string();
+            number.as_str()
+        }
         _ => return None,
     };
+    let decimal = sql_values::parse_decimal(text)?;
     let numeric = PgNumeric::from(decimal);
     let sign: u16 = if matches!(numeric, PgNumeric::Negative { .. }) {
         0x4000

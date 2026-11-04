@@ -449,4 +449,23 @@ mod tests {
             );
         }
     }
+
+    /// A hand-built number token the parsers reject is a type error, whatever the target.
+    #[test]
+    fn a_malformed_number_token_is_a_type_error() {
+        let sql = SqlValue::Number("1.2.3".to_string(), false);
+        for family in [
+            ScalarFamily::Int,
+            ScalarFamily::Float,
+            ScalarFamily::Decimal,
+        ] {
+            assert!(
+                matches!(
+                    Postgres::<Pg18>::parse_literal(&sql, family.into()),
+                    Err(RegisterError::TypeError(_))
+                ),
+                "{family:?}"
+            );
+        }
+    }
 }

@@ -418,4 +418,20 @@ mod tests {
             Ok(None),
         );
     }
+
+    /// Replay refuses a restored threshold that is not a number, rather than comparing against it.
+    #[test]
+    fn a_restored_threshold_that_is_not_a_number_builds_no_filter() {
+        for threshold in ["eleven", "NaN", "Infinity"] {
+            let having = AggHaving {
+                subject: HavingSubject::RowCount,
+                op: HavingOp::Gt,
+                threshold: threshold.to_string(),
+            };
+            assert!(
+                GroupHaving::new::<Postgres>(&having).is_none(),
+                "{threshold}"
+            );
+        }
+    }
 }

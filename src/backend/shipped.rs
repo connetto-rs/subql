@@ -1185,3 +1185,50 @@ fn one_escape_character(written: &str) -> Result<Option<char>, &'static str> {
         _ => Err("an escape clause names exactly one character"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SQLite;
+    use crate::backend::{Backend, ScalarFamily, Value, ValueKind};
+    use chrono::{NaiveDate, NaiveTime};
+
+    fn decode(family: ScalarFamily, text: &str) -> Option<Value<SQLite>> {
+        SQLite::decode_group_value(ValueKind::from(family), Value::String(text.into()))
+    }
+
+    /// SQLite stores temporals and decimals as TEXT, so a group value read back parses into its family.
+    #[test]
+    fn sqlite_group_text_parses_into_its_family() {
+        let date = NaiveDate::from_ymd_opt(2026, 1, 2).expect("a date");
+        let time = NaiveTime::from_hms_opt(3, 4, 5).expect("a time");
+        assert_eq!(
+            decode(ScalarFamily::Timestamp, "2026-01-02 03:04:05"),
+            Some(Value::Timestamp(date.and_time(time)))
+        );
+        assert_eq!(
+            decode(ScalarFamily::TimestampTz, "2026-01-02 05:04:05+02:00"),
+            Some(Value::TimestampTz(date.and_time(time).and_utc()))
+        );
+        assert_eq!(
+            decode(ScalarFamily::Date, "2026-01-02"),
+            Some(Value::Date(date))
+        );
+        assert_eq!(
+            decode(ScalarFamily::Time, "03:04:05"),
+            Some(Value::Time(time))
+        );
+        assert_eq!(
+            decode(ScalarFamily::Decimal, "12.50"),
+            Some(Value::Decimal("12.50".parse().expect("a decimal")))
+        );
+        for family in [
+            ScalarFamily::Timestamp,
+            ScalarFamily::TimestampTz,
+            ScalarFamily::Date,
+            ScalarFamily::Time,
+            ScalarFamily::Decimal,
+        ] {
+            assert_eq!(decode(family, "noon"), None, "{family:?}");
+        }
+    }
+}
