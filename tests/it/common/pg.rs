@@ -70,7 +70,7 @@ pub fn pg_database() -> PgDatabase {
         pg_request,
         5432,
         |port| pg_admin(port).is_ok(),
-        Duration::from_secs(180),
+        Duration::from_mins(3),
     );
     let name = fresh_db_name();
     let mut admin = pg_admin(port).expect("PG admin connection");

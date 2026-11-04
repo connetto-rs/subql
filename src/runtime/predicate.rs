@@ -478,7 +478,7 @@ pub type SubscriptionSet = RedBlackTreeSetSync<SubscriptionId>;
 ///
 /// One record rather than three maps keyed alike, because a binding used to
 /// write all three and they could only agree by hand.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PredicateBindings {
     /// How many bindings hold the predicate.
     pub refcount: u32,

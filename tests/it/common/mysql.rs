@@ -72,7 +72,7 @@ pub fn mysql_database() -> MysqlDatabase {
         || mysql_request(&run),
         3306,
         |port| mysql_admin(port).is_ok(),
-        Duration::from_secs(120),
+        Duration::from_mins(2),
     );
     let name = fresh_db_name();
     let mut admin = mysql_admin(port).expect("MySQL admin connection");

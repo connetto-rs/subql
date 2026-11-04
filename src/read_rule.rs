@@ -4,10 +4,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use hashbrown::{HashMap, HashSet};
 use rls2fga::classifier::patterns::{
-    ClassifiedExpr, ClassifiedPolicy, Composite, PatternClass, PolicyCommand, PolicyMode,
+    ClassifiedExpr, ClassifiedPolicy, Composite, PatternClass, PolicyMode,
 };
 use rls2fga::translator::Translator;
-use rls2fga_types::ConfidenceLevel;
+use rls2fga_types::{ConfidenceLevel, PolicyCommand};
 use sql_traits::prelude::{DatabaseLike, TableLike};
 use sqlparser::ast::{BinaryOperator, Expr, Value as SqlValue};
 

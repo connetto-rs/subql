@@ -178,6 +178,7 @@ fn comparison_read<B: crate::backend::Backend, DB: DatabaseLike>(
         AttributeTest::In(_) => Some(RowRecordError::UnreadableColumn(alloc::format!(
             "membership over column {column} needs a query"
         ))),
+        AttributeTest::IsNull | AttributeTest::IsNotNull => direct_kind_read(column, kind),
     }
 }
 
@@ -215,10 +216,13 @@ fn direct_column_read<B: crate::backend::Backend, DB: DatabaseLike>(
     db: &DB,
     table: TableId,
 ) -> Option<RowRecordError> {
-    let kind = match column_read_kind::<B, DB>(column, db, table) {
-        Ok(kind) => kind,
-        Err(refusal) => return Some(refusal),
-    };
+    match column_read_kind::<B, DB>(column, db, table) {
+        Ok(kind) => direct_kind_read(column, kind),
+        Err(refusal) => Some(refusal),
+    }
+}
+
+fn direct_kind_read(column: &ColumnRead, kind: ColumnKind) -> Option<RowRecordError> {
     if direct_kind(kind) {
         None
     } else {

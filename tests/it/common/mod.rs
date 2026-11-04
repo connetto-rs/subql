@@ -69,7 +69,7 @@ const PASSWORD: &str = "subql_test";
 const ENGINE_LABEL: &str = "subql.test.engine";
 const RUN_LABEL: &str = "subql.test.run";
 /// Shared servers from other runs older than this are removed on acquisition.
-const STALE_AFTER: Duration = Duration::from_secs(30 * 60);
+const STALE_AFTER: Duration = Duration::from_mins(30);
 
 /// The nextest run this process belongs to, or the process itself under
 /// `cargo test`, which runs every test in one process anyway.
@@ -303,7 +303,7 @@ pub fn openfga_port() -> u16 {
         },
         8081,
         |port| std::net::TcpStream::connect(("127.0.0.1", port)).is_ok(),
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     );
     port
 }
