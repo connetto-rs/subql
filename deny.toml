@@ -41,6 +41,6 @@ allow-git = [
     "https://github.com/apache/datafusion-sqlparser-rs",
     # diesel sqlite hooks and MySQL `execute_returning_id`, on main but unreleased.
     "https://github.com/diesel-rs/diesel",
-    # pg2sqlite, the PG-DDL -> SQLite-DDL translator the demo uses for preset schemas.
+    # pg2sqlite, the PG-DDL -> SQLite-DDL translator behind `pg-sqlite-emu`.
     "https://github.com/connetto-rs/pg2sqlite",
 ]

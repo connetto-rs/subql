@@ -2,17 +2,7 @@
 # Resolver 3 resolves under `rust-version`, so a dependency raising its MSRV
 # in a patch release is not selected and needs no hand-written upper bound.
 resolver = "3"
-# `fuzz/` is intentionally a separate workspace, not a member here.
-# cargo-fuzz layers ASAN + SanCov on top of the workspace's release
-# profile, and ASAN's runtime symbols don't survive LLVM LTO, so the
-# fuzz binaries need `lto = false`. Cargo's per-package profile
-# override doesn't actually accept `lto` (despite the docs listing it),
-# and cargo-fuzz has no `--profile` flag, so the only working options
-# are (a) drop LTO from the workspace `release` profile, hurting subql
-# benches and the dioxus demo's wasm bundle size, or (b) keep fuzz as
-# its own workspace with its own profile and mirror the root
-# `[patch.crates-io]` block. We picked (b). See `fuzz/Cargo.toml`.
-members = ["subql-demo"]
+# `fuzz/` is its own workspace because ASAN needs `lto = false`, which a per-package profile cannot set.
 exclude = ["fuzz"]
 
 [patch.crates-io]
@@ -609,11 +599,6 @@ dhat-heap = ["std", "dep:dhat", "testing"]
 lto = true
 codegen-units = 1
 opt-level = 3
-# Strip DWARF info. dx 0.7 defaults to embedding debug symbols in wasm
-# (--debug-symbols=true), which makes binaryen abort during wasm-opt with
-# "compile unit size was incorrect". Stripping in the linker keeps
-# wasm-opt happy without losing release-grade optimisation, and shrinks
-# subql's own release binaries too.
 strip = "debuginfo"
 debug = false
 
@@ -679,8 +664,3 @@ multiple_crate_versions = "allow"
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
-
-# `dx` omits `arborium-sysroot`'s archive, leaving tree-sitter's `stderr` unresolved.
-# Optimising tree-sitter removes that cold allocation-failure path.
-[profile.dev.package.arborium-tree-sitter]
-opt-level = 1
