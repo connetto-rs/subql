@@ -35,6 +35,7 @@ use sql_traits::structs::ParserDB;
 use sqlite_diff_rs::PatchSet;
 use sqlparser::dialect::{PostgreSqlDialect, SQLiteDialect};
 use subql::backend::SQLite as SqliteBackend;
+use subql::drift::NoRefusals;
 use subql::emit::{wal2json_patchset_builder, WireTable};
 use subql::patchset::{PgAdapter, SqliteAdapter};
 use subql::testing::TestEvent;
@@ -202,7 +203,7 @@ fn finish_loop(
     let sqlite_adapter = SqliteAdapter::new(sqlite_engine.database()).expect("the catalog indexes");
 
     sqlite_engine
-        .apply_patchset(seed, &mut sqlite, &sqlite_adapter)
+        .apply_patchset(seed, &NoRefusals, &mut sqlite, &sqlite_adapter)
         .unwrap();
     assert_eq!(
         load_sqlite(&mut sqlite),
@@ -214,7 +215,7 @@ fn finish_loop(
     session.attach_all().unwrap();
 
     sqlite_engine
-        .apply_patchset(mutate, &mut sqlite, &sqlite_adapter)
+        .apply_patchset(mutate, &NoRefusals, &mut sqlite, &sqlite_adapter)
         .unwrap();
     assert_eq!(
         load_sqlite(&mut sqlite),
@@ -232,11 +233,13 @@ fn finish_loop(
         SubscriptionEngine::new(subql_catalog(), PostgreSqlDialect {});
     let pg_adapter = PgAdapter::new(pg_engine.database()).expect("the catalog indexes");
 
-    pg_engine.apply_patchset(seed, pg, &pg_adapter).unwrap();
+    pg_engine
+        .apply_patchset(seed, &NoRefusals, pg, &pg_adapter)
+        .unwrap();
     assert_eq!(load_pg(pg), seed_pg_rows(), "Postgres after re-seed");
 
     pg_engine
-        .apply_diffset_bytes(&session_patchset, pg, &pg_adapter)
+        .apply_diffset_bytes(&session_patchset, &NoRefusals, pg, &pg_adapter)
         .unwrap();
     assert_eq!(
         load_pg(pg),

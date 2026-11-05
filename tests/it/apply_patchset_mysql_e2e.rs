@@ -24,6 +24,7 @@ use diesel::{sql_query, QueryableByName, RunQueryDsl};
 use sql_traits::structs::ParserDB;
 use sqlite_diff_rs::{DiffOps, Insert, PatchSet, PatchsetFormat, SimpleTable, Update, Value};
 use sqlparser::dialect::MySqlDialect;
+use subql::drift::NoRefusals;
 use subql::patchset::MysqlAdapter;
 use subql::wal::MaxwellEvent;
 use subql::{DefaultIds, SubscriptionEngine};
@@ -53,7 +54,7 @@ fn apply_patchset_bool_roundtrip_insert_update_delete_mysql() {
 
     assert_eq!(
         engine
-            .apply_patchset(&inserts, &mut conn, &adapter)
+            .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
             .expect("apply inserts"),
         2,
         "two rows inserted"
@@ -65,7 +66,7 @@ fn apply_patchset_bool_roundtrip_insert_update_delete_mysql() {
 
     assert_eq!(
         engine
-            .apply_patchset(&updates, &mut conn, &adapter)
+            .apply_patchset(&updates, &NoRefusals, &mut conn, &adapter)
             .expect("apply updates"),
         1,
         "one row updated"
@@ -77,7 +78,7 @@ fn apply_patchset_bool_roundtrip_insert_update_delete_mysql() {
 
     assert_eq!(
         engine
-            .apply_patchset(&deletes, &mut conn, &adapter)
+            .apply_patchset(&deletes, &NoRefusals, &mut conn, &adapter)
             .expect("apply deletes"),
         1,
         "one row deleted"
@@ -143,7 +144,7 @@ fn apply_patchset_boolean_column_takes_any_nonzero_integer_and_null_mysql() {
 
     let adapter = MysqlAdapter::new(engine.database()).expect("the catalog indexes");
     let n = engine
-        .apply_patchset(&inserts, &mut conn, &adapter)
+        .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
         .expect("apply inserts");
     assert_eq!(n, 3, "three rows inserted");
 
@@ -187,7 +188,7 @@ fn apply_patchset_boolean_column_takes_any_nonzero_integer_and_null_mysql() {
                 .unwrap(),
         );
     let n = engine
-        .apply_patchset(&updates, &mut conn, &adapter)
+        .apply_patchset(&updates, &NoRefusals, &mut conn, &adapter)
         .expect("apply updates");
     assert_eq!(n, 2, "two rows updated");
 

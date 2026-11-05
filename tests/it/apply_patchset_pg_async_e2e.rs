@@ -27,6 +27,7 @@ use diesel::{sql_query, Connection, PgConnection, RunQueryDsl};
 use diesel_async::{AsyncConnection, AsyncPgConnection};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
+use subql::drift::NoRefusals;
 use subql::patchset::PgAdapter;
 use subql::{DefaultIds, PgChangeEvent, SubscriptionEngine};
 
@@ -58,7 +59,7 @@ fn apply_patchset_async_bool_roundtrip_insert_update_delete() {
 
         assert_eq!(
             engine
-                .apply_patchset_async(&inserts, &mut conn, &adapter)
+                .apply_patchset_async(&inserts, &NoRefusals, &mut conn, &adapter)
                 .await
                 .expect("apply inserts"),
             2,
@@ -71,7 +72,7 @@ fn apply_patchset_async_bool_roundtrip_insert_update_delete() {
 
         assert_eq!(
             engine
-                .apply_patchset_async(&updates, &mut conn, &adapter)
+                .apply_patchset_async(&updates, &NoRefusals, &mut conn, &adapter)
                 .await
                 .expect("apply updates"),
             1,
@@ -84,7 +85,7 @@ fn apply_patchset_async_bool_roundtrip_insert_update_delete() {
 
         assert_eq!(
             engine
-                .apply_patchset_async(&deletes, &mut conn, &adapter)
+                .apply_patchset_async(&deletes, &NoRefusals, &mut conn, &adapter)
                 .await
                 .expect("apply deletes"),
             1,

@@ -15,6 +15,9 @@ use sqlite_diff_rs::{
     SimpleTable, TableSchema, Update,
 };
 
+use super::{check_refusals, ApplyError};
+use crate::drift::RefusalView;
+
 #[cfg(any(
     feature = "apply-patchset-postgres-async",
     feature = "apply-patchset-mysql-async"
@@ -30,20 +33,31 @@ enum ReconstructedDiff {
 
 /// Parse uploaded diffset bytes and rebuild them in the format their marker
 /// names, with every table shape taken from `catalog`.
-fn reconstruct_diff<DB: DatabaseLike>(
+///
+/// The `refusals` view is consulted over the parsed ops before any
+/// reconstruction or application: an upload naming a refused table is
+/// refused as a whole, with the typed reason.
+fn reconstruct_diff<DB: DatabaseLike, R: RefusalView>(
     catalog: &DB,
     bytes: &[u8],
-) -> QueryResult<ReconstructedDiff> {
+    refusals: &R,
+) -> Result<ReconstructedDiff, ApplyError> {
     match ParsedDiffSet::parse(bytes).map_err(|err| {
         ingest_error(alloc::format!(
             "failed to parse uploaded SQLite session diffset bytes: {err}"
         ))
     })? {
         ParsedDiffSet::Patchset(diff) => {
-            reconstruct_patchset(catalog, &diff).map(ReconstructedDiff::Patchset)
+            check_refusals(refusals, diff.iter().map(|op| op.table().name().as_str()))?;
+            reconstruct_patchset(catalog, &diff)
+                .map(ReconstructedDiff::Patchset)
+                .map_err(ApplyError::from)
         }
         ParsedDiffSet::Changeset(diff) => {
-            reconstruct_changeset(catalog, &diff).map(ReconstructedDiff::Changeset)
+            check_refusals(refusals, diff.iter().map(|op| op.table().name().as_str()))?;
+            reconstruct_changeset(catalog, &diff)
+                .map(ReconstructedDiff::Changeset)
+                .map_err(ApplyError::from)
         }
     }
 }
@@ -58,29 +72,38 @@ fn reconstruct_diff<DB: DatabaseLike>(
 /// come from `catalog` by name, never the uploaded flags, so a client
 /// cannot steer the WHERE clause.
 ///
+/// `refusals` is consulted before any op applies: an upload naming a
+/// table it refuses is refused as a whole with
+/// [`ApplyError::RefusedTable`], carrying the table and its reasons.
+///
 /// # Errors
 ///
-/// [`QueryBuilderError`](diesel::result::Error::QueryBuilderError) when the
-/// bytes fail to parse or name an unknown table, else the first bind or
+/// [`ApplyError::RefusedTable`] when an op names a refused table.
+/// [`ApplyError::Diesel`] wrapping a
+/// [`QueryBuilderError`](diesel::result::Error::QueryBuilderError) when
+/// the bytes fail to parse or name an unknown table, or the first bind or
 /// execution error, rolling back the transaction.
-pub fn apply_diffset_bytes_with_catalog<DB, DBend, Conn, A>(
+pub fn apply_diffset_bytes_with_catalog<DB, DBend, Conn, A, R>(
     catalog: &DB,
     bytes: &[u8],
+    refusals: &R,
     conn: &mut Conn,
     adapter: &A,
-) -> QueryResult<usize>
+) -> Result<usize, ApplyError>
 where
     DB: DatabaseLike,
     DBend:
         Backend + HasSqlType<BigInt> + HasSqlType<Double> + HasSqlType<Text> + HasSqlType<Binary>,
     Conn: diesel::Connection<Backend = DBend>,
     A: Adapter<DBend, String, Vec<u8>> + Send + Sync,
+    R: RefusalView,
     i64: ToSql<BigInt, DBend>,
     f64: ToSql<Double, DBend>,
     str: ToSql<Text, DBend>,
     [u8]: ToSql<Binary, DBend>,
 {
-    match reconstruct_diff(catalog, bytes)? {
+    let reconstructed = reconstruct_diff(catalog, bytes, refusals)?;
+    let applied = match reconstructed {
         ReconstructedDiff::Patchset(patchset) => patchset
             .iter()
             .map(|op| op.with_adapter::<DBend, _>(adapter))
@@ -89,7 +112,8 @@ where
             .iter()
             .map(|op| op.with_adapter::<DBend, _>(adapter))
             .apply_transactional(conn),
-    }
+    };
+    applied.map_err(ApplyError::from)
 }
 
 /// Async peer of [`apply_diffset_bytes_with_catalog`], driven by
@@ -108,28 +132,30 @@ where
     feature = "apply-patchset-postgres-async",
     feature = "apply-patchset-mysql-async"
 ))]
-pub fn apply_diffset_bytes_async_with_catalog<'a, DB, DBend, Conn, A>(
+pub fn apply_diffset_bytes_async_with_catalog<'a, DB, DBend, Conn, A, R>(
     catalog: &DB,
     bytes: &[u8],
+    refusals: &R,
     conn: &'a mut Conn,
     adapter: &'a A,
-) -> impl core::future::Future<Output = QueryResult<usize>> + Send + 'a
+) -> impl core::future::Future<Output = Result<usize, ApplyError>> + Send + 'a
 where
     DB: DatabaseLike,
     DBend:
         Backend + HasSqlType<BigInt> + HasSqlType<Double> + HasSqlType<Text> + HasSqlType<Binary>,
     Conn: diesel_async::AsyncConnection<Backend = DBend>,
     A: Adapter<DBend, String, Vec<u8>> + Send + Sync + 'a,
+    R: RefusalView,
     i64: ToSql<BigInt, DBend>,
     f64: ToSql<Double, DBend>,
     str: ToSql<Text, DBend>,
     [u8]: ToSql<Binary, DBend>,
 {
     // Reconstruct synchronously up front so the future owns its batch and
-    // never borrows `catalog`.
-    let reconstructed = reconstruct_diff(catalog, bytes);
+    // never borrows `catalog` or the refused view.
+    let reconstructed = reconstruct_diff(catalog, bytes, refusals);
     async move {
-        match reconstructed? {
+        let applied = match reconstructed? {
             ReconstructedDiff::Patchset(patchset) => {
                 patchset
                     .iter()
@@ -144,7 +170,8 @@ where
                     .apply_transactional_async(conn)
                     .await
             }
-        }
+        };
+        applied.map_err(ApplyError::from)
     }
 }
 

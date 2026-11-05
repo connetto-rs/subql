@@ -13,18 +13,25 @@
 //! and applies the judgment. It drops the events of refused tables and
 //! surfaces one item per newly refused table and per changes-lost table,
 //! so the fold, dispatch and apply never meet a table the consumer's
-//! catalog cannot read. The [`sqlite` module](sqlite) adds the SQLite
-//! live reader behind the `sqlite-cdc` feature.
+//! never meet a table the consumer cannot read. The apply entry points ask
+//! the guard's refused set through a [`refusal::RefusalView`], so an
+//! upload naming a refused table is refused with the typed reason before
+//! any op applies. The [`sqlite` module](sqlite) adds the SQLite live
+//! reader behind the `sqlite-cdc` feature.
 
 #[cfg(feature = "std")]
 pub mod guard;
+pub mod refusal;
 pub mod shape;
 #[cfg(feature = "sqlite-cdc")]
 pub mod sqlite;
 pub mod verdict;
 
 #[cfg(feature = "std")]
-pub use guard::{DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, LiveShapeReader};
+pub use guard::{
+    DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, LiveShapeReader, RefusedTables,
+};
+pub use refusal::{NoRefusals, RefusalView};
 pub use shape::{ColumnShape, ReplicaIdentity, SqlparserDatabase, TableShape};
 #[cfg(feature = "sqlite-cdc")]
 pub use sqlite::{SqliteLiveReader, SqliteShapeError};

@@ -165,6 +165,7 @@ mod schema_dml_fixtures {
     use sqlite_diff_rs::PatchSet;
     use sqlparser::dialect::{PostgreSqlDialect, SQLiteDialect};
     use subql::backend::SQLite as SqliteBackend;
+    use subql::drift::NoRefusals;
     use subql::emit::WireTable;
     use subql::patchset::{CustomTypePgAdapter, SqliteAdapter};
     use subql::testing::TestEvent;
@@ -516,7 +517,7 @@ mod schema_dml_fixtures {
         // Seed the replica before the session starts, so the session only
         // records the mutate (a genuine update and delete).
         sqlite_engine
-            .apply_patchset(seed, &mut sqlite, &sqlite_adapter)
+            .apply_patchset(seed, &NoRefusals, &mut sqlite, &sqlite_adapter)
             .unwrap();
         assert_eq!(
             load_sqlite(&mut sqlite),
@@ -528,7 +529,7 @@ mod schema_dml_fixtures {
         session.attach_all().unwrap();
 
         sqlite_engine
-            .apply_patchset(mutate, &mut sqlite, &sqlite_adapter)
+            .apply_patchset(mutate, &NoRefusals, &mut sqlite, &sqlite_adapter)
             .unwrap();
         assert_eq!(
             load_sqlite(&mut sqlite),
@@ -552,11 +553,13 @@ mod schema_dml_fixtures {
             .register("mood", MoodBinding)
             .register("sku", SkuBinding);
 
-        pg_engine.apply_patchset(seed, pg, &pg_adapter).unwrap();
+        pg_engine
+            .apply_patchset(seed, &NoRefusals, pg, &pg_adapter)
+            .unwrap();
         assert_eq!(load_pg(pg), seed_pg_rows(), "Postgres after re-seed");
 
         pg_engine
-            .apply_diffset_bytes(&session_patchset, pg, &pg_adapter)
+            .apply_diffset_bytes(&session_patchset, &NoRefusals, pg, &pg_adapter)
             .unwrap();
         let round_tripped = load_pg(pg);
         assert_eq!(

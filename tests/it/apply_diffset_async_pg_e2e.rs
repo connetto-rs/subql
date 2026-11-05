@@ -30,6 +30,7 @@ use sqlite_diff_rs::{
     Value,
 };
 use sqlparser::dialect::PostgreSqlDialect;
+use subql::drift::NoRefusals;
 use subql::patchset::PgAdapter;
 use subql::{DefaultIds, PgChangeEvent, SubscriptionEngine};
 
@@ -106,7 +107,7 @@ fn diffset_bytes_async_applies_patchset_bytes() {
             .build();
 
         let n = engine
-            .apply_diffset_bytes_async(&insert_bytes, &mut conn, &adapter)
+            .apply_diffset_bytes_async(&insert_bytes, &NoRefusals, &mut conn, &adapter)
             .await
             .expect("apply patchset bytes");
         assert_eq!(n, 2, "two rows inserted from patchset bytes");
@@ -136,7 +137,7 @@ fn diffset_bytes_async_applies_patchset_bytes() {
             )
             .build();
         let n = engine
-            .apply_diffset_bytes_async(&update_bytes, &mut conn, &adapter)
+            .apply_diffset_bytes_async(&update_bytes, &NoRefusals, &mut conn, &adapter)
             .await
             .expect("apply update bytes");
         assert_eq!(n, 1, "one row updated from patchset bytes");
@@ -189,7 +190,7 @@ fn apply_changeset_async_relocates_primary_key() {
         );
 
         let n = engine
-            .apply_changeset_async(&changeset, &mut conn, &adapter)
+            .apply_changeset_async(&changeset, &NoRefusals, &mut conn, &adapter)
             .await
             .expect("apply changeset");
         assert_eq!(n, 1, "one row relocated");
@@ -247,7 +248,7 @@ fn diffset_bytes_async_applies_changeset_bytes_pk_change() {
             .build();
 
         let n = engine
-            .apply_diffset_bytes_async(&changeset_bytes, &mut conn, &adapter)
+            .apply_diffset_bytes_async(&changeset_bytes, &NoRefusals, &mut conn, &adapter)
             .await
             .expect("apply changeset bytes");
         assert_eq!(n, 1, "one row relocated from changeset bytes");

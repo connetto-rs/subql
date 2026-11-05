@@ -40,11 +40,13 @@ use alloc::vec::Vec;
 use core::hash::Hash;
 
 use diesel::backend::Backend;
-use diesel::result::QueryResult;
 use diesel::serialize::ToSql;
 use diesel::sql_types::{BigInt, Binary, Double, HasSqlType, Text};
 use sql_traits::prelude::DatabaseLike;
 use sqlite_diff_rs::{Adapter, ApplyOps, ChangeSet, ColumnNames, PatchSet, SchemaWithPK};
+
+use crate::drift::RefusalView;
+use crate::Incompatibility;
 
 // Async execution driver, present only when an async apply feature (which
 // enables `sqlite-diff-rs/diesel-async`) is on.
@@ -86,6 +88,47 @@ pub(crate) mod catalog_apply;
 pub use catalog_apply::apply_diffset_bytes_async_with_catalog;
 pub use catalog_apply::apply_diffset_bytes_with_catalog;
 
+/// The error an upload apply refuses with.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ApplyError {
+    /// The upload names a table the refused view has refused, so the
+    /// whole upload is refused before any op applies.
+    #[error("upload refused: table `{table}` is refused: {reasons:?}")]
+    RefusedTable {
+        /// The table the upload names.
+        table: String,
+        /// Every reason the table is refused.
+        reasons: Vec<Incompatibility>,
+    },
+    /// The apply failed at the diesel layer, with the transaction rolled
+    /// back.
+    #[error(transparent)]
+    Diesel(diesel::result::Error),
+}
+
+impl From<diesel::result::Error> for ApplyError {
+    fn from(error: diesel::result::Error) -> Self {
+        Self::Diesel(error)
+    }
+}
+
+/// Refuse the whole upload when any table it names is refused.
+fn check_refusals<'n, R: RefusalView>(
+    refusals: &R,
+    names: impl Iterator<Item = &'n str>,
+) -> Result<(), ApplyError> {
+    for name in names {
+        if let Some(reasons) = refusals.refusal(name) {
+            return Err(ApplyError::RefusedTable {
+                table: String::from(name),
+                reasons,
+            });
+        }
+    }
+    Ok(())
+}
+
 // Engine entry point (generic over any diesel Backend)
 
 impl<E, I, DB> crate::SubscriptionEngine<E, I, DB>
@@ -103,16 +146,23 @@ where
     /// Generic over any diesel [`Backend`]. Concrete adapters shipped
     /// with subql are [`PgAdapter`] and [`MysqlAdapter`].
     ///
+    /// `refusals` is consulted before any op applies: a batch naming a
+    /// table it refuses is refused as a whole with
+    /// [`ApplyError::RefusedTable`].
+    ///
     /// # Errors
     ///
-    /// Propagates the first [`diesel::result::Error`] any op produces
-    /// (with the transaction rolled back).
-    pub fn apply_patchset<DBend, Conn, T, S, B, A>(
+    /// [`ApplyError::RefusedTable`] when a table the batch names is
+    /// refused. [`ApplyError::Diesel`] wrapping the first
+    /// [`diesel::result::Error`] any op produces (with the transaction
+    /// rolled back).
+    pub fn apply_patchset<DBend, Conn, T, S, B, A, R>(
         &self,
         patchset: &PatchSet<T, S, B>,
+        refusals: &R,
         conn: &mut Conn,
         adapter: &A,
-    ) -> QueryResult<usize>
+    ) -> Result<usize, ApplyError>
     where
         DBend: Backend
             + HasSqlType<BigInt>
@@ -121,6 +171,7 @@ where
             + HasSqlType<Binary>,
         Conn: diesel::Connection<Backend = DBend>,
         A: Adapter<DBend, S, B> + Send + Sync,
+        R: RefusalView,
         T: SchemaWithPK + ColumnNames + Sync,
         S: AsRef<str> + Clone + Hash + Eq + Sync,
         B: AsRef<[u8]> + Clone + Hash + Eq + Sync,
@@ -129,10 +180,12 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
+        check_refusals(refusals, patchset.iter().map(|op| op.table().name()))?;
         patchset
             .iter()
             .map(|op| op.with_adapter::<DBend, _>(adapter))
             .apply_transactional(conn)
+            .map_err(ApplyError::from)
     }
 
     /// Apply a client-uploaded SQLite session changeset against `conn`
@@ -144,16 +197,23 @@ where
     /// UPDATE (`SET pk = new WHERE pk = old`) that a patchset cannot
     /// represent. The batch runs in one transaction.
     ///
+    /// `refusals` is consulted before any op applies: a batch naming a
+    /// table it refuses is refused as a whole with
+    /// [`ApplyError::RefusedTable`].
+    ///
     /// # Errors
     ///
-    /// Propagates the first [`diesel::result::Error`] any op produces,
-    /// with the transaction rolled back.
-    pub fn apply_changeset<DBend, Conn, T, S, B, A>(
+    /// [`ApplyError::RefusedTable`] when a table the batch names is
+    /// refused. [`ApplyError::Diesel`] wrapping the first
+    /// [`diesel::result::Error`] any op produces, with the transaction
+    /// rolled back.
+    pub fn apply_changeset<DBend, Conn, T, S, B, A, R>(
         &self,
         changeset: &ChangeSet<T, S, B>,
+        refusals: &R,
         conn: &mut Conn,
         adapter: &A,
-    ) -> QueryResult<usize>
+    ) -> Result<usize, ApplyError>
     where
         DBend: Backend
             + HasSqlType<BigInt>
@@ -162,6 +222,7 @@ where
             + HasSqlType<Binary>,
         Conn: diesel::Connection<Backend = DBend>,
         A: Adapter<DBend, S, B> + Send + Sync,
+        R: RefusalView,
         T: SchemaWithPK + ColumnNames + Sync,
         S: AsRef<str> + Clone + Hash + Eq + core::fmt::Debug + Sync,
         B: AsRef<[u8]> + Clone + Hash + Eq + core::fmt::Debug + Sync,
@@ -170,10 +231,12 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
+        check_refusals(refusals, changeset.iter().map(|op| op.table().name()))?;
         changeset
             .iter()
             .map(|op| op.with_adapter::<DBend, _>(adapter))
             .apply_transactional(conn)
+            .map_err(ApplyError::from)
     }
 
     /// Apply a client-uploaded SQLite session diffset, still in its raw
@@ -196,18 +259,25 @@ where
     /// carries, not from the flags embedded in the uploaded bytes, so a
     /// client cannot steer the server's WHERE clause.
     ///
+    /// `refusals` is consulted before any op applies: an upload naming a
+    /// table it refuses is refused as a whole with
+    /// [`ApplyError::RefusedTable`].
+    ///
     /// # Errors
     ///
-    /// Returns a [`diesel::result::Error::QueryBuilderError`] when the
-    /// bytes fail to parse or name a table absent from the catalog.
-    /// Propagates the first bind or execution error any op produces, with
-    /// the whole transaction rolled back.
-    pub fn apply_diffset_bytes<DBend, Conn, A>(
+    /// [`ApplyError::RefusedTable`] when an op names a refused table.
+    /// [`ApplyError::Diesel`] wrapping a
+    /// [`QueryBuilderError`](diesel::result::Error::QueryBuilderError)
+    /// when the bytes fail to parse or name a table absent from the
+    /// catalog, or the first bind or execution error any op produces,
+    /// with the whole transaction rolled back.
+    pub fn apply_diffset_bytes<DBend, Conn, A, R>(
         &self,
         bytes: &[u8],
+        refusals: &R,
         conn: &mut Conn,
         adapter: &A,
-    ) -> QueryResult<usize>
+    ) -> Result<usize, ApplyError>
     where
         DBend: Backend
             + HasSqlType<BigInt>
@@ -216,12 +286,13 @@ where
             + HasSqlType<Binary>,
         Conn: diesel::Connection<Backend = DBend>,
         A: Adapter<DBend, String, Vec<u8>> + Send + Sync,
+        R: RefusalView,
         i64: ToSql<BigInt, DBend>,
         f64: ToSql<Double, DBend>,
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        apply_diffset_bytes_with_catalog(self.database(), bytes, conn, adapter)
+        apply_diffset_bytes_with_catalog(self.database(), bytes, refusals, conn, adapter)
     }
 
     /// Async peer of [`Self::apply_patchset`], driven by
@@ -230,20 +301,27 @@ where
     /// [`AsyncConnection`](diesel_async::AsyncConnection). Reuses the
     /// shipped [`PgAdapter`] and [`MysqlAdapter`] unchanged.
     ///
+    /// `refusals` is consulted before any op applies: a batch naming a
+    /// table it refuses is refused as a whole with
+    /// [`ApplyError::RefusedTable`].
+    ///
     /// # Errors
     ///
-    /// Propagates the first [`diesel::result::Error`] any op produces
-    /// (with the transaction rolled back).
+    /// [`ApplyError::RefusedTable`] when a table the batch names is
+    /// refused. [`ApplyError::Diesel`] wrapping the first
+    /// [`diesel::result::Error`] any op produces (with the transaction
+    /// rolled back).
     #[cfg(any(
         feature = "apply-patchset-postgres-async",
         feature = "apply-patchset-mysql-async"
     ))]
-    pub fn apply_patchset_async<'a, DBend, Conn, T, S, B, A>(
+    pub fn apply_patchset_async<'a, DBend, Conn, T, S, B, A, R>(
         &self,
         patchset: &'a PatchSet<T, S, B>,
+        refusals: &R,
         conn: &'a mut Conn,
         adapter: &'a A,
-    ) -> impl core::future::Future<Output = QueryResult<usize>> + Send + 'a
+    ) -> impl core::future::Future<Output = Result<usize, ApplyError>> + Send + 'a
     where
         DBend: Backend
             + HasSqlType<BigInt>
@@ -252,6 +330,7 @@ where
             + HasSqlType<Binary>,
         Conn: diesel_async::AsyncConnection<Backend = DBend>,
         A: Adapter<DBend, S, B> + Send + Sync + 'a,
+        R: RefusalView,
         T: SchemaWithPK + ColumnNames + Send + Sync + 'a,
         S: AsRef<str> + Clone + Hash + Eq + Send + Sync + 'a,
         B: AsRef<[u8]> + Clone + Hash + Eq + Send + Sync + 'a,
@@ -260,12 +339,17 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        // `self` is not touched, so the returned future does not borrow the
-        // non-`Sync` engine and stays `Send`.
-        patchset
+        // The check and the `Send` proof run up front, so the returned
+        // future borrows neither the non-`Sync` engine nor the view.
+        let refused = check_refusals(refusals, patchset.iter().map(|op| op.table().name()));
+        let apply = patchset
             .iter()
             .map(|op| op.with_adapter::<DBend, _>(adapter))
-            .apply_transactional_async(conn)
+            .apply_transactional_async(conn);
+        async move {
+            refused?;
+            apply.await.map_err(ApplyError::from)
+        }
     }
 
     /// Async peer of [`Self::apply_changeset`], driven by
@@ -274,20 +358,27 @@ where
     /// primary-key-changing UPDATE a patchset cannot represent. One
     /// transaction.
     ///
+    /// `refusals` is consulted before any op applies: a batch naming a
+    /// table it refuses is refused as a whole with
+    /// [`ApplyError::RefusedTable`].
+    ///
     /// # Errors
     ///
-    /// Propagates the first [`diesel::result::Error`] any op produces,
-    /// with the transaction rolled back.
+    /// [`ApplyError::RefusedTable`] when a table the batch names is
+    /// refused. [`ApplyError::Diesel`] wrapping the first
+    /// [`diesel::result::Error`] any op produces, with the transaction
+    /// rolled back.
     #[cfg(any(
         feature = "apply-patchset-postgres-async",
         feature = "apply-patchset-mysql-async"
     ))]
-    pub fn apply_changeset_async<'a, DBend, Conn, T, S, B, A>(
+    pub fn apply_changeset_async<'a, DBend, Conn, T, S, B, A, R>(
         &self,
         changeset: &'a ChangeSet<T, S, B>,
+        refusals: &R,
         conn: &'a mut Conn,
         adapter: &'a A,
-    ) -> impl core::future::Future<Output = QueryResult<usize>> + Send + 'a
+    ) -> impl core::future::Future<Output = Result<usize, ApplyError>> + Send + 'a
     where
         DBend: Backend
             + HasSqlType<BigInt>
@@ -296,6 +387,7 @@ where
             + HasSqlType<Binary>,
         Conn: diesel_async::AsyncConnection<Backend = DBend>,
         A: Adapter<DBend, S, B> + Send + Sync + 'a,
+        R: RefusalView,
         T: SchemaWithPK + ColumnNames + Send + Sync + 'a,
         S: AsRef<str> + Clone + Hash + Eq + core::fmt::Debug + Send + Sync + 'a,
         B: AsRef<[u8]> + Clone + Hash + Eq + core::fmt::Debug + Send + Sync + 'a,
@@ -304,10 +396,15 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        changeset
+        let refused = check_refusals(refusals, changeset.iter().map(|op| op.table().name()));
+        let apply = changeset
             .iter()
             .map(|op| op.with_adapter::<DBend, _>(adapter))
-            .apply_transactional_async(conn)
+            .apply_transactional_async(conn);
+        async move {
+            refused?;
+            apply.await.map_err(ApplyError::from)
+        }
     }
 
     /// Async peer of [`Self::apply_diffset_bytes`], driven by
@@ -316,22 +413,29 @@ where
     /// transaction. Dispatches on the format marker (patchset or
     /// changeset) exactly like the sync entry point.
     ///
+    /// `refusals` is consulted before any op applies: an upload naming a
+    /// table it refuses is refused as a whole with
+    /// [`ApplyError::RefusedTable`].
+    ///
     /// # Errors
     ///
-    /// Returns a [`diesel::result::Error::QueryBuilderError`] when the
-    /// bytes fail to parse or name a table absent from the catalog.
-    /// Propagates the first bind or execution error any op produces, with
-    /// the whole transaction rolled back.
+    /// [`ApplyError::RefusedTable`] when an op names a refused table.
+    /// [`ApplyError::Diesel`] wrapping a
+    /// [`QueryBuilderError`](diesel::result::Error::QueryBuilderError)
+    /// when the bytes fail to parse or name a table absent from the
+    /// catalog, or the first bind or execution error any op produces,
+    /// with the whole transaction rolled back.
     #[cfg(any(
         feature = "apply-patchset-postgres-async",
         feature = "apply-patchset-mysql-async"
     ))]
-    pub fn apply_diffset_bytes_async<'a, DBend, Conn, A>(
+    pub fn apply_diffset_bytes_async<'a, DBend, Conn, A, R>(
         &self,
         bytes: &[u8],
+        refusals: &R,
         conn: &'a mut Conn,
         adapter: &'a A,
-    ) -> impl core::future::Future<Output = QueryResult<usize>> + Send + 'a
+    ) -> impl core::future::Future<Output = Result<usize, ApplyError>> + Send + 'a
     where
         DBend: Backend
             + HasSqlType<BigInt>
@@ -340,12 +444,13 @@ where
             + HasSqlType<Binary>,
         Conn: diesel_async::AsyncConnection<Backend = DBend>,
         A: Adapter<DBend, String, Vec<u8>> + Send + Sync + 'a,
+        R: RefusalView,
         i64: ToSql<BigInt, DBend>,
         f64: ToSql<Double, DBend>,
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        apply_diffset_bytes_async_with_catalog(self.database(), bytes, conn, adapter)
+        apply_diffset_bytes_async_with_catalog(self.database(), bytes, refusals, conn, adapter)
     }
 }
 
@@ -360,8 +465,9 @@ mod tests {
     };
     use sqlparser::dialect::SQLiteDialect;
 
-    use super::SqliteAdapter;
+    use super::{ApplyError, SqliteAdapter};
     use crate::backend::SQLite as SqliteBackend;
+    use crate::drift::{Incompatibility, NoRefusals};
     use crate::testing::TestEvent;
     use crate::{DefaultIds, SubscriptionEngine};
 
@@ -438,11 +544,11 @@ mod tests {
         let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
 
         let inserted = engine
-            .apply_diffset_bytes(&insert_bytes(1, "a", 10), &mut conn, &adapter)
+            .apply_diffset_bytes(&insert_bytes(1, "a", 10), &NoRefusals, &mut conn, &adapter)
             .unwrap();
         assert_eq!(inserted, 1, "one row inserted");
         engine
-            .apply_diffset_bytes(&insert_bytes(2, "b", 20), &mut conn, &adapter)
+            .apply_diffset_bytes(&insert_bytes(2, "b", 20), &NoRefusals, &mut conn, &adapter)
             .unwrap();
         assert_eq!(
             items(&mut conn),
@@ -462,7 +568,7 @@ mod tests {
         );
 
         engine
-            .apply_diffset_bytes(&update_qty_bytes(1, 99), &mut conn, &adapter)
+            .apply_diffset_bytes(&update_qty_bytes(1, 99), &NoRefusals, &mut conn, &adapter)
             .unwrap();
         assert_eq!(
             items(&mut conn),
@@ -482,7 +588,7 @@ mod tests {
         );
 
         engine
-            .apply_diffset_bytes(&delete_bytes(2), &mut conn, &adapter)
+            .apply_diffset_bytes(&delete_bytes(2), &NoRefusals, &mut conn, &adapter)
             .unwrap();
         assert_eq!(
             items(&mut conn),
@@ -500,7 +606,7 @@ mod tests {
         let (engine, mut conn) = fixture();
         let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
         let err = engine
-            .apply_diffset_bytes(b"not a diffset", &mut conn, &adapter)
+            .apply_diffset_bytes(b"not a diffset", &NoRefusals, &mut conn, &adapter)
             .unwrap_err();
         assert!(
             err.to_string().contains("failed to parse"),
@@ -523,7 +629,7 @@ mod tests {
             .build();
 
         let err = engine
-            .apply_diffset_bytes(&bytes, &mut conn, &adapter)
+            .apply_diffset_bytes(&bytes, &NoRefusals, &mut conn, &adapter)
             .unwrap_err();
         assert!(
             err.to_string().contains("ghosts"),
@@ -587,7 +693,7 @@ mod tests {
                 .insert(ins)
                 .build();
             engine
-                .apply_diffset_bytes(&bytes, &mut conn, &adapter)
+                .apply_diffset_bytes(&bytes, &NoRefusals, &mut conn, &adapter)
                 .unwrap();
         }
 
@@ -603,7 +709,7 @@ mod tests {
             .update(update)
             .build();
         let touched = engine
-            .apply_diffset_bytes(&bytes, &mut conn, &adapter)
+            .apply_diffset_bytes(&bytes, &NoRefusals, &mut conn, &adapter)
             .unwrap();
         assert_eq!(touched, 1, "composite update matches exactly one row");
         assert_eq!(
@@ -631,7 +737,7 @@ mod tests {
             ))
             .build();
         let touched = engine
-            .apply_diffset_bytes(&bytes, &mut conn, &adapter)
+            .apply_diffset_bytes(&bytes, &NoRefusals, &mut conn, &adapter)
             .unwrap();
         assert_eq!(touched, 1, "composite delete matches exactly one row");
         assert_eq!(
@@ -655,7 +761,7 @@ mod tests {
         let (engine, mut conn) = fixture();
         let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
         engine
-            .apply_diffset_bytes(&insert_bytes(1, "a", 10), &mut conn, &adapter)
+            .apply_diffset_bytes(&insert_bytes(1, "a", 10), &NoRefusals, &mut conn, &adapter)
             .unwrap();
 
         // A patchset update carrying pk = 2 (a would-be new key) plus a new
@@ -669,7 +775,7 @@ mod tests {
             .update(update)
             .build();
         let touched = engine
-            .apply_diffset_bytes(&bytes, &mut conn, &adapter)
+            .apply_diffset_bytes(&bytes, &NoRefusals, &mut conn, &adapter)
             .unwrap();
         assert_eq!(touched, 0, "no row carries the new key, so none is touched");
         assert_eq!(
@@ -715,12 +821,13 @@ mod tests {
         let (engine, mut conn) = fixture();
         let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
         engine
-            .apply_diffset_bytes(&insert_bytes(1, "a", 10), &mut conn, &adapter)
+            .apply_diffset_bytes(&insert_bytes(1, "a", 10), &NoRefusals, &mut conn, &adapter)
             .unwrap();
 
         let touched = engine
             .apply_diffset_bytes(
                 &changeset_relocate_pk_bytes(1, 2, "a", "b"),
+                &NoRefusals,
                 &mut conn,
                 &adapter,
             )
@@ -781,14 +888,19 @@ mod tests {
         let (engine, mut conn) = fixture();
         let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
         engine
-            .apply_diffset_bytes(&insert_bytes(1, "a", 10), &mut conn, &adapter)
+            .apply_diffset_bytes(&insert_bytes(1, "a", 10), &NoRefusals, &mut conn, &adapter)
             .unwrap();
         engine
-            .apply_diffset_bytes(&insert_bytes(2, "b", 20), &mut conn, &adapter)
+            .apply_diffset_bytes(&insert_bytes(2, "b", 20), &NoRefusals, &mut conn, &adapter)
             .unwrap();
 
         let touched = engine
-            .apply_diffset_bytes(&changeset_insert_update_delete_bytes(), &mut conn, &adapter)
+            .apply_diffset_bytes(
+                &changeset_insert_update_delete_bytes(),
+                &NoRefusals,
+                &mut conn,
+                &adapter,
+            )
             .unwrap();
         assert_eq!(touched, 3, "insert, update, and delete each apply");
         assert_eq!(
@@ -830,6 +942,7 @@ mod tests {
         let inserted = super::apply_diffset_bytes_with_catalog(
             &catalog,
             &insert_bytes(1, "a", 10),
+            &NoRefusals,
             &mut conn,
             &adapter,
         )
@@ -842,6 +955,7 @@ mod tests {
         super::apply_diffset_bytes_with_catalog(
             &catalog,
             &update_qty_bytes(1, 42),
+            &NoRefusals,
             &mut conn,
             &adapter,
         )
@@ -869,6 +983,7 @@ mod tests {
         super::apply_diffset_bytes_with_catalog(
             &catalog,
             &insert_bytes(1, "a", 10),
+            &NoRefusals,
             &mut conn,
             &adapter,
         )
@@ -877,6 +992,7 @@ mod tests {
         let touched = super::apply_diffset_bytes_with_catalog(
             &catalog,
             &changeset_relocate_pk_bytes(1, 2, "a", "b"),
+            &NoRefusals,
             &mut conn,
             &adapter,
         )
@@ -894,5 +1010,192 @@ mod tests {
             }],
             "row relocated from id 1 to id 2 with qty preserved"
         );
+    }
+
+    const TWO_TABLE_DDL: &str =
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER); \
+                                 CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);";
+
+    #[derive(QueryableByName, Debug, PartialEq)]
+    struct Note {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        id: i64,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        body: String,
+    }
+
+    fn notes(conn: &mut SqliteConnection) -> Vec<Note> {
+        sql_query("SELECT id, body FROM notes ORDER BY id")
+            .load::<Note>(conn)
+            .unwrap()
+    }
+
+    fn two_table_fixture() -> (Engine, SqliteConnection) {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        sql_query("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER)")
+            .execute(&mut conn)
+            .unwrap();
+        sql_query("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)")
+            .execute(&mut conn)
+            .unwrap();
+        let catalog = ParserDB::parse::<SQLiteDialect>(TWO_TABLE_DDL).unwrap();
+        let engine = Engine::new(catalog, SQLiteDialect {});
+        (engine, conn)
+    }
+
+    fn notes_table() -> SimpleTable {
+        SimpleTable::new("notes", &[("id", ""), ("body", "")], &[0])
+    }
+
+    fn notes_insert_bytes(id: i64, body: &str) -> Vec<u8> {
+        let insert = Insert::<_, String, Vec<u8>>::from(notes_table())
+            .set(0, Value::Integer(id))
+            .unwrap()
+            .set(1, Value::Text(body.into()))
+            .unwrap();
+        PatchSet::<SimpleTable, String, Vec<u8>>::new()
+            .insert(insert)
+            .build()
+    }
+
+    /// A refusal view that refuses exactly the tables it is given, each
+    /// with one dropped-column reason, so a test passes a named refusal
+    /// without a `DriftGuard` standing behind it.
+    struct NamedRefusals {
+        /// The refused table names, each with its reasons.
+        refused: std::collections::BTreeMap<String, Vec<Incompatibility>>,
+    }
+
+    impl crate::drift::RefusalView for NamedRefusals {
+        fn refusal(&self, table: &str) -> Option<Vec<Incompatibility>> {
+            self.refused.get(table).cloned()
+        }
+    }
+
+    fn refusals_naming(table: &str) -> NamedRefusals {
+        NamedRefusals {
+            refused: std::collections::BTreeMap::from([(
+                table.to_string(),
+                vec![Incompatibility::ColumnDropped {
+                    column: "amount".into(),
+                }],
+            )]),
+        }
+    }
+
+    /// An upload naming a refused table is refused as a whole with the
+    /// typed reason, before any op applies: every table of the target
+    /// database stays unchanged.
+    #[test]
+    fn apply_diffset_bytes_refuses_an_upload_touching_a_refused_table() {
+        let (engine, mut conn) = two_table_fixture();
+        let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
+        let refusals = refusals_naming("notes");
+
+        let err = engine
+            .apply_diffset_bytes(&notes_insert_bytes(1, "b"), &refusals, &mut conn, &adapter)
+            .unwrap_err();
+        match err {
+            ApplyError::RefusedTable { table, reasons } => {
+                assert_eq!(table, "notes");
+                assert_eq!(
+                    reasons,
+                    vec![Incompatibility::ColumnDropped {
+                        column: "amount".into()
+                    }]
+                );
+            }
+            other => panic!("the refusal carries the typed reason, got {other:?}"),
+        }
+        assert!(
+            items(&mut conn).is_empty(),
+            "the sibling table stays untouched"
+        );
+        assert!(
+            notes(&mut conn).is_empty(),
+            "the refused table's op never applies"
+        );
+    }
+
+    /// The same refusal view leaves an upload that names only unrefused
+    /// tables to apply as before.
+    #[test]
+    fn apply_diffset_bytes_applies_an_upload_naming_only_unrefused_tables() {
+        let (engine, mut conn) = two_table_fixture();
+        let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
+        let refusals = refusals_naming("notes");
+
+        let inserted = engine
+            .apply_diffset_bytes(&insert_bytes(1, "a", 10), &refusals, &mut conn, &adapter)
+            .unwrap();
+        assert_eq!(inserted, 1, "the unrefused table applies as before");
+        assert_eq!(
+            items(&mut conn),
+            vec![Item {
+                id: 1,
+                name: "a".into(),
+                qty: 10,
+            }]
+        );
+        assert!(
+            notes(&mut conn).is_empty(),
+            "the refused table is untouched by this upload"
+        );
+    }
+
+    /// A changeset upload naming a refused table is refused the same way,
+    /// covering the changeset arm of the byte entry point's check.
+    #[test]
+    fn apply_diffset_bytes_refuses_a_changeset_touching_a_refused_table() {
+        let (engine, mut conn) = two_table_fixture();
+        let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
+        let refusals = refusals_naming("notes");
+
+        let insert = Insert::<_, String, Vec<u8>>::from(notes_table())
+            .set(0, Value::Integer(1))
+            .unwrap()
+            .set(1, Value::Text("b".into()))
+            .unwrap();
+        let bytes = ChangeSet::<SimpleTable, String, Vec<u8>>::new()
+            .insert(insert)
+            .build();
+
+        let err = engine
+            .apply_diffset_bytes(&bytes, &refusals, &mut conn, &adapter)
+            .unwrap_err();
+        match err {
+            ApplyError::RefusedTable { table, .. } => {
+                assert_eq!(table, "notes");
+            }
+            other => panic!("the changeset upload is refused with the typed reason, got {other:?}"),
+        }
+        assert!(notes(&mut conn).is_empty(), "nothing applies on refusal");
+    }
+
+    /// A pre-built batch naming a refused table is refused before its
+    /// first op, through the same view the byte entry points take.
+    #[test]
+    fn apply_patchset_refuses_a_batch_touching_a_refused_table() {
+        let (engine, mut conn) = two_table_fixture();
+        let adapter = SqliteAdapter::new(engine.database()).expect("the catalog indexes");
+        let refusals = refusals_naming("notes");
+        let batch = PatchSet::<SimpleTable, String, Vec<u8>>::new().insert(
+            Insert::<_, String, Vec<u8>>::from(notes_table())
+                .set(0, Value::Integer(1))
+                .unwrap()
+                .set(1, Value::Text("b".into()))
+                .unwrap(),
+        );
+
+        let err = engine
+            .apply_patchset(&batch, &refusals, &mut conn, &adapter)
+            .unwrap_err();
+        match err {
+            ApplyError::RefusedTable { table, .. } => {
+                assert_eq!(table, "notes");
+            }
+            other => panic!("the batch is refused with the typed reason, got {other:?}"),
+        }
+        assert!(notes(&mut conn).is_empty(), "nothing applies on refusal");
     }
 }

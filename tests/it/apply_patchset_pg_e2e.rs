@@ -21,6 +21,7 @@ use crate::common;
 use diesel::{sql_query, RunQueryDsl};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
+use subql::drift::NoRefusals;
 use subql::patchset::PgAdapter;
 use subql::{DefaultIds, PgChangeEvent, SubscriptionEngine};
 
@@ -46,7 +47,7 @@ fn apply_patchset_bool_roundtrip_insert_update_delete() {
 
     assert_eq!(
         engine
-            .apply_patchset(&inserts, &mut conn, &adapter)
+            .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
             .expect("apply inserts"),
         2,
         "two rows inserted"
@@ -58,7 +59,7 @@ fn apply_patchset_bool_roundtrip_insert_update_delete() {
 
     assert_eq!(
         engine
-            .apply_patchset(&updates, &mut conn, &adapter)
+            .apply_patchset(&updates, &NoRefusals, &mut conn, &adapter)
             .expect("apply updates"),
         1,
         "one row updated"
@@ -70,7 +71,7 @@ fn apply_patchset_bool_roundtrip_insert_update_delete() {
 
     assert_eq!(
         engine
-            .apply_patchset(&deletes, &mut conn, &adapter)
+            .apply_patchset(&deletes, &NoRefusals, &mut conn, &adapter)
             .expect("apply deletes"),
         1,
         "one row deleted"

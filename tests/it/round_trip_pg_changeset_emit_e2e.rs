@@ -30,6 +30,7 @@ use diesel::{sql_query, Connection, PgConnection, QueryableByName, RunQueryDsl, 
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::{PostgreSqlDialect, SQLiteDialect};
 use subql::backend::SQLite as SqliteBackend;
+use subql::drift::NoRefusals;
 use subql::emit::wal2json_changeset_builder;
 use subql::patchset::SqliteAdapter;
 use subql::testing::TestEvent;
@@ -143,7 +144,7 @@ fn changeset_emit_propagates_pk_change_to_replica() {
     assert!(!seed_events.is_empty(), "seed drain yielded no row events");
     let seed_changeset = wal2json_changeset_builder(&catalog, &seed_events).unwrap();
     sqlite_engine
-        .apply_changeset(&seed_changeset, &mut sqlite, &sqlite_adapter)
+        .apply_changeset(&seed_changeset, &NoRefusals, &mut sqlite, &sqlite_adapter)
         .unwrap();
     assert_eq!(
         load_sqlite(&mut sqlite),
@@ -166,7 +167,7 @@ fn changeset_emit_propagates_pk_change_to_replica() {
     assert!(!mutate_events.is_empty(), "mutate drain yielded no events");
     let mutate_changeset = wal2json_changeset_builder(&catalog, &mutate_events).unwrap();
     sqlite_engine
-        .apply_changeset(&mutate_changeset, &mut sqlite, &sqlite_adapter)
+        .apply_changeset(&mutate_changeset, &NoRefusals, &mut sqlite, &sqlite_adapter)
         .unwrap();
     assert_eq!(
         load_sqlite(&mut sqlite),

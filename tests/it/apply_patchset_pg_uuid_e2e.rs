@@ -30,7 +30,8 @@ use sqlite_diff_rs::{
     DiffOps, Insert, PatchDelete, PatchSet, PatchsetFormat, SimpleTable, Update, Value,
 };
 use sqlparser::dialect::PostgreSqlDialect;
-use subql::patchset::PgAdapter;
+use subql::drift::NoRefusals;
+use subql::patchset::{ApplyError, PgAdapter};
 use subql::{DefaultIds, PgChangeEvent, SubscriptionEngine};
 use uuid::Uuid;
 
@@ -84,7 +85,7 @@ fn apply_patchset_uuid_roundtrip_blob_and_text_clients() {
         );
 
     let n = engine
-        .apply_patchset(&inserts, &mut conn, &adapter)
+        .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
         .expect("apply inserts (BLOB + TEXT UUID flavors)");
     assert_eq!(n, 2, "two rows inserted");
 
@@ -115,7 +116,7 @@ fn apply_patchset_uuid_roundtrip_blob_and_text_clients() {
             .unwrap(),
     );
     let n = engine
-        .apply_patchset(&updates, &mut conn, &adapter)
+        .apply_patchset(&updates, &NoRefusals, &mut conn, &adapter)
         .expect("apply updates");
     assert_eq!(n, 1, "one row updated");
 
@@ -136,7 +137,7 @@ fn apply_patchset_uuid_roundtrip_blob_and_text_clients() {
         vec![Value::Blob(uuid_text_client.as_bytes().to_vec())],
     ));
     let n = engine
-        .apply_patchset(&deletes, &mut conn, &adapter)
+        .apply_patchset(&deletes, &NoRefusals, &mut conn, &adapter)
         .expect("apply deletes");
     assert_eq!(n, 1, "one row deleted");
 
@@ -157,10 +158,10 @@ fn apply_patchset_uuid_roundtrip_blob_and_text_clients() {
             .unwrap(),
     );
     let err = engine
-        .apply_patchset(&bad, &mut conn, &adapter)
+        .apply_patchset(&bad, &NoRefusals, &mut conn, &adapter)
         .expect_err("INTEGER on UUID column must error at bind time");
     match err {
-        DieselError::QueryBuilderError(inner) => {
+        ApplyError::Diesel(DieselError::QueryBuilderError(inner)) => {
             let msg = inner.to_string();
             assert!(
                 msg.contains("id")
