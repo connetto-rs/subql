@@ -94,8 +94,8 @@ sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "main
 
 sql-values = { version = "0.3", features = ["decimal", "serde"] }
 
-# Compressed bitmaps for predicate/user sets.
-roaring = "0.11"
+# Compressed bitmaps for predicate/user sets. 0.11.4 is the first release whose `RoaringBitmap` is `Eq`.
+roaring = "0.11.4"
 
 # Stable ID allocation (predicates)
 slab = "0.4"
