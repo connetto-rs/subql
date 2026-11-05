@@ -10,11 +10,10 @@ use alloc::string::ToString;
 use core::any::Any;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use sql_values::{IntervalError, PgInterval, ShiftError};
 
 use super::refusal::{ArithmeticOp, EvaluationRefusal};
-use crate::backend::{
-    shift_time, shift_timestamp, timestamp_difference, Backend, Interval, TimestampShift, Value,
-};
+use crate::backend::{Backend, Interval, Value};
 
 /// `a + b` over an interval and a date, time or interval.
 ///
@@ -27,7 +26,9 @@ use crate::backend::{
 pub(super) fn add<B: Backend>(a: Value<B>, b: Value<B>) -> Result<Value<B>, EvaluationRefusal> {
     let operation = ArithmeticOp::Add;
     match (a, b) {
-        (Value::Interval(x), Value::Interval(y)) => interval(x.checked_add(y), operation),
+        (Value::Interval(x), Value::Interval(y)) => {
+            interval(x.span().checked_add(y.span()), operation)
+        }
         (Value::Interval(span), other) | (other, Value::Interval(span)) => {
             shifted(other, span, false, operation)
         }
@@ -47,18 +48,17 @@ pub(super) fn subtract<B: Backend>(
 ) -> Result<Value<B>, EvaluationRefusal> {
     let operation = ArithmeticOp::Subtract;
     match (a, b) {
-        (Value::Interval(x), Value::Interval(y)) => interval(x.checked_sub(y), operation),
+        (Value::Interval(x), Value::Interval(y)) => {
+            interval(x.span().checked_sub(y.span()), operation)
+        }
         (other, Value::Interval(span)) => shifted(other, span, true, operation),
         (Value::Timestamp(x), Value::Timestamp(y)) => {
             let (x, y) = carriers::<NaiveDateTime, _>(&x, &y, operation)?;
-            interval(timestamp_difference(x, y), operation)
+            difference(x, y, operation)
         }
         (Value::TimestampTz(x), Value::TimestampTz(y)) => {
             let (x, y) = carriers::<DateTime<Utc>, _>(&x, &y, operation)?;
-            interval(
-                timestamp_difference(x.naive_utc(), y.naive_utc()),
-                operation,
-            )
+            difference(x.naive_utc(), y.naive_utc(), operation)
         }
         _ => Err(EvaluationRefusal::OperandKinds { operation }),
     }
@@ -77,7 +77,8 @@ pub(super) fn multiply<B: Backend>(
     let operation = ArithmeticOp::Multiply;
     match (a, b) {
         (Value::Interval(span), factor) | (factor, Value::Interval(span)) => {
-            interval(span.times(float_factor(&factor, operation)?), operation)
+            let factor = float_factor(&factor, operation)?;
+            interval(span.span().checked_mul(factor), operation)
         }
         _ => Err(EvaluationRefusal::OperandKinds { operation }),
     }
@@ -94,10 +95,7 @@ pub(super) fn divide<B: Backend>(a: Value<B>, b: Value<B>) -> Result<Value<B>, E
     match (a, b) {
         (Value::Interval(span), divisor) => {
             let divisor = float_factor(&divisor, operation)?;
-            if divisor == 0.0 {
-                return Err(EvaluationRefusal::DivisionByZero { operation });
-            }
-            interval(span.divided_by(divisor), operation)
+            interval(span.span().checked_div(divisor), operation)
         }
         _ => Err(EvaluationRefusal::OperandKinds { operation }),
     }
@@ -111,18 +109,33 @@ pub(super) fn divide<B: Backend>(a: Value<B>, b: Value<B>) -> Result<Value<B>, E
 pub(super) fn negate<B: Backend>(a: &Value<B>) -> Result<Value<B>, EvaluationRefusal> {
     let operation = ArithmeticOp::Negate;
     match a {
-        Value::Interval(span) => interval(span.checked_neg(), operation),
+        Value::Interval(span) => interval(span.span().checked_neg(), operation),
         _ => Err(EvaluationRefusal::OperandKinds { operation }),
     }
 }
 
+/// An interval answer as a value, PostgreSQL's error as the row's refusal.
 fn interval<B: Backend>(
-    result: Option<Interval>,
+    result: Result<PgInterval, IntervalError>,
     operation: ArithmeticOp,
 ) -> Result<Value<B>, EvaluationRefusal> {
     result
-        .map(Value::Interval)
-        .ok_or(EvaluationRefusal::DatetimeOutOfRange { operation })
+        .map(|answer| Value::Interval(Interval::from(answer)))
+        .map_err(|error| match error {
+            IntervalError::DivisionByZero => EvaluationRefusal::DivisionByZero { operation },
+            _ => EvaluationRefusal::DatetimeOutOfRange { operation },
+        })
+}
+
+/// `later - earlier` of two timestamps.
+fn difference<B: Backend>(
+    later: NaiveDateTime,
+    earlier: NaiveDateTime,
+    operation: ArithmeticOp,
+) -> Result<Value<B>, EvaluationRefusal> {
+    PgInterval::timestamp_difference(later, earlier)
+        .map(|answer| Value::Interval(Interval::from(answer)))
+        .map_err(|error| refusal(error, operation))
 }
 
 /// A date, time or timestamp moved by `span`, forward or back.
@@ -132,56 +145,57 @@ fn shifted<B: Backend>(
     subtract: bool,
     operation: ArithmeticOp,
 ) -> Result<Value<B>, EvaluationRefusal> {
-    let out_of_range = EvaluationRefusal::DatetimeOutOfRange { operation };
+    let span = span.span();
     // A time moves by the clock alone, so months and days that cannot be
     // negated never refuse it.
     if let Value::Time(at) = at {
         let at = carrier::<NaiveTime, _>(&at, operation)?;
-        let moved = shift_time(at, span, subtract).ok_or(out_of_range)?;
+        let moved = if subtract {
+            span.subtract_from_time(at)
+        } else {
+            span.add_to_time(at)
+        };
+        let moved = moved.map_err(|error| refusal(error, operation))?;
         return same::<B::Time, _>(moved, operation).map(Value::Time);
     }
-    let span = if subtract {
-        span.checked_neg().ok_or(out_of_range)?
-    } else {
-        span
+    let shift = |at: NaiveDateTime| {
+        if subtract {
+            span.subtract_from_timestamp(at)
+        } else {
+            span.add_to_timestamp(at)
+        }
+        .map_err(|error| refusal(error, operation))
     };
     match at {
-        Value::Timestamp(at) => timestamp_value::<B>(
-            shift_timestamp(naive::<B>(&at, operation)?, span),
-            operation,
-        ),
+        Value::Timestamp(at) => {
+            let moved = shift(naive::<B>(&at, operation)?)?;
+            same::<B::Timestamp, _>(moved, operation).map(Value::Timestamp)
+        }
         // A date moves as the timestamp at its midnight, and answers one.
         Value::Date(day) => {
             let day = carrier::<NaiveDate, _>(&day, operation)?;
-            timestamp_value::<B>(
-                shift_timestamp(day.and_time(NaiveTime::MIN), span),
-                operation,
-            )
+            let moved = shift(day.and_time(NaiveTime::MIN))?;
+            same::<B::Timestamp, _>(moved, operation).map(Value::Timestamp)
         }
         // Only an interval without months or days is admitted, whose result
         // no time zone moves.
-        Value::TimestampTz(at) if span.months() == 0 && span.days() == 0 => {
-            let at = instant::<B>(&at, operation)?;
-            let moved =
-                shift_timestamp(at.naive_utc(), span).map_err(|error| refusal(error, operation))?;
+        Value::TimestampTz(at) if span.months == 0 && span.days == 0 => {
+            let moved = shift(instant::<B>(&at, operation)?.naive_utc())?;
             same::<B::TimestampTz, _>(moved.and_utc(), operation).map(Value::TimestampTz)
         }
         _ => Err(EvaluationRefusal::OperandKinds { operation }),
     }
 }
 
-fn timestamp_value<B: Backend>(
-    moved: Result<NaiveDateTime, TimestampShift>,
-    operation: ArithmeticOp,
-) -> Result<Value<B>, EvaluationRefusal> {
-    let moved = moved.map_err(|error| refusal(error, operation))?;
-    same::<B::Timestamp, _>(moved, operation).map(Value::Timestamp)
-}
-
-const fn refusal(error: TimestampShift, operation: ArithmeticOp) -> EvaluationRefusal {
+const fn refusal(error: ShiftError, operation: ArithmeticOp) -> EvaluationRefusal {
     match error {
-        TimestampShift::OutOfRange => EvaluationRefusal::DatetimeOutOfRange { operation },
-        TimestampShift::Unrepresentable => EvaluationRefusal::DatetimeUnrepresentable { operation },
+        ShiftError::Unrepresentable => EvaluationRefusal::DatetimeUnrepresentable { operation },
+        ShiftError::TimestampOutOfRange
+        | ShiftError::IntervalOutOfRange
+        | ShiftError::InfiniteIntervalAddedToTime
+        | ShiftError::InfiniteIntervalSubtractedFromTime => {
+            EvaluationRefusal::DatetimeOutOfRange { operation }
+        }
     }
 }
 

@@ -78,7 +78,7 @@ pub enum TotalDelta {
     Real(FloatParts),
     /// An interval cell, as months, days and microseconds and the
     /// infinities, so that merging and removing stay exact.
-    Interval(crate::backend::IntervalSum),
+    Interval(sql_values::IntervalSum),
 }
 
 /// A floating quantity as its parts: what the finite contributions sum
@@ -552,7 +552,7 @@ enum Total {
     Double(FloatParts, FloatBoundary),
     /// PostgreSQL's interval total, which raises once a field's net total
     /// leaves its range or infinities of both signs are present.
-    Interval(crate::backend::IntervalSum),
+    Interval(sql_values::IntervalSum),
 }
 
 /// What a floating accumulator does when its finite part leaves range.
@@ -616,9 +616,7 @@ impl Total {
             },
             crate::backend::SumRule::Single => Self::Single(FloatParts::EMPTY, boundary),
             crate::backend::SumRule::Double => Self::Double(FloatParts::EMPTY, boundary),
-            crate::backend::SumRule::Interval => {
-                Self::Interval(crate::backend::IntervalSum::default())
-            }
+            crate::backend::SumRule::Interval => Self::Interval(sql_values::IntervalSum::default()),
         }
     }
 
@@ -719,7 +717,7 @@ impl Total {
         match self {
             Self::Interval(total) => total
                 .sum()
-                .and_then(|_| total.mean())
+                .and_then(|_| total.avg())
                 .map(drop)
                 .map_err(|_| SumOutOfRange),
             _ => Ok(()),
@@ -792,7 +790,7 @@ impl Total {
             }
             Self::Decimal { value, .. } => *value = bigdecimal::BigDecimal::from(0),
             Self::Single(parts, _) | Self::Double(parts, _) => *parts = FloatParts::EMPTY,
-            Self::Interval(total) => *total = crate::backend::IntervalSum::default(),
+            Self::Interval(total) => *total = sql_values::IntervalSum::default(),
         }
     }
 
@@ -816,9 +814,14 @@ impl Total {
             }
             // `add` refused every state without an answer, and an empty one
             // is reported through the count rather than read here.
-            Self::Interval(total) => {
-                crate::NumericValue::Interval(total.sum().ok().flatten().unwrap_or_default())
-            }
+            Self::Interval(total) => crate::NumericValue::Interval(
+                total
+                    .sum()
+                    .ok()
+                    .flatten()
+                    .map(crate::backend::Interval::from)
+                    .unwrap_or_default(),
+            ),
         }
     }
 }
@@ -925,11 +928,11 @@ impl AggAccumulator {
             S::Sum { .. } | S::Avg { .. } if matches!(acc.total, Total::Interval(_)) => {
                 let count = |at| row.get(at).and_then(|v| Self::seed_i64(v)).unwrap_or(0);
                 let finite_sum = row.first().and_then(|cell| match cell {
-                    Value::Interval(interval) => Some(*interval),
+                    Value::Interval(interval) => Some(interval.span()),
                     _ => None,
                 });
                 let seeded =
-                    crate::backend::IntervalSum::seeded(finite_sum, count(1), count(2), count(3));
+                    sql_values::IntervalSum::seeded(finite_sum, count(1), count(2), count(3));
                 acc.contributions = seeded.count();
                 acc.total = Total::Interval(seeded);
             }
@@ -1153,10 +1156,10 @@ impl AggAccumulator {
         match (&self.total, self.mean_rule) {
             // `add` has already checked the total has an answer.
             (Total::Interval(total), _) => total
-                .mean()
+                .avg()
                 .ok()
                 .flatten()
-                .map(crate::NumericValue::Interval),
+                .map(|mean| crate::NumericValue::Interval(crate::backend::Interval::from(mean))),
             // The full-statistics spread retains the double sum beside `SUM(real)`.
             (Total::Single(total, _), _) => {
                 let mut wide = *total;
@@ -1377,7 +1380,7 @@ pub enum TotalCk {
     Single(FloatPartsCk),
     Double(FloatPartsCk),
     /// Appended last, so earlier snapshots keep their tags.
-    Interval(crate::backend::IntervalSum),
+    Interval(sql_values::IntervalSum),
 }
 
 /// An exact, portable snapshot of one aggregate subscription's running value.
@@ -2396,17 +2399,16 @@ mod tests {
         let spec = AggSpec::Sum { column: 0 };
         let mut accumulator = AggAccumulator::from_spec(&spec, rule);
         let ceiling = AggDelta::Totalled {
-            value: super::TotalDelta::Interval(crate::backend::IntervalSum::of(
-                crate::backend::Interval::parse("2147483647 days")
-                    .expect("the days fit the ported range"),
+            value: super::TotalDelta::Interval(sql_values::IntervalSum::of(
+                sql_values::parse_interval("2147483647 days").expect("the days fit the range"),
                 1,
             )),
             count_delta: 1,
         };
         assert!(accumulator.apply(&ceiling).is_ok(), "the ceiling fits");
         let one_more = AggDelta::Totalled {
-            value: super::TotalDelta::Interval(crate::backend::IntervalSum::of(
-                crate::backend::Interval::parse("1 days").expect("a day parses"),
+            value: super::TotalDelta::Interval(sql_values::IntervalSum::of(
+                sql_values::parse_interval("1 days").expect("a day parses"),
                 1,
             )),
             count_delta: 1,
@@ -2443,13 +2445,13 @@ mod tests {
         );
         accumulator
             .apply(&AggDelta::Totalled {
-                value: super::TotalDelta::Interval(crate::backend::IntervalSum::of(
-                    crate::backend::Interval::parse("1 mon").expect("a month parses"),
+                value: super::TotalDelta::Interval(sql_values::IntervalSum::of(
+                    sql_values::parse_interval("1 mon").expect("a month parses"),
                     1,
                 )),
                 count_delta: 1,
             })
-            .expect("a month fits the ported range");
+            .expect("a month fits the range");
         assert_eq!(
             accumulator.value(),
             crate::AggValue::Sum(Some(crate::NumericValue::Interval(

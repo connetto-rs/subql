@@ -3722,10 +3722,12 @@ dependencies = [
 [[package]]
 name = "sql-values"
 version = "0.3.0"
-source = "git+https://github.com/connetto-rs/sql-scalar-text?branch=main#967befc24e3f0eb30b9c578b698b02b9a9187b4f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdcd1341da13c40c77cfccfafd7be7f79a90fba7cfba705758dbaf9f47fbefe4"
 dependencies = [
  "bigdecimal",
  "chrono",
+ "serde",
  "thiserror",
 ]
 

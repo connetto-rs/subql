@@ -106,7 +106,9 @@ fn operand<B: Backend, DB: DatabaseLike>(
                 literal,
             } if matches!(sign, UnaryOperator::Minus) => Operand::Temporal {
                 kind: ScalarFamily::Interval,
-                literal: literal.and_then(Interval::checked_neg),
+                literal: literal
+                    .and_then(|literal| literal.span().checked_neg().ok())
+                    .map(Interval::from),
             },
             number @ Operand::Number(_) => number,
             _ => Operand::Other,

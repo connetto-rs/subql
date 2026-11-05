@@ -266,6 +266,22 @@ fn a_result_postgres_raises_on_is_refused() {
     );
 }
 
+/// A timestamp before PostgreSQL's first, 4714-11-24 BC, which `chrono`
+/// holds and PostgreSQL never sends, has no difference to answer.
+#[test]
+fn a_difference_from_before_the_first_timestamp_is_refused() {
+    let shift = Shift {
+        start: "-10000-01-01 00:00:00",
+        ..SHIFT
+    };
+    assert_eq!(
+        refusals(&shift, &["start - '2024-01-01 00:00:00' > '1 day'"]),
+        [EvaluationRefusal::DatetimeOutOfRange {
+            operation: ArithmeticOp::Subtract
+        }]
+    );
+}
+
 /// Subtracting an interval whose negation leaves its range is refused, as
 /// PostgreSQL 16 and 18 raise there.
 #[test]
@@ -299,6 +315,28 @@ fn a_time_minus_an_interval_ignores_its_months_and_days() {
         assert!(
             !holds(&shift, &format!("clock - span = '{wrong}'")),
             "{span}"
+        );
+    }
+}
+
+/// A clock moved past the range of PostgreSQL's 64-bit microseconds wraps in
+/// that range before it is reduced to the day, as PostgreSQL 16 and 18 answer
+/// it.
+#[test]
+fn a_time_moved_past_the_clock_range_wraps() {
+    let shift = Shift {
+        clock: "23:59:59",
+        span: "2562047788:00:54.775807",
+        ..SHIFT
+    };
+    for moved in ["clock + span", "clock - (-span)"] {
+        assert!(
+            holds(&shift, &format!("{moved} = '19:59:04.224191'")),
+            "{moved}"
+        );
+        assert!(
+            !holds(&shift, &format!("{moved} = '19:59:04.224192'")),
+            "{moved}"
         );
     }
 }

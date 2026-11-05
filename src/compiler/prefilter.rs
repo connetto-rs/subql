@@ -75,7 +75,7 @@ impl PlannerValue {
             Value::String(x) => (x as &dyn Any)
                 .downcast_ref::<alloc::string::String>()
                 .map(|s| Self::String(Arc::from(s.as_str()))),
-            Value::Interval(x) => Some(Self::Interval(x.span_microseconds())),
+            Value::Interval(x) => Some(Self::Interval(x.span().span_microseconds())),
             _ => None,
         }
     }

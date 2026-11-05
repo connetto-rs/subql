@@ -58,8 +58,9 @@ impl AggCellRead {
             Self::Real(value) => Some(TotalDelta::Real(crate::runtime::aggregate::FloatParts::of(
                 *value, weight,
             ))),
-            Self::Interval(value) => Some(TotalDelta::Interval(crate::backend::IntervalSum::of(
-                *value, weight,
+            Self::Interval(value) => Some(TotalDelta::Interval(sql_values::IntervalSum::of(
+                value.span(),
+                weight,
             ))),
             Self::Missing | Self::Null | Self::NonNumeric => None,
         }
