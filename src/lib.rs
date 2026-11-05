@@ -9,6 +9,11 @@ extern crate alloc;
 // Re-export public API
 pub use compiler::vm::refusal::EvaluationRefusal;
 pub use compiler::{AggHaving, AggSpec, HavingFunction, HavingOp, HavingSubject, QueryProjection};
+pub use drift::{judge, refusal_reasons, Incompatibility, ReplicaIdentity, TableShape, Verdict};
+#[cfg(feature = "std")]
+pub use drift::{DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, LiveShapeReader};
+#[cfg(feature = "sqlite-cdc")]
+pub use drift::{SqliteLiveReader, SqliteShapeError};
 pub use errors::*;
 #[cfg(feature = "pg-sqlite-emu")]
 pub use pg_sqlite_emu::{PgSqliteEmuError, PgSqliteEmuSource};
@@ -74,6 +79,7 @@ pub mod clock;
 pub mod compiler;
 #[cfg(feature = "std")]
 pub mod config;
+pub mod drift;
 pub mod emit;
 pub mod testing;
 // Memory profiling harness driven by the `dhat-heap` feature. Not part of

@@ -23,6 +23,8 @@
 //!    `Box<[Value<SQLite>]>` with [`Value::Missing`] for cells the wire
 //!    did not carry on that side.
 
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -44,6 +46,9 @@ use crate::{catalog_helpers, ColumnId, EventKind, TableId};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SqliteChangesetParser;
 
+/// The live per-table column names a drain passes to the parser.
+type LiveShapes = BTreeMap<alloc::string::String, Arc<[alloc::string::String]>>;
+
 impl<DB: DatabaseLike> WalParser<DB> for SqliteChangesetParser {
     type Checkpoint = crate::NoCheckpoint;
     type Event = SqliteChangesetEvent;
@@ -53,23 +58,50 @@ impl<DB: DatabaseLike> WalParser<DB> for SqliteChangesetParser {
         data: &[u8],
         database: &DB,
     ) -> Result<Vec<Self::Event>, WalParseError> {
-        if data.is_empty() {
-            return Ok(Vec::new());
-        }
-        let parsed = ParsedDiffSet::parse(data).map_err(convert_parse_error)?;
-        let ParsedDiffSet::Changeset(diffset) = parsed else {
-            return Err(WalParseError::MalformedPayload(
-                "expected SQLite changeset marker 'T', got patchset marker 'P'".to_string(),
-            ));
-        };
-        let mut events = Vec::new();
-        for op in diffset.iter() {
-            if let Some(ev) = op_to_event(op, database)? {
-                events.push(ev);
-            }
-        }
-        Ok(events)
+        parse(data, database, None)
     }
+}
+
+impl SqliteChangesetParser {
+    /// Parse with the live per-table column names a drain read from
+    /// `sqlite_schema`.
+    ///
+    /// A wire position maps to the catalog column of the live column
+    /// name it holds, so an added trailing column is projected away and
+    /// a dropped column leaves [`Value::Missing`] in its catalog slot.
+    /// A table `live` does not cover keeps the positional behaviour,
+    /// including the arity refusal.
+    pub fn parse_with_live_shapes<DB: DatabaseLike>(
+        &self,
+        data: &[u8],
+        database: &DB,
+        live: &LiveShapes,
+    ) -> Result<Vec<SqliteChangesetEvent>, WalParseError> {
+        parse(data, database, Some(live))
+    }
+}
+
+fn parse<DB: DatabaseLike>(
+    data: &[u8],
+    database: &DB,
+    live: Option<&LiveShapes>,
+) -> Result<Vec<SqliteChangesetEvent>, WalParseError> {
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    let parsed = ParsedDiffSet::parse(data).map_err(convert_parse_error)?;
+    let ParsedDiffSet::Changeset(diffset) = parsed else {
+        return Err(WalParseError::MalformedPayload(
+            "expected SQLite changeset marker 'T', got patchset marker 'P'".to_string(),
+        ));
+    };
+    let mut events = Vec::new();
+    for op in diffset.iter() {
+        if let Some(ev) = op_to_event(op, database, live)? {
+            events.push(ev);
+        }
+    }
+    Ok(events)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -95,76 +127,159 @@ fn convert_parse_error(err: ParseError) -> WalParseError {
     }
 }
 
+/// Refuse a wire row of a different width than the catalog when no live
+/// shape covers the table; with one the rows map by name instead.
+const fn arity_check(
+    live_names: Option<&Arc<[alloc::string::String]>>,
+    table_id: TableId,
+    wire_len: usize,
+    arity: usize,
+) -> Result<(), WalParseError> {
+    if live_names.is_none() && wire_len != arity {
+        return Err(WalParseError::ArityMismatch {
+            table_id,
+            wal_count: wire_len,
+            catalog_arity: arity,
+        });
+    }
+    Ok(())
+}
+
+/// The catalog column of the wire position `pos`, or `None` when the live
+/// name at that position is not a catalog column.
+fn catalog_column<DB: DatabaseLike>(
+    database: &DB,
+    table_id: TableId,
+    live_names: Option<&Arc<[alloc::string::String]>>,
+    pos: usize,
+) -> Option<ColumnId> {
+    live_names.map_or_else(
+        || {
+            // The catalog's own position; a position past the last
+            // `ColumnId` holds a column no catalog can carry, so it maps
+            // to no column.
+            u16::try_from(pos).ok()
+        },
+        |names| {
+            names.get(pos).and_then(|name| {
+                catalog_helpers::column_id::<crate::backend::SQLite, DB>(database, table_id, name)
+            })
+        },
+    )
+}
+
+/// The event's key columns: the catalog columns the key's wire positions
+/// resolve to, in key order.
+fn key_columns<DB: DatabaseLike>(
+    database: &DB,
+    table_id: TableId,
+    arity: usize,
+    live_names: Option<&Arc<[alloc::string::String]>>,
+    key_positions: impl core::iter::Iterator<Item = usize>,
+) -> Arc<[ColumnId]> {
+    let mut columns = Vec::new();
+    for pos in key_positions {
+        if let Some(id) = catalog_column(database, table_id, live_names, pos) {
+            if usize::from(id) < arity {
+                columns.push(id);
+            }
+        }
+    }
+    Arc::from(columns)
+}
+
+/// One image row sized at the catalog's arity, each wire cell decoded into
+/// the catalog column the live name at its position holds.
+fn row_from_cells<'a, DB: DatabaseLike>(
+    database: &DB,
+    table_id: TableId,
+    arity: usize,
+    live_names: Option<&Arc<[alloc::string::String]>>,
+    scalar_kinds: &[Option<ScalarKindOf<SQLite>>],
+    cells: impl core::iter::IntoIterator<Item = &'a WireValue<alloc::string::String, Vec<u8>>>,
+) -> Box<[Value<SQLite>]> {
+    let mut row: Vec<Value<SQLite>> = vec![Value::Missing; arity];
+    for (pos, wire) in cells.into_iter().enumerate() {
+        let Some(col) = catalog_column(database, table_id, live_names, pos) else {
+            continue;
+        };
+        let col = usize::from(col);
+        if col < arity {
+            row[col] = decode_wire_cell(wire, scalar_kind_for(scalar_kinds, col));
+        }
+    }
+    row.into_boxed_slice()
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn op_to_event<DB: DatabaseLike>(
     op: ChangesetOp<'_, TableSchema<alloc::string::String>, alloc::string::String, Vec<u8>>,
     database: &DB,
+    live: Option<&LiveShapes>,
 ) -> Result<Option<SqliteChangesetEvent>, WalParseError> {
     let schema = op.table();
     let table_name = schema.name();
-    let table_id = resolve_table::<crate::backend::SQLite, DB>("", table_name.as_str(), database)?;
+    // With a live shape a table the catalog lacks is skipped, because
+    // one drifted table must not sink the whole changeset.
+    let table_id =
+        match resolve_table::<crate::backend::SQLite, DB>("", table_name.as_str(), database) {
+            Ok(id) => id,
+            Err(err) if live.is_none() => return Err(err),
+            Err(_) => return Ok(None),
+        };
+    let live_names = live.and_then(|map| map.get(table_name));
     let arity = catalog_helpers::table_arity(database, table_id).map_err(|_| {
         WalParseError::UnknownTable {
             schema: alloc::string::String::new(),
             table: table_name.clone(),
         }
     })?;
-    // No width check here. The wire's own arity guards below, one per op, ask
-    // the same question of the same number: the parser sizes every op's cell
-    // list from the table header, so a header wider or narrower than the
-    // catalog is exactly a cell list wider or narrower than the catalog, and
-    // the refusal names the same two widths either way. Upstream validates the
-    // key flags themselves, which is a separate claim and not this one.
-    let pk_columns: Arc<[ColumnId]> = {
-        #[allow(clippy::cast_possible_truncation)]
-        let columns: Vec<ColumnId> = schema
-            .primary_key_columns()
-            .map(|col| col as ColumnId)
-            .collect();
-        Arc::from(columns)
-    };
+    let pk_columns = key_columns(
+        database,
+        table_id,
+        arity,
+        live_names,
+        schema.primary_key_columns(),
+    );
     let scalar_kinds = column_scalar_kinds(database, table_id, arity);
 
     let (kind, new_row, old_row, changed_columns) = match op {
         ChangesetOp::Insert { values, .. } => {
-            if values.len() != arity {
-                return Err(WalParseError::ArityMismatch {
-                    table_id,
-                    wal_count: values.len(),
-                    catalog_arity: arity,
-                });
-            }
-            let mut row: Vec<Value<SQLite>> = Vec::with_capacity(arity);
-            for (col, wire) in values.iter().enumerate() {
-                row.push(decode_wire_cell(wire, scalar_kind_for(&scalar_kinds, col)));
-            }
+            arity_check(live_names, table_id, values.len(), arity)?;
             (
                 EventKind::Insert,
-                Some(row.into_boxed_slice()),
+                Some(row_from_cells(
+                    database,
+                    table_id,
+                    arity,
+                    live_names,
+                    &scalar_kinds,
+                    values.iter(),
+                )),
                 None,
                 Arc::from(Vec::<ColumnId>::new()),
             )
         }
         ChangesetOp::Update { values, .. } => {
-            if values.len() != arity {
-                return Err(WalParseError::ArityMismatch {
-                    table_id,
-                    wal_count: values.len(),
-                    catalog_arity: arity,
-                });
-            }
-            let mut new_row: Vec<Value<SQLite>> = Vec::with_capacity(arity);
-            let mut old_row: Vec<Value<SQLite>> = Vec::with_capacity(arity);
+            arity_check(live_names, table_id, values.len(), arity)?;
+            let mut new_row: Vec<Value<SQLite>> = vec![Value::Missing; arity];
+            let mut old_row: Vec<Value<SQLite>> = vec![Value::Missing; arity];
             let mut changed = Vec::new();
-            for (col, pair) in values.iter().enumerate() {
-                let kind = scalar_kind_for(&scalar_kinds, col);
-                let (old_v, new_v) = decode_update_pair(pair, kind);
-                if pair.is_changed() {
-                    #[allow(clippy::cast_possible_truncation)]
-                    changed.push(col as ColumnId);
+            for (pos, pair) in values.iter().enumerate() {
+                let Some(col) = catalog_column(database, table_id, live_names, pos) else {
+                    continue;
+                };
+                let col_usize = usize::from(col);
+                if col_usize >= arity {
+                    continue;
                 }
-                old_row.push(old_v);
-                new_row.push(new_v);
+                let (old_v, new_v) =
+                    decode_update_pair(pair, scalar_kind_for(&scalar_kinds, col_usize));
+                if pair.is_changed() {
+                    changed.push(col);
+                }
+                old_row[col_usize] = old_v;
+                new_row[col_usize] = new_v;
             }
             (
                 EventKind::Update,
@@ -174,21 +289,18 @@ fn op_to_event<DB: DatabaseLike>(
             )
         }
         ChangesetOp::Delete { old_values, .. } => {
-            if old_values.len() != arity {
-                return Err(WalParseError::ArityMismatch {
-                    table_id,
-                    wal_count: old_values.len(),
-                    catalog_arity: arity,
-                });
-            }
-            let mut row: Vec<Value<SQLite>> = Vec::with_capacity(arity);
-            for (col, wire) in old_values.iter().enumerate() {
-                row.push(decode_wire_cell(wire, scalar_kind_for(&scalar_kinds, col)));
-            }
+            arity_check(live_names, table_id, old_values.len(), arity)?;
             (
                 EventKind::Delete,
                 None,
-                Some(row.into_boxed_slice()),
+                Some(row_from_cells(
+                    database,
+                    table_id,
+                    arity,
+                    live_names,
+                    &scalar_kinds,
+                    old_values.iter(),
+                )),
                 Arc::from(Vec::<ColumnId>::new()),
             )
         }
@@ -627,6 +739,101 @@ mod tests {
                 }
             ),
             "the refusal names both widths, got {refused:?}"
+        );
+    }
+
+    /// The live shape maps a wire position to the catalog column of the
+    /// live name at that position, so a table that gained a trailing column
+    /// keeps the catalog's values in the catalog's slots, and the extra
+    /// column is projected away rather than widening the event.
+    #[test]
+    fn an_extra_trailing_column_is_projected_away() {
+        let db = orders_db();
+        let live_orders = SimpleTable::new(
+            "orders",
+            &[("id", ""), ("amount", ""), ("status", ""), ("extra", "")],
+            &[0],
+        );
+        let changeset = ChangeSet::<_, alloc::string::String, Vec<u8>>::new().insert(
+            Insert::from(live_orders)
+                .set(0, 7_i64)
+                .unwrap()
+                .set(1, 250_i64)
+                .unwrap()
+                .set(2, "paid")
+                .unwrap()
+                .set(3, "x")
+                .unwrap(),
+        );
+        let bytes: Vec<u8> = changeset.into();
+        let live = alloc::collections::BTreeMap::from([(
+            "orders".to_string(),
+            Arc::from(alloc::vec![
+                "id".to_string(),
+                "amount".to_string(),
+                "status".to_string(),
+                "extra".to_string(),
+            ]),
+        )]);
+        let events = SqliteChangesetParser
+            .parse_with_live_shapes(&bytes, &db, &live)
+            .expect("parse succeeds");
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.kind(), EventKind::Insert);
+        assert_eq!(ev.pk_columns(&db), &[0u16]);
+        assert_eq!(ev.value_at(&db, RowKind::New, 0).unwrap(), Value::Int(7));
+        assert_eq!(ev.value_at(&db, RowKind::New, 1).unwrap(), Value::Int(250));
+        assert_eq!(
+            ev.value_at(&db, RowKind::New, 2).unwrap(),
+            Value::String("paid".into())
+        );
+    }
+
+    /// A drop plus an add in one rebuild: the wire order is the live
+    /// table's, so each value lands in the catalog column of the live name
+    /// it holds, the dropped column's slot reads [`Value::Missing`], and
+    /// nothing shifts into a wrong column.
+    #[test]
+    fn a_drop_plus_add_maps_by_name_without_shifting() {
+        let db = orders_db();
+        // `amount` is gone and `extra` stands where it stood, so the live
+        // wire order is `id`, `status`, `extra`.
+        let live_orders =
+            SimpleTable::new("orders", &[("id", ""), ("status", ""), ("extra", "")], &[0]);
+        let changeset = ChangeSet::<_, alloc::string::String, Vec<u8>>::new().insert(
+            Insert::from(live_orders)
+                .set(0, 7_i64)
+                .unwrap()
+                .set(1, "paid")
+                .unwrap()
+                .set(2, "x")
+                .unwrap(),
+        );
+        let bytes: Vec<u8> = changeset.into();
+        let live = alloc::collections::BTreeMap::from([(
+            "orders".to_string(),
+            Arc::from(alloc::vec![
+                "id".to_string(),
+                "status".to_string(),
+                "extra".to_string(),
+            ]),
+        )]);
+        let events = SqliteChangesetParser
+            .parse_with_live_shapes(&bytes, &db, &live)
+            .expect("parse succeeds");
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.pk_columns(&db), &[0u16]);
+        assert_eq!(ev.value_at(&db, RowKind::New, 0).unwrap(), Value::Int(7));
+        assert_eq!(
+            ev.value_at(&db, RowKind::New, 1).unwrap(),
+            Value::Missing,
+            "the dropped column's slot carries nothing, not `status`'s value"
+        );
+        assert_eq!(
+            ev.value_at(&db, RowKind::New, 2).unwrap(),
+            Value::String("paid".into())
         );
     }
 

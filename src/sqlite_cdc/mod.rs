@@ -26,4 +26,4 @@ mod source;
 pub use event::SqliteChangesetEvent;
 pub use parser::SqliteChangesetParser;
 #[cfg(feature = "sqlite-cdc")]
-pub use source::{SqliteCdcError, SqliteCdcSource};
+pub use source::{SqliteCdcError, SqliteCdcSource, SqliteSchemaSignal};
