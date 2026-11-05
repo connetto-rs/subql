@@ -28,7 +28,9 @@ deny = []
 # not raise informational advisories at all. Cleared by
 # https://github.com/diesel-rs/diesel_async/pull/298, which bumps the minimum
 # `mysql_async` to 0.37 and so allows the patched `lru` 0.18.2.
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar is unmaintained, reached only through the testcontainers dev-dependency, whose 0.28 still requires it" },
+]
 
 [sources]
 unknown-registry = "warn"
