@@ -111,20 +111,19 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.72.1"
+version = "0.73.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+checksum = "787ef8ef523575546b106a58213d6e6b06198a05c2f757258c68a74273670cfa"
 dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools",
  "proc-macro2",
  "quote",
  "regex",
  "rustc-hash",
- "shlex 1.3.0",
- "syn 2.0.119",
+ "shlex",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -178,7 +177,7 @@ dependencies = [
  "find-msvc-tools",
  "jobserver",
  "libc",
- "shlex 2.0.1",
+ "shlex",
 ]
 
 [[package]]
@@ -365,7 +364,7 @@ dependencies = [
 [[package]]
 name = "diesel"
 version = "2.3.14"
-source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
+source = "git+https://github.com/diesel-rs/diesel#c11c7e431b52c9f6f25207d6b5b005babc49f0d6"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -393,7 +392,7 @@ dependencies = [
 [[package]]
 name = "diesel-sqlite-session"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/diesel-sqlite-session#7e08e927ce99bea2775b8deb9304d2f2f00245eb"
+source = "git+https://github.com/connetto-rs/diesel-sqlite-session#78f4368142fb89fa83659f83d54497c0925a43dd"
 dependencies = [
  "diesel",
  "libsqlite3-sys",
@@ -404,7 +403,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
+source = "git+https://github.com/diesel-rs/diesel#c11c7e431b52c9f6f25207d6b5b005babc49f0d6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -414,7 +413,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.3.10"
-source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
+source = "git+https://github.com/diesel-rs/diesel#c11c7e431b52c9f6f25207d6b5b005babc49f0d6"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -427,7 +426,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
+source = "git+https://github.com/diesel-rs/diesel#c11c7e431b52c9f6f25207d6b5b005babc49f0d6"
 dependencies = [
  "syn 3.0.9",
 ]
@@ -451,7 +450,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#be9197315cd6192d10390b54b85a367fa7f5524b"
+source = "git+https://github.com/diesel-rs/diesel#c11c7e431b52c9f6f25207d6b5b005babc49f0d6"
 dependencies = [
  "darling",
  "either",
@@ -686,15 +685,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -767,9 +757,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "bindgen",
  "cc",
@@ -910,9 +900,10 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#f0bcaf7fc06959586914eac6cfe4c6dd6d3dd2ba"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#17ca79f37b770dfb94bed25496f09da8cb34c3b5"
 dependencies = [
  "sql-traits",
+ "sql-values",
  "sqlparser",
  "sqlparser-plpgsql",
  "thiserror",
@@ -1093,12 +1084,13 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#671ddfe29293c273b8979c90a91b54d54acf457d"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#300180d7bd1a3155d7c2990f3ba7493c6ed1228f"
 dependencies = [
  "rls2fga-types",
  "serde",
  "serde_json",
  "sql-traits",
+ "sql-values",
  "sqlparser",
  "thiserror",
 ]
@@ -1106,7 +1098,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#671ddfe29293c273b8979c90a91b54d54acf457d"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#300180d7bd1a3155d7c2990f3ba7493c6ed1228f"
 dependencies = [
  "serde",
  "thiserror",
@@ -1244,12 +1236,6 @@ dependencies = [
 
 [[package]]
 name = "shlex"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
-
-[[package]]
-name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
@@ -1272,7 +1258,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#be47c77bda12e910e7dac56e18e775f357edaf67"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#6b8fbf32239681ac857ff69b6b73e6ddf1c95177"
 dependencies = [
  "geometric-traits",
  "serde",
@@ -1322,8 +1308,8 @@ dependencies = [
 
 [[package]]
 name = "sqlparser"
-version = "0.63.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#1071d75faddd239341a69ff997caa003690e5cae"
+version = "0.64.0"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#ebb8b04a934420a56574b85f6573a846e4d753e2"
 dependencies = [
  "log",
  "recursive",
@@ -1352,8 +1338,8 @@ dependencies = [
 
 [[package]]
 name = "sqlparser_derive"
-version = "0.6.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#1071d75faddd239341a69ff997caa003690e5cae"
+version = "0.7.0"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#ebb8b04a934420a56574b85f6573a846e4d753e2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1757,9 +1743,9 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "1.0.4"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 
 [[package]]
 name = "zerocopy"

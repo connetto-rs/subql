@@ -13,9 +13,7 @@ pg_walstream = { git = "https://github.com/isdaniel/pg-walstream", branch = "mai
 # with no branch, exactly as diesel-sqlite-session names it, so both graphs
 # resolve to one diesel. Drop once these land in a diesel release.
 diesel = { git = "https://github.com/diesel-rs/diesel" }
-# sqlparser tracked from the apache/datafusion-sqlparser-rs main branch,
-# the canonical upstream (version 0.62.0), which carries the merged
-# visitor no_std fix (#2343) and compound-chain exponential fix (#2344).
+# Followed at main, whose version the `sqlparser` requirement must match for the patch to apply.
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 sqlparser_derive = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 
@@ -84,7 +82,7 @@ required-features = ["testing"]
 # `visitor` provides the derived AST walk. The capture classifier needs every
 # table a statement reads, and a table it missed would be a table whose changes
 # never trigger the query, so totality by derivation beats a hand-rolled walk.
-sqlparser = { version = "0.63", default-features = false, features = ["visitor"] }
+sqlparser = { version = "0.64", default-features = false, features = ["visitor"] }
 
 # Generic SQL schema traits + canonical SchemaFingerprint (FINGERPRINT_SPEC).
 # `default-features = false` follows sql-traits' own gating. The `std`
