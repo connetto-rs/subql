@@ -1903,13 +1903,17 @@ mod tests {
         );
     }
 
-    /// Only a failure to reach the server is worth trying again. A question it
-    /// answered or rejected gives the same answer however often it is asked, and
+    /// Only a call that went unanswered is worth trying again. A question the
+    /// server rejected gives the same answer however often it is asked, and
     /// retrying holds the change stream for nothing.
+    ///
+    /// tonic reports a call that outlives the channel's own timeout as
+    /// `Cancelled`, so a slow answer is retried like `DeadlineExceeded`.
     #[test]
-    fn only_transport_failures_are_retried() {
+    fn only_unanswered_calls_are_retried() {
         assert!(OpenFgaError::is_transport(Code::Unavailable));
         assert!(OpenFgaError::is_transport(Code::DeadlineExceeded));
+        assert!(OpenFgaError::is_transport(Code::Cancelled));
         assert!(!OpenFgaError::is_transport(Code::InvalidArgument));
         assert!(!OpenFgaError::is_transport(Code::PermissionDenied));
         assert!(!OpenFgaError::is_transport(Code::NotFound));
@@ -2287,6 +2291,38 @@ CREATE POLICY p ON docs FOR SELECT USING (
             .iter()
             .all(|call| call.path == "/openfga.v1.OpenFGAService/BatchCheck"));
         assert!(calls.windows(2).all(|pair| pair[0].body == pair[1].body));
+    }
+
+    /// A call that ran past the channel's own timeout is asked again, and the
+    /// answer the next attempt brings is the one used.
+    ///
+    /// tonic reports that timeout as `Cancelled` with the message
+    /// `Timeout expired`, and reading it as a rejection would stop the change
+    /// stream over one slow answer.
+    #[test]
+    fn batch_check_asks_again_after_the_call_timed_out() {
+        let mut response = BatchCheckResponse::default();
+        response.result.insert(
+            "w0n0".to_string(),
+            BatchCheckSingleResult {
+                check_result: Some(CheckResult::Allowed(true)),
+            },
+        );
+        let transport = Scripted::new([
+            ScriptedReply::Status(Status::cancelled("Timeout expired")),
+            ScriptedReply::message(response),
+        ]);
+        let policy = scripted_policy_over(CLOSED, transport.clone()).connect_retries(1);
+
+        let got = block_on(policy.batch_check(batch_request(
+            "store",
+            "",
+            &[a_question()],
+            ConsistencyPreference::MinimizeLatency,
+        )));
+
+        assert_eq!(got, Ok(BTreeMap::from([("w0n0".to_string(), true)])));
+        assert_eq!(transport.calls().len(), 2);
     }
 
     /// A permanent service status is rejected without retrying.

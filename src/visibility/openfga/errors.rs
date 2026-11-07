@@ -10,8 +10,9 @@ use rls2fga_types::ActionStatement;
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum OpenFgaError {
-    /// The server could not be reached, after the configured retries.
-    #[error("could not reach the authorization service after {attempts} attempts: {message}")]
+    /// The server could not be reached, or gave no answer in time, after the
+    /// configured retries.
+    #[error("the authorization service gave no answer after {attempts} attempts: {message}")]
     Transport {
         /// How many times it was tried.
         attempts: u32,
@@ -74,13 +75,19 @@ pub enum OpenFgaError {
 impl OpenFgaError {
     /// Whether `status` is worth trying again.
     ///
-    /// Only a failure to reach the server is. A question it answered, or
-    /// rejected, gives the same answer however often it is asked, and retrying
-    /// it holds the change stream for nothing.
+    /// Only a call that went unanswered is, because the server could not be
+    /// reached or gave no answer in time. tonic reports a call that outlives the
+    /// channel's own timeout as `Cancelled`, with no server involved. A question
+    /// the server rejected gives the same answer however often it is asked, and
+    /// retrying it holds the change stream for nothing.
     pub(super) const fn is_transport(code: Code) -> bool {
         matches!(
             code,
-            Code::Unavailable | Code::DeadlineExceeded | Code::ResourceExhausted | Code::Aborted
+            Code::Unavailable
+                | Code::DeadlineExceeded
+                | Code::Cancelled
+                | Code::ResourceExhausted
+                | Code::Aborted
         )
     }
 }

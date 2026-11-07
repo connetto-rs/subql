@@ -100,6 +100,7 @@ All notable changes to subql are recorded here. The format follows [Keep a Chang
 
 ### Fixed
 
+- `OpenFgaPolicy` asks a question again when its call ran past the channel's own timeout, which tonic reports as `Cancelled` with the message `Timeout expired`. Such a call ended in `OpenFgaError::Rejected`, which reads as an answer that never changes, so one slow OpenFGA reply stopped the change stream. Retries that all run out of time end in `OpenFgaError::Transport`, whose message reads "the authorization service gave no answer".
 - `time + interval` and `time - interval` in a PostgreSQL predicate wrap the clock within PostgreSQL's 64-bit microseconds before reducing it to the day, as PostgreSQL 16 and 18 do, so `time '23:59:59' + interval '2562047788:00:54.775807'` answers `19:59:04.224191`.
 - `time - interval` in a PostgreSQL predicate moves the clock by the interval's time alone, as PostgreSQL's `time_mi_interval` does, so `time '00:00:00' - interval '-2147483648 days'` answers `00:00:00`. The interval was negated whole first, so months or days at their minimum refused the row although a time ignores them.
 - The reads file stores, with every answer the engine maintains itself, whether its database reads run under the consumer's database identity. A restart reopened every restored aggregate with shared reads, so an answer registered for per-consumer reads came back shared and demoted as one. The file's version moves with the field, and a file written before it is refused with the versions named.
