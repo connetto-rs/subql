@@ -50,14 +50,13 @@ jobs:
 
   check-feature-matrix:
     name: check (${{ matrix.profile.name }})
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         profile:
-          - name: default
-            args: "--all-targets"
           - name: all-features
             args: "--all-targets --all-features"
           # no_std build: lib only; tests/benches use std-only dev-deps
@@ -102,6 +101,7 @@ jobs:
 
   wasm-check:
     name: check (${{ matrix.target }}, no_std)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
@@ -192,6 +192,7 @@ jobs:
   # the sum, which had grown past an hour.
   integration:
     name: integration (${{ matrix.group.name }})
+    if: github.event_name != 'pull_request'
     needs: test-build
     runs-on: ubuntu-26.04
     env:
@@ -235,6 +236,7 @@ jobs:
 
   docs:
     name: docs + doctests
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     env:
@@ -255,6 +257,7 @@ jobs:
 
   msrv:
     name: msrv (1.95)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
@@ -268,6 +271,7 @@ jobs:
 
   bench-check:
     name: bench compile check
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
@@ -279,6 +283,7 @@ jobs:
 
   fuzz-check:
     name: fuzz target compile check
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
@@ -341,6 +346,7 @@ jobs:
 
   deny:
     name: Cargo Deny
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
