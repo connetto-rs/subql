@@ -1205,4 +1205,35 @@ mod tests {
         }
         assert!(notes(&mut conn).is_empty(), "nothing applies on refusal");
     }
+
+    #[test]
+    fn apply_changeset_refuses_before_writing_an_unrefused_table() {
+        let (engine, mut conn) = two_table_fixture();
+        let adapter = SqliteAdapter::new(engine.database()).unwrap();
+        let refusals = refusals_naming("notes");
+        let batch = ChangeSet::<SimpleTable, String, Vec<u8>>::new()
+            .insert(
+                Insert::<_, String, Vec<u8>>::from(table())
+                    .set(0, Value::Integer(1))
+                    .unwrap()
+                    .set(1, Value::Text("a".into()))
+                    .unwrap()
+                    .set(2, Value::Integer(10))
+                    .unwrap(),
+            )
+            .insert(
+                Insert::<_, String, Vec<u8>>::from(notes_table())
+                    .set(0, Value::Integer(1))
+                    .unwrap()
+                    .set(1, Value::Text("b".into()))
+                    .unwrap(),
+            );
+
+        let error = engine
+            .apply_changeset(&batch, &refusals, &mut conn, &adapter)
+            .unwrap_err();
+        assert!(matches!(error, ApplyError::RefusedTable { table, .. } if table == "notes"));
+        assert_eq!(items(&mut conn), [] as [Item; 0]);
+        assert_eq!(notes(&mut conn), [] as [Note; 0]);
+    }
 }

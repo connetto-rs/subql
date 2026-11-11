@@ -381,10 +381,7 @@ fn startup_refusals_are_enumerated_before_any_event() {
         (missing, vec![Incompatibility::TableMissing]),
     ];
     expected.sort_by_key(|(table, _)| *table);
-    let refused: Vec<_> = guard
-        .refused_tables()
-        .map(|(table, reasons)| (table, reasons.to_vec()))
-        .collect();
+    let refused = guard.refused_tables();
     assert_eq!(refused, expected);
     assert!(guard.is_refused(orders));
     assert!(guard.is_refused(missing));
@@ -477,10 +474,7 @@ fn startup_refusal_survives_restoration_and_further_schema_changes() {
             Value::Int(i64::from(id))
         );
         assert!(guard.is_refused(orders));
-        let refused: Vec<_> = guard
-            .refused_tables()
-            .map(|(table, reasons)| (table, reasons.to_vec()))
-            .collect();
+        let refused = guard.refused_tables();
         assert_eq!(refused, vec![(orders, reasons.clone())]);
     }
 }

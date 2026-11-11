@@ -62,6 +62,7 @@ fn a_guard_refused_table_is_refused_by_the_apply_path() {
         "CREATE TABLE ledger (id INTEGER PRIMARY KEY, v INTEGER)",
     ];
     let (_dir, mut guard) = live_db(&std::format!("{};\n{};", ddl[0], ddl[1]), &ddl);
+    let refusals = guard.refusals();
     sql_query("INSERT INTO orders (id, amount, status) VALUES (7, 250, 'paid')")
         .execute(guard.inner().connection())
         .unwrap();
@@ -82,7 +83,15 @@ fn a_guard_refused_table_is_refused_by_the_apply_path() {
         }],
         "the guard refuses orders over the live drop"
     );
-    let refusals = guard.refusals();
+    assert_eq!(
+        refusals.refused_tables(),
+        vec![(
+            table_id(guard.catalog(), "orders"),
+            vec![Incompatibility::ColumnDropped {
+                column: "amount".into()
+            }]
+        )]
+    );
 
     // The target database is the consumer's replica, still in the
     // catalog's shape.
