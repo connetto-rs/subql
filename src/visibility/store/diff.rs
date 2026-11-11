@@ -222,8 +222,8 @@ mod tests {
     use rls2fga::translator::TranslatorBuilder;
     use rls2fga_types::ConfidenceLevel;
     use rls2fga_types::RecordError;
+    use rls2fga_types::RelationName;
     use rls2fga_types::RelationShapes;
-    use rls2fga_types::{ConditionName, RelationName};
     use sqlparser::dialect::PostgreSqlDialect;
 
     use crate::backend::{CdcEvent, Postgres, RowKind, Value};
@@ -370,13 +370,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
         let enumerations: Vec<Enumeration<'_>> = outputs
             .tuple_queries()
             .iter()
-            .filter_map(|query| {
-                query.description.as_ref().map(|description| Enumeration {
-                    description,
-                    sql: &query.sql,
-                    condition: query.condition.as_ref().map(ConditionName::as_str),
-                })
-            })
+            .filter_map(Enumeration::of)
             .collect();
         Shapes::new::<Postgres>(catalog, outputs.translation().relations(), &enumerations)
     }
@@ -1697,13 +1691,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
         let enumerations: Vec<Enumeration<'_>> = outputs
             .tuple_queries()
             .iter()
-            .filter_map(|query| {
-                query.description.as_ref().map(|description| Enumeration {
-                    description,
-                    sql: &query.sql,
-                    condition: query.condition.as_ref().map(ConditionName::as_str),
-                })
-            })
+            .filter_map(Enumeration::of)
             .collect();
         let mut relations = outputs.translation().relations().to_vec();
         // A fact the load writes outright, in the very region the ownership

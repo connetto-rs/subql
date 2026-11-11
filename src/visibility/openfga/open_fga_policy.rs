@@ -2661,13 +2661,7 @@ CREATE POLICY notes_p ON notes USING (
         outputs
             .tuple_queries()
             .iter()
-            .filter_map(|query| {
-                query.description.as_ref().map(|description| Enumeration {
-                    description,
-                    sql: &query.sql,
-                    condition: query.condition.as_ref().map(ConditionName::as_str),
-                })
-            })
+            .filter_map(Enumeration::of)
             .collect()
     }
 

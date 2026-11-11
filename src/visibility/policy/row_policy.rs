@@ -104,13 +104,7 @@ use crate::TableId;
 /// let enumerations: Vec<Enumeration<'_>> = outputs
 ///     .tuple_queries()
 ///     .iter()
-///     .filter_map(|query| {
-///         query.description.as_ref().map(|description| Enumeration {
-///             description,
-///             sql: &query.sql,
-///             condition: query.condition.as_ref().map(rls2fga_types::ConditionName::as_str),
-///         })
-///     })
+///     .filter_map(Enumeration::of)
 ///     .collect();
 /// let naming = std::borrow::Cow::from(translation.row_naming()).into_owned();
 /// let answers = translation.action_relations().to_vec();

@@ -37,9 +37,7 @@ use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ColumnName;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RelationShapes;
-use rls2fga::types::{
-    BoundQuery, ConditionName, Record, RecordDerivation, RecordDescription, ReplayScope,
-};
+use rls2fga::types::{BoundQuery, Record, RecordDerivation, RecordDescription, ReplayScope};
 use subql::backend::{CdcEvent, Postgres, RowKind, Value};
 use subql::testing::deployment;
 use subql::visibility::records::{is_evaluable, records_from_row_view};
@@ -484,13 +482,7 @@ fn the_difference_a_change_reports_matches_what_the_loader_would_reload() {
     let enumerations: Vec<Enumeration<'_>> = outputs
         .tuple_queries()
         .iter()
-        .filter_map(|query| {
-            query.description.as_ref().map(|description| Enumeration {
-                description,
-                sql: &query.sql,
-                condition: query.condition.as_ref().map(ConditionName::as_str),
-            })
-        })
+        .filter_map(Enumeration::of)
         .collect();
     let store = Shapes::new::<Postgres>(deployment::db(SCHEMA), &relations, &enumerations);
     assert!(store.uncovered().is_empty(), "{:?}", store.uncovered());

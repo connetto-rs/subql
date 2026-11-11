@@ -65,13 +65,7 @@ use super::required_parameter::{RequiredParameter, TableShapes};
 /// let enumerations: Vec<Enumeration<'_>> = outputs
 ///     .tuple_queries()
 ///     .iter()
-///     .filter_map(|query| {
-///         query.description.as_ref().map(|description| Enumeration {
-///             description,
-///             sql: &query.sql,
-///             condition: query.condition.as_ref().map(rls2fga_types::ConditionName::as_str),
-///         })
-///     })
+///     .filter_map(Enumeration::of)
 ///     .collect();
 /// let naming = std::borrow::Cow::from(translation.row_naming()).into_owned();
 /// let answers = translation.action_relations().to_vec();
@@ -1096,8 +1090,8 @@ mod tests {
     use rls2fga_types::TypeName;
     use rls2fga_types::{ActionAnswer, ActionStatement};
     use rls2fga_types::{
-        ConditionName, RecordDerivation, RecordDescription, RelationName, RelationShapes,
-        RequestPredicate, RowDecision,
+        RecordDerivation, RecordDescription, RelationName, RelationShapes, RequestPredicate,
+        RowDecision,
     };
     use sql_traits::structs::{Deployment, SessionSetting, SetPacking, SettingValue};
     use sqlparser::ast::DataType;
@@ -1141,13 +1135,7 @@ mod tests {
         outputs
             .tuple_queries()
             .iter()
-            .filter_map(|query| {
-                query.description.as_ref().map(|description| Enumeration {
-                    description,
-                    sql: &query.sql,
-                    condition: query.condition.as_ref().map(ConditionName::as_str),
-                })
-            })
+            .filter_map(Enumeration::of)
             .collect()
     }
 
