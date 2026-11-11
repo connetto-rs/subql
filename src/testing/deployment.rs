@@ -9,8 +9,9 @@ use sqlparser::{ast::DataType, dialect::PostgreSqlDialect};
 /// The fixture's login and acting role.
 pub const ROLE: &str = "app_user";
 
-/// The role declaration required by the fixture deployment.
-pub const ROLES: &str = "CREATE ROLE app_user LOGIN;";
+/// Roles and table privileges for row-security fixtures.
+pub const ROLES: &str = "CREATE ROLE app_user LOGIN;
+ALTER DEFAULT PRIVILEGES GRANT ALL PRIVILEGES ON TABLES TO app_user;";
 
 /// Parse a fixture with its deployment role declared.
 ///

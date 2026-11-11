@@ -86,6 +86,7 @@ use crate::TableId;
 /// let db = ParserDB::parse::<PostgreSqlDialect>(
 ///     "CREATE ROLE app_user LOGIN;
 ///      CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
+///      GRANT SELECT ON docs TO app_user;
 ///      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ///      CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));",
 /// )?;
