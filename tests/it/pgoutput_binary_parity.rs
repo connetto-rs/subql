@@ -7,6 +7,8 @@
 
 #![allow(clippy::unwrap_used)]
 
+use crate::common::decisions;
+
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{CdcEvent, RowKind};
 use subql::{
@@ -66,26 +68,6 @@ fn events(source: &mut PgSqliteEmuSource) -> Vec<PgChangeEvent> {
         }
     }
     events
-}
-
-/// Everything a dispatch decided about one event.
-fn decisions(engine: &mut Engine, event: &PgChangeEvent) -> String {
-    match engine.consumers(event) {
-        Ok(notified) => format!(
-            "inserted {:?} deleted {:?} updated {:?} unanswered {:?} stopped {:?} failures {:?}",
-            notified.inserted(),
-            notified.deleted(),
-            notified.updated(),
-            notified
-                .unanswered()
-                .iter()
-                .map(|cell| (cell.subscription_id, cell.consumer_id, cell.column))
-                .collect::<Vec<_>>(),
-            notified.stopped().len(),
-            notified.evaluation_failures().len(),
-        ),
-        Err(error) => format!("error {error}"),
-    }
 }
 
 #[test]

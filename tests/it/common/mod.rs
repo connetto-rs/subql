@@ -286,6 +286,31 @@ pub use pg::PgDatabase;
 pub use pg::{create_pgoutput_slot, create_publication};
 pub use pg::{create_slot, drain_slot, drop_slot, pg_database, read_wal2json_v2};
 
+/// Everything a dispatch decided about one pgoutput event, as text two
+/// streams' engines can be compared by.
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+pub fn decisions(
+    engine: &mut SubscriptionEngine<subql::PgChangeEvent, DefaultIds, ParserDB>,
+    event: &subql::PgChangeEvent,
+) -> String {
+    match engine.consumers(event) {
+        Ok(notified) => format!(
+            "inserted {:?} deleted {:?} updated {:?} unanswered {:?} stopped {:?} failures {:?}",
+            notified.inserted(),
+            notified.deleted(),
+            notified.updated(),
+            notified
+                .unanswered()
+                .iter()
+                .map(|cell| (cell.subscription_id, cell.consumer_id, cell.column))
+                .collect::<Vec<_>>(),
+            notified.stopped().len(),
+            notified.evaluation_failures().len(),
+        ),
+        Err(error) => format!("error {error}"),
+    }
+}
+
 /// Mapped gRPC port of this run's shared OpenFGA. Blocking: call it from
 /// `spawn_blocking` inside an async test.
 #[cfg(all(feature = "visibility-openfga", feature = "testing"))]
