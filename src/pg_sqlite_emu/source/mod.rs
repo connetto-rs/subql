@@ -22,7 +22,8 @@ use pg_walstream::{encode_message, Lsn, PgOutputDecoder};
 use sql_traits::prelude::{DatabaseLike, TableLike};
 use sql_traits::structs::ParserDB;
 use sqlite_diff_rs::pg_walstream_reverse::{
-    op_to_message, relation_message, ColumnSchema, LogicalReplicationMessage, Oid, RelationSchema,
+    op_to_message, relation_message, ColumnData, ColumnSchema, LogicalReplicationMessage, Oid,
+    RelationSchema, TupleData,
 };
 use sqlite_diff_rs::{ChangesetOp, ParsedDiffSet, TableSchema};
 
@@ -104,6 +105,8 @@ pub struct PgSqliteEmuSource {
     /// Transaction id the next transaction takes, from 3, Postgres' first
     /// normal xid, so the positions name distinct transactions.
     next_xid: u32,
+    /// Whether cells travel in their type's binary send format.
+    binary: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +129,8 @@ pub(super) struct TableMeta {
 pub(super) struct ColumnMeta {
     pub(super) name: String,
     pub(super) pg_type_oid: Oid,
+    /// The column's builtin type, `None` when the catalog declares none.
+    pub(super) declared: Option<crate::backend::DeclaredType>,
     pub(super) is_pk: bool,
 }
 
@@ -194,7 +199,45 @@ impl PgSqliteEmuSource {
             tables,
             next_lsn: 0,
             next_xid: 3,
+            binary: false,
         })
+    }
+
+    /// Send every cell from the next drain on in its type's binary send
+    /// format, as a stream that asked pgoutput for `binary on` receives it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use subql::backend::{CdcEvent, RowKind, Value};
+    /// use subql::{PgSqliteEmuSource, SourceItem};
+    ///
+    /// let mut source = PgSqliteEmuSource::open_in_memory(
+    ///     "CREATE TABLE orders (id INT PRIMARY KEY, price DOUBLE PRECISION);",
+    /// )?
+    /// .with_binary_cells();
+    /// source.execute_sql("INSERT INTO orders VALUES (7, 12.5)")?;
+    /// let relation = source
+    ///     .poll_next_item()?
+    ///     .and_then(SourceItem::into_relation)
+    ///     .expect("the table's relation leads the stream");
+    /// assert_eq!(relation.table(), "orders");
+    /// let event = source
+    ///     .poll_next_item()?
+    ///     .and_then(SourceItem::into_event)
+    ///     .expect("insert reaches the queue");
+    /// assert_eq!(event.value_at(source.pg_catalog(), RowKind::New, 0)?, Value::Int(7));
+    /// assert_eq!(event.value_at(source.pg_catalog(), RowKind::New, 1)?, Value::Float(12.5));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn with_binary_cells(mut self) -> Self {
+        // A fresh decoder announces every relation again, which plans its columns.
+        self.decoder = PgOutputDecoder::with_protocol_version(u32::from(PROTOCOL_VERSION));
+        self.order = PgOutputOrder::binary(crate::wal::PgTypeRegistry::builtin());
+        self.announced.clear();
+        self.binary = true;
+        self
     }
 
     /// Convenience: open a fresh in-memory diesel [`SqliteConnection`]
@@ -478,11 +521,14 @@ impl PgSqliteEmuSource {
                 relation_name: meta.sqlite_table.as_str(),
                 columns: cols.as_slice(),
             };
-            messages.push(
-                op_to_message(&op, &schema, fallback.as_deref()).map_err(|e| {
-                    PgSqliteEmuError::UnknownTable(alloc::format!("op_to_message: {e}"))
-                })?,
-            );
+            let message = op_to_message(&op, &schema, fallback.as_deref()).map_err(|e| {
+                PgSqliteEmuError::UnknownTable(alloc::format!("op_to_message: {e}"))
+            })?;
+            messages.push(if self.binary {
+                binary_message(message, &meta)?
+            } else {
+                message
+            });
         }
         self.push_transaction(&messages)
     }
@@ -534,7 +580,7 @@ impl PgSqliteEmuSource {
             });
         if pushed.is_err() {
             // A failed frame leaves the transaction open, and the next drain begins afresh.
-            self.order = PgOutputOrder::new();
+            self.order.abandon_transaction();
         }
         pushed
     }
@@ -628,6 +674,65 @@ impl TableMeta {
     }
 }
 
+/// `message` with every text cell rewritten as the bytes its column type's
+/// send function writes.
+fn binary_message(
+    message: LogicalReplicationMessage,
+    meta: &TableMeta,
+) -> Result<LogicalReplicationMessage, PgSqliteEmuError> {
+    Ok(match message {
+        LogicalReplicationMessage::Insert { relation_id, tuple } => {
+            LogicalReplicationMessage::Insert {
+                relation_id,
+                tuple: binary_tuple(tuple, meta)?,
+            }
+        }
+        LogicalReplicationMessage::Update {
+            relation_id,
+            old_tuple,
+            new_tuple,
+            key_type,
+        } => LogicalReplicationMessage::Update {
+            relation_id,
+            old_tuple: old_tuple.map(|old| binary_tuple(old, meta)).transpose()?,
+            new_tuple: binary_tuple(new_tuple, meta)?,
+            key_type,
+        },
+        LogicalReplicationMessage::Delete {
+            relation_id,
+            old_tuple,
+            key_type,
+        } => LogicalReplicationMessage::Delete {
+            relation_id,
+            old_tuple: binary_tuple(old_tuple, meta)?,
+            key_type,
+        },
+        other => other,
+    })
+}
+
+fn binary_tuple(mut tuple: TupleData, meta: &TableMeta) -> Result<TupleData, PgSqliteEmuError> {
+    for (cell, column) in tuple.columns.iter_mut().zip(&meta.columns) {
+        if cell.is_text() {
+            *cell = ColumnData::binary(binary_cell(cell.as_bytes(), column)?);
+        }
+    }
+    Ok(tuple)
+}
+
+/// The send-format bytes of the text cell `text` in `column`.
+fn binary_cell(text: &[u8], column: &ColumnMeta) -> Result<Vec<u8>, PgSqliteEmuError> {
+    let refuse = |why: String| {
+        PgSqliteEmuError::UnsupportedColumnType(alloc::format!("{}: {why}", column.name))
+    };
+    let text = core::str::from_utf8(text).map_err(|_| refuse("text cell is not UTF-8".into()))?;
+    // A column with no builtin type travels as `text`, whose send format is its UTF-8.
+    let Some(declared) = column.declared else {
+        return Ok(text.as_bytes().to_vec());
+    };
+    let value = crate::wal::pg_type::text_to_pg_value_by_kind(text, declared);
+    crate::diesel_decode::pg_send(&value, column.pg_type_oid).map_err(|e| refuse(e.to_string()))
+}
 impl crate::CdcSource for PgSqliteEmuSource {
     type Event = PgChangeEvent;
     type Commit = crate::PgCommit;

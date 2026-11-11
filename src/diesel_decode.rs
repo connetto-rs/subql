@@ -335,6 +335,90 @@ fn pg_from_sql<ST, T: FromSql<ST, Pg>>(
         .map_err(|e| RegisterError::UnsupportedSql(format!("diesel {ty} bind: {e}")))
 }
 
+/// The bytes type `type_oid`'s send function writes for `value`, the inverse
+/// of [`pg_canonical`], written by diesel's own `ToSql`.
+///
+/// # Errors
+///
+/// [`RegisterError::UnsupportedSql`] when `value` is not a value of
+/// `type_oid`, or diesel refuses to write it.
+#[cfg(feature = "pg-sqlite-emu")]
+pub fn pg_send(
+    value: &Value<Postgres>,
+    type_oid: u32,
+) -> Result<alloc::vec::Vec<u8>, RegisterError> {
+    use diesel::pg::{PgMetadataLookup, PgTypeMetadata};
+    use diesel::query_builder::bind_collector::{BindCollector, RawBytesBindCollector};
+    use diesel::serialize::ToSql;
+    use diesel::sql_types::HasSqlType;
+
+    /// Builtin types carry fixed OIDs and never look one up.
+    struct NoLookup;
+
+    impl PgMetadataLookup for NoLookup {
+        fn lookup_type(&mut self, _type_name: &str, _schema: Option<&str>) -> PgTypeMetadata {
+            PgTypeMetadata::new(0, 0)
+        }
+    }
+
+    fn send<ST, T>(value: &T) -> Result<alloc::vec::Vec<u8>, RegisterError>
+    where
+        Pg: HasSqlType<ST>,
+        T: ToSql<ST, Pg>,
+    {
+        let mut collector = RawBytesBindCollector::<Pg>::new();
+        collector
+            .push_bound_value::<ST, T>(value, &mut NoLookup)
+            .map_err(|e| RegisterError::UnsupportedSql(format!("diesel send: {e}")))?;
+        collector
+            .binds
+            .pop()
+            .flatten()
+            .ok_or_else(|| RegisterError::UnsupportedSql("diesel send wrote a NULL".to_string()))
+    }
+
+    let narrow =
+        |what: &str| RegisterError::UnsupportedSql(format!("{value:?} does not fit {what}"));
+    match (type_oid, value) {
+        (oid::BOOL, Value::Bool(b)) => send::<sql_types::Bool, bool>(b),
+        (oid::INT2, Value::Int(i)) => {
+            send::<sql_types::SmallInt, i16>(&i16::try_from(*i).map_err(|_| narrow("int2"))?)
+        }
+        (oid::INT4, Value::Int(i)) => {
+            send::<sql_types::Integer, i32>(&i32::try_from(*i).map_err(|_| narrow("int4"))?)
+        }
+        (oid::INT8, Value::Int(i)) => send::<sql_types::BigInt, i64>(i),
+        // A float4 column's value is already on the float4 grid.
+        #[allow(clippy::cast_possible_truncation)]
+        (oid::FLOAT4, Value::Float(f)) => send::<sql_types::Float, f32>(&(*f as f32)),
+        (oid::FLOAT8, Value::Float(f)) => send::<sql_types::Double, f64>(f),
+        (oid::TEXT | oid::VARCHAR | oid::BPCHAR | oid::NAME, Value::String(s)) => {
+            send::<sql_types::Text, String>(s)
+        }
+        (oid::UUID, Value::Uuid(u)) => send::<sql_types::Uuid, uuid::Uuid>(u),
+        (oid::BYTEA, Value::Bytes(b)) => send::<sql_types::Binary, alloc::vec::Vec<u8>>(b),
+        (oid::TIMESTAMP, Value::Timestamp(t)) => {
+            send::<sql_types::Timestamp, chrono::NaiveDateTime>(t)
+        }
+        (oid::TIMESTAMPTZ, Value::TimestampTz(t)) => {
+            send::<sql_types::Timestamptz, chrono::DateTime<chrono::Utc>>(t)
+        }
+        (oid::DATE, Value::Date(d)) => send::<sql_types::Date, chrono::NaiveDate>(d),
+        (oid::TIME, Value::Time(t)) => send::<sql_types::Time, chrono::NaiveTime>(t),
+        (oid::NUMERIC, Value::Decimal(d)) => send::<sql_types::Numeric, bigdecimal::BigDecimal>(d),
+        (oid::JSON, Value::Json(j)) => send::<sql_types::Json, serde_json::Value>(j),
+        (oid::JSONB, Value::Jsonb(j)) => send::<sql_types::Jsonb, serde_json::Value>(j),
+        (oid::INTERVAL, Value::Interval(i)) => {
+            send::<sql_types::Interval, diesel::pg::data_types::PgInterval>(
+                &diesel::pg::data_types::PgInterval::new(i.microseconds(), i.days(), i.months()),
+            )
+        }
+        _ => Err(RegisterError::UnsupportedSql(format!(
+            "{value:?} has no binary form for Postgres OID {type_oid}"
+        ))),
+    }
+}
+
 #[must_use]
 pub fn bad_len(ty: &str, got: usize) -> RegisterError {
     RegisterError::UnsupportedSql(format!("diesel {ty} bind has unexpected byte length {got}"))

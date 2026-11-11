@@ -34,7 +34,7 @@ fn parse_float_at_width(text: &str, width: FloatWidth) -> Value<Postgres> {
 /// catalog at decode time rather than the wire OID. Parse failures and
 /// shapes the kind cannot accept collapse to [`Value::Missing`], matching
 /// the `value_at` contract (a corrupt cell escalates to re-execution).
-pub(super) fn text_to_pg_value_by_kind(text: &str, kind: DeclaredType) -> Value<Postgres> {
+pub fn text_to_pg_value_by_kind(text: &str, kind: DeclaredType) -> Value<Postgres> {
     if let DeclaredType::Float(width) = kind {
         return parse_float_at_width(text, width);
     }

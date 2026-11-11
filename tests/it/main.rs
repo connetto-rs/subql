@@ -155,6 +155,10 @@ mod follow_insert_sqlite;
 #[cfg(feature = "pg-sqlite-emu")]
 mod follow_pg_sqlite_emu;
 
+// Binary pgoutput cells read and dispatch as text cells do.
+#[cfg(feature = "pg-sqlite-emu")]
+mod pgoutput_binary_parity;
+
 mod extreme_filter_cells;
 
 mod follow_row_dialects;
