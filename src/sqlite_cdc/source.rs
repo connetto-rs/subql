@@ -671,6 +671,207 @@ mod tests {
         );
     }
 
+    fn file_orders_db() -> (
+        tempfile::TempDir,
+        SqliteConnection,
+        SqliteConnection,
+        ParserDB,
+    ) {
+        use diesel::connection::SimpleConnection;
+
+        let ddl = "CREATE TABLE orders (id INTEGER PRIMARY KEY, amount INTEGER, status TEXT)";
+        let catalog = ParserDB::parse::<SQLiteDialect>(ddl).expect("catalog");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("source.sqlite");
+        let url = path.to_str().expect("UTF-8 path");
+        let mut connection = SqliteConnection::establish(url).expect("source connection");
+        connection.batch_execute(ddl).expect("orders table");
+        connection
+            .batch_execute("PRAGMA busy_timeout = 0")
+            .expect("disable lock waiting");
+        let writer = SqliteConnection::establish(url).expect("writer connection");
+        (dir, connection, writer, catalog)
+    }
+
+    #[test]
+    fn construction_reports_a_locked_catalog() {
+        use diesel::connection::SimpleConnection;
+
+        let (_dir, connection, mut writer, catalog) = file_orders_db();
+        writer
+            .batch_execute("BEGIN EXCLUSIVE")
+            .expect("lock database");
+        assert!(matches!(
+            SqliteCdcSource::new(connection, catalog),
+            Err(SqliteCdcError::Diesel(
+                diesel::result::Error::DatabaseError(_, _)
+            ))
+        ));
+        writer.batch_execute("ROLLBACK").expect("release lock");
+    }
+
+    #[test]
+    fn a_poll_reports_a_database_lock_and_recovers_without_losing_changes() {
+        use diesel::connection::SimpleConnection;
+        use diesel::ExpressionMethods;
+
+        diesel::table! {
+            orders (id) {
+                id -> Integer,
+                amount -> Nullable<Integer>,
+                status -> Nullable<Text>,
+            }
+        }
+
+        let (_dir, connection, mut writer, catalog) = file_orders_db();
+        let mut source = SqliteCdcSource::new(connection, catalog).expect("source");
+        diesel::insert_into(orders::table)
+            .values((
+                orders::id.eq(7),
+                orders::amount.eq(250),
+                orders::status.eq("paid"),
+            ))
+            .execute(source.connection())
+            .expect("insert");
+        writer
+            .batch_execute("BEGIN EXCLUSIVE")
+            .expect("lock database");
+        assert!(matches!(
+            source.poll_next_item(),
+            Err(SqliteCdcError::Diesel(
+                diesel::result::Error::DatabaseError(_, _)
+            ))
+        ));
+        writer.batch_execute("ROLLBACK").expect("release lock");
+        let event = event_of(&mut source).expect("recorded insert survives");
+        assert_eq!(event.kind(), crate::EventKind::Insert);
+        assert_eq!(
+            event.value_at(source.catalog(), RowKind::New, 0).unwrap(),
+            Value::Int(7)
+        );
+        assert_eq!(
+            event.value_at(source.catalog(), RowKind::New, 1).unwrap(),
+            Value::Int(250)
+        );
+        assert!(source.poll_next_item().expect("drained").is_none());
+    }
+
+    #[test]
+    fn unsupported_virtual_tables_do_not_block_tracked_regular_tables() {
+        use diesel::connection::SimpleConnection;
+        use diesel::ExpressionMethods;
+
+        diesel::table! {
+            _pad (id) {
+                id -> Integer,
+            }
+        }
+
+        for ddl in [
+            "CREATE VIRTUAL TABLE orders USING fts5(status)",
+            "CREATE VIRTUAL TABLE orders USING fts5(status, tokenize = 'porter')",
+        ] {
+            let (mut connection, catalog) = open_orders_db();
+            connection
+                .batch_execute("DROP TABLE orders")
+                .expect("drop orders");
+            connection.batch_execute(ddl).expect("virtual table");
+            let mut source = SqliteCdcSource::new(connection, catalog).expect("source");
+            diesel::insert_into(_pad::table)
+                .values(_pad::id.eq(7))
+                .execute(source.connection())
+                .expect("insert into tracked table");
+            let event = event_of(&mut source).expect("regular table insert");
+            let pad = crate::catalog_helpers::table_id::<crate::backend::SQLite, _>(
+                source.catalog(),
+                "_pad",
+            )
+            .expect("tracked regular table");
+            assert_eq!(event.table_id(source.catalog()), pad);
+            assert_eq!(
+                event.value_at(source.catalog(), RowKind::New, 0).unwrap(),
+                Value::Int(7)
+            );
+            assert!(source.poll_next_item().expect("drained").is_none());
+        }
+    }
+
+    #[test]
+    fn live_session_updates_and_deletes_preserve_catalog_column_identity() {
+        use diesel::connection::SimpleConnection;
+        use diesel::ExpressionMethods;
+
+        diesel::table! {
+            orders (id) {
+                extra -> Text,
+                status -> Text,
+                id -> Integer,
+            }
+        }
+
+        let (mut connection, catalog) = open_orders_db();
+        connection
+            .batch_execute(
+                "DROP TABLE orders;
+                 CREATE TABLE orders (extra TEXT, status TEXT, id INTEGER PRIMARY KEY)",
+            )
+            .expect("live table has reordered and replaced columns");
+        diesel::insert_into(orders::table)
+            .values((
+                orders::extra.eq("x"),
+                orders::status.eq("pending"),
+                orders::id.eq(7),
+            ))
+            .execute(&mut connection)
+            .expect("seed row");
+        let mut source = SqliteCdcSource::new(connection, catalog).expect("source");
+        diesel::update(orders::table)
+            .set((orders::status.eq("paid"), orders::extra.eq("y")))
+            .execute(source.connection())
+            .expect("update live columns");
+        let update = event_of(&mut source).expect("update");
+        assert_eq!(update.kind(), crate::EventKind::Update);
+        assert_eq!(update.pk_columns(source.catalog()), &[0u16]);
+        assert_eq!(update.changed_columns(source.catalog()), vec![2u16]);
+        assert_eq!(
+            update.value_at(source.catalog(), RowKind::Pk, 0).unwrap(),
+            Value::Int(7)
+        );
+        assert_eq!(
+            update.value_at(source.catalog(), RowKind::New, 1).unwrap(),
+            Value::Missing
+        );
+        assert_eq!(
+            update.value_at(source.catalog(), RowKind::Old, 2).unwrap(),
+            Value::String("pending".into())
+        );
+        assert_eq!(
+            update.value_at(source.catalog(), RowKind::New, 2).unwrap(),
+            Value::String("paid".into())
+        );
+
+        diesel::delete(orders::table)
+            .execute(source.connection())
+            .expect("delete live row");
+        let delete = event_of(&mut source).expect("delete");
+        assert_eq!(delete.kind(), crate::EventKind::Delete);
+        assert_eq!(delete.pk_columns(source.catalog()), &[0u16]);
+        assert_eq!(delete.changed_columns(source.catalog()), [] as [u16; 0]);
+        assert_eq!(
+            delete.value_at(source.catalog(), RowKind::Pk, 0).unwrap(),
+            Value::Int(7)
+        );
+        assert_eq!(
+            delete.value_at(source.catalog(), RowKind::Old, 1).unwrap(),
+            Value::Missing
+        );
+        assert_eq!(
+            delete.value_at(source.catalog(), RowKind::Old, 2).unwrap(),
+            Value::String("paid".into())
+        );
+        assert!(source.poll_next_item().expect("drained").is_none());
+    }
+
     #[test]
     fn typed_sqlite_source_impls_cdc_source() {
         use crate::testing::block_on;

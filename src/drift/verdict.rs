@@ -736,4 +736,34 @@ mod tests {
             }])
         );
     }
+
+    #[test]
+    fn refusal_reasons_preserve_each_weakened_identity_before_shape_changes() {
+        let catalog = shape_of::<PostgreSqlDialect>(BASE);
+        let changed = shape_of::<PostgreSqlDialect>("CREATE TABLE t1 (id INTEGER PRIMARY KEY)");
+        for identity in [
+            ReplicaIdentity::NotSpecified,
+            ReplicaIdentity::Default,
+            ReplicaIdentity::Index,
+            ReplicaIdentity::All,
+        ] {
+            let live = changed.clone().with_replica_identity(identity);
+            assert_eq!(
+                refusal_reasons(&catalog, Some(&live)),
+                Some(vec![Incompatibility::IdentityWeakened { identity }])
+            );
+        }
+        let full = changed.with_replica_identity(ReplicaIdentity::Full);
+        assert_eq!(
+            refusal_reasons(&catalog, Some(&full)),
+            Some(vec![
+                Incompatibility::ColumnDropped { column: "v".into() },
+                Incompatibility::ColumnDropped {
+                    column: "note".into()
+                },
+            ])
+        );
+        let unchanged = catalog.clone().with_replica_identity(ReplicaIdentity::Full);
+        assert_eq!(refusal_reasons(&catalog, Some(&unchanged)), None);
+    }
 }

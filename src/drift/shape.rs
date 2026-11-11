@@ -200,6 +200,8 @@ impl TableShape {
 
 /// The bounds a type declares, read from the raw sqlparser [`DataType`]
 /// the normalization keeps no memory of.
+///
+/// Array and storage wrappers include the bounds of their inner type.
 fn type_bounds(data_type: &DataType) -> Vec<Bound> {
     match data_type {
         DataType::Character(length)
@@ -241,10 +243,10 @@ fn type_bounds(data_type: &DataType) -> Vec<Bound> {
             Some(BinaryLength::Max) => vec![Bound::Max],
         },
         DataType::Array(element) => match element {
-            ArrayElemTypeDef::None
-            | ArrayElemTypeDef::AngleBracket(_)
-            | ArrayElemTypeDef::Parenthesis(_)
-            | ArrayElemTypeDef::ParenthesisNotNull(_) => Vec::new(),
+            ArrayElemTypeDef::None => Vec::new(),
+            ArrayElemTypeDef::AngleBracket(element)
+            | ArrayElemTypeDef::Parenthesis(element)
+            | ArrayElemTypeDef::ParenthesisNotNull(element) => type_bounds(element),
             ArrayElemTypeDef::SquareBracket(element, size)
             | ArrayElemTypeDef::Qualified(element, size) => {
                 let mut bounds = type_bounds(element);
@@ -291,8 +293,13 @@ fn number_bounds(info: &ExactNumberInfo) -> Vec<Bound> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::drift::verdict::{judge, Incompatibility, Verdict};
+    use alloc::format;
     use sql_traits::structs::ParserDB;
-    use sqlparser::dialect::SQLiteDialect;
+    use sqlparser::dialect::{
+        BigQueryDialect, ClickHouseDialect, Dialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
+        SQLiteDialect,
+    };
 
     fn column(ddl: &str, name: &str) -> ColumnShape {
         let db = ParserDB::parse::<SQLiteDialect>(ddl).expect("DDL parses");
@@ -304,6 +311,30 @@ mod tests {
             .find(|column| column.name() == name)
             .cloned()
             .expect("column present")
+    }
+
+    fn shape_with_type<D: Dialect + Default>(data_type: &str) -> TableShape {
+        let db =
+            ParserDB::parse::<D>(&format!("CREATE TABLE t (v {data_type})")).expect("DDL parses");
+        let table = db.tables().next().expect("one table");
+        TableShape::from_table(table, &db).expect("shape builds")
+    }
+
+    fn assert_retyped(catalog: &TableShape, live: &TableShape) {
+        for (catalog, live) in [(catalog, live), (live, catalog)] {
+            assert_eq!(judge(catalog, Some(catalog)), Verdict::Unchanged);
+            assert!(!catalog.columns()[0].type_matches(&live.columns()[0]));
+            assert_eq!(
+                judge(catalog, Some(live)),
+                Verdict::Incompatible {
+                    reasons: vec![Incompatibility::ColumnRetyped {
+                        column: "v".into(),
+                        catalog: catalog.columns()[0].type_normalized().into(),
+                        live: live.columns()[0].type_normalized().into(),
+                    }],
+                }
+            );
+        }
     }
 
     #[test]
@@ -325,6 +356,121 @@ mod tests {
         assert_ne!(
             bounded.bounds, unbounded.bounds,
             "the normalization folds both to one spelling, the bounds keep the length apart"
+        );
+    }
+
+    #[test]
+    fn a_table_absent_from_the_supplied_catalog_returns_a_lookup_error() {
+        let source = ParserDB::parse::<SQLiteDialect>("CREATE TABLE source (v INTEGER)")
+            .expect("DDL parses");
+        let other =
+            ParserDB::parse::<SQLiteDialect>("CREATE TABLE other (v INTEGER)").expect("DDL parses");
+        let table = source.tables().next().expect("one table");
+        assert!(TableShape::from_table(table, &other).is_err());
+    }
+
+    #[test]
+    fn binary_width_is_distinct_from_an_omitted_or_different_width() {
+        let omitted = shape_with_type::<MySqlDialect>("BINARY");
+        let narrow = shape_with_type::<MySqlDialect>("BINARY(8)");
+        let wide = shape_with_type::<MySqlDialect>("BINARY(16)");
+        assert_eq!(
+            narrow.columns()[0].type_normalized(),
+            wide.columns()[0].type_normalized()
+        );
+        assert_retyped(&omitted, &narrow);
+        assert_retyped(&narrow, &wide);
+    }
+
+    #[test]
+    fn numeric_precision_and_scale_are_independent_bounds() {
+        let unbounded = shape_with_type::<PostgreSqlDialect>("NUMERIC");
+        let precise = shape_with_type::<PostgreSqlDialect>("NUMERIC(10)");
+        let wider = shape_with_type::<PostgreSqlDialect>("NUMERIC(12)");
+        let scaled = shape_with_type::<PostgreSqlDialect>("NUMERIC(10, 2)");
+        let rescaled = shape_with_type::<PostgreSqlDialect>("NUMERIC(10, 3)");
+        assert_retyped(&unbounded, &precise);
+        assert_retyped(&precise, &wider);
+        assert_retyped(&scaled, &rescaled);
+    }
+
+    #[test]
+    fn max_character_length_is_distinct_from_omitted_and_exact_lengths() {
+        let max = shape_with_type::<MsSqlDialect>("VARCHAR(MAX)");
+        let omitted = shape_with_type::<MsSqlDialect>("VARCHAR");
+        let exact = shape_with_type::<MsSqlDialect>("VARCHAR(8000)");
+        assert_retyped(&max, &omitted);
+        assert_retyped(&max, &exact);
+    }
+
+    #[test]
+    fn binary_lengths_distinguish_max_exact_and_omitted_bounds() {
+        let max = shape_with_type::<MsSqlDialect>("VARBINARY(MAX)");
+        let omitted = shape_with_type::<MsSqlDialect>("VARBINARY");
+        let narrow = shape_with_type::<MsSqlDialect>("VARBINARY(8)");
+        let wide = shape_with_type::<MsSqlDialect>("VARBINARY(16)");
+        assert_retyped(&max, &omitted);
+        assert_retyped(&max, &wide);
+        assert_retyped(&omitted, &narrow);
+        assert_retyped(&narrow, &wide);
+    }
+
+    #[test]
+    fn low_cardinality_keeps_fixed_string_widths() {
+        let plain = shape_with_type::<ClickHouseDialect>("FixedString(8)");
+        let wrapped = shape_with_type::<ClickHouseDialect>("LowCardinality(FixedString(8))");
+        let wider = shape_with_type::<ClickHouseDialect>("LowCardinality(FixedString(16))");
+        assert!(plain.columns()[0].type_matches(&wrapped.columns()[0]));
+        assert_eq!(judge(&plain, Some(&wrapped)), Verdict::Unchanged);
+        assert_retyped(&wrapped, &wider);
+        assert_retyped(&plain, &wider);
+    }
+
+    #[test]
+    fn array_bounds_preserve_element_width_and_dimension_order() {
+        let catalog = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)[2][3]");
+        let wider_element = shape_with_type::<PostgreSqlDialect>("VARCHAR(16)[2][3]");
+        let swapped_dimensions = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)[3][2]");
+        let unbounded_dimensions = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)[][]");
+        assert_retyped(&catalog, &wider_element);
+        assert_retyped(&catalog, &swapped_dimensions);
+        assert_retyped(&catalog, &unbounded_dimensions);
+    }
+
+    #[test]
+    fn qualified_arrays_share_element_and_dimension_bounds() {
+        let bracketed = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)[3]");
+        let qualified = shape_with_type::<PostgreSqlDialect>("VARCHAR(8) ARRAY[3]");
+        let wider_element = shape_with_type::<PostgreSqlDialect>("VARCHAR(16) ARRAY[3]");
+        let unbounded = shape_with_type::<PostgreSqlDialect>("VARCHAR(8) ARRAY");
+        assert!(bracketed.columns()[0].type_matches(&qualified.columns()[0]));
+        assert_eq!(judge(&bracketed, Some(&qualified)), Verdict::Unchanged);
+        assert_retyped(&qualified, &wider_element);
+        assert_retyped(&qualified, &unbounded);
+    }
+
+    #[test]
+    fn typed_arrays_preserve_the_element_family() {
+        let integers = shape_with_type::<BigQueryDialect>("ARRAY<INT64>");
+        let strings = shape_with_type::<BigQueryDialect>("ARRAY<STRING>");
+        let scalar = shape_with_type::<BigQueryDialect>("INT64");
+        assert_retyped(&integers, &strings);
+        assert_retyped(&integers, &scalar);
+    }
+
+    #[test]
+    fn a_fixed_string_array_element_width_change_is_incompatible() {
+        let catalog = shape_with_type::<ClickHouseDialect>("Array(FixedString(8))");
+        let live = shape_with_type::<ClickHouseDialect>("Array(FixedString(16))");
+        assert_eq!(
+            judge(&catalog, Some(&live)),
+            Verdict::Incompatible {
+                reasons: vec![Incompatibility::ColumnRetyped {
+                    column: "v".into(),
+                    catalog: "FIXEDSTRING[]".into(),
+                    live: "FIXEDSTRING[]".into(),
+                }],
+            }
         );
     }
 }

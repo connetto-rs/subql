@@ -838,6 +838,164 @@ mod tests {
     }
 
     #[test]
+    fn unknown_tables_are_refused_strictly_and_skipped_with_live_shapes() {
+        let db = orders_db();
+        let unknown = SimpleTable::new("untracked", &[("id", "")], &[0]);
+        let changeset = ChangeSet::<_, String, Vec<u8>>::new()
+            .insert(Insert::from(unknown).set(0, 99_i64).unwrap())
+            .insert(
+                Insert::from(orders_table())
+                    .set(0, 7_i64)
+                    .unwrap()
+                    .set(1, 250_i64)
+                    .unwrap()
+                    .set(2, "paid")
+                    .unwrap(),
+            );
+        let bytes: Vec<u8> = changeset.into();
+        assert!(matches!(
+            SqliteChangesetParser.parse_wal_message(&bytes, &db),
+            Err(WalParseError::UnknownTable { table, .. }) if table == "untracked"
+        ));
+
+        let events = SqliteChangesetParser
+            .parse_with_live_shapes(&bytes, &db, &BTreeMap::new())
+            .expect("live parsing skips the untracked table");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind(), EventKind::Insert);
+        assert_eq!(
+            events[0].value_at(&db, RowKind::New, 0).unwrap(),
+            Value::Int(7)
+        );
+        assert_eq!(
+            events[0].value_at(&db, RowKind::New, 1).unwrap(),
+            Value::Int(250)
+        );
+    }
+
+    #[test]
+    fn live_updates_and_deletes_map_reordered_columns_and_project_unknown_keys() {
+        let db = orders_db();
+        let table = SimpleTable::new(
+            "orders",
+            &[("extra", ""), ("status", ""), ("id", "")],
+            &[2, 0],
+        );
+        let update =
+            Update::<_, sqlite_diff_rs::ChangesetFormat, String, Vec<u8>>::from(table.clone())
+                .set(0, 9_i64, 9_i64)
+                .unwrap()
+                .set(1, "pending", "paid")
+                .unwrap()
+                .set(2, 7_i64, 7_i64)
+                .unwrap();
+        let delete = ChangeDelete::from(table)
+            .set(0, 9_i64)
+            .unwrap()
+            .set(1, "paid")
+            .unwrap()
+            .set(2, 7_i64)
+            .unwrap();
+        let live = BTreeMap::from([(
+            "orders".to_string(),
+            Arc::from(vec![
+                "extra".to_string(),
+                "status".to_string(),
+                "id".to_string(),
+            ]),
+        )]);
+        let bytes: Vec<u8> = ChangeSet::<_, String, Vec<u8>>::new().update(update).into();
+        let events = SqliteChangesetParser
+            .parse_with_live_shapes(&bytes, &db, &live)
+            .expect("update maps by live names");
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.kind(), EventKind::Update);
+        assert_eq!(event.pk_columns(&db), &[0u16]);
+        assert_eq!(event.changed_columns(&db), vec![2u16]);
+        assert_eq!(event.value_at(&db, RowKind::Pk, 0).unwrap(), Value::Int(7));
+        assert_eq!(
+            event.value_at(&db, RowKind::Old, 1).unwrap(),
+            Value::Missing
+        );
+        assert_eq!(
+            event.value_at(&db, RowKind::New, 1).unwrap(),
+            Value::Missing
+        );
+        assert_eq!(
+            event.value_at(&db, RowKind::Old, 2).unwrap(),
+            Value::String("pending".into())
+        );
+        assert_eq!(
+            event.value_at(&db, RowKind::New, 2).unwrap(),
+            Value::String("paid".into())
+        );
+
+        let bytes: Vec<u8> = ChangeSet::<_, String, Vec<u8>>::new().delete(delete).into();
+        let events = SqliteChangesetParser
+            .parse_with_live_shapes(&bytes, &db, &live)
+            .expect("delete maps by live names");
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.kind(), EventKind::Delete);
+        assert_eq!(event.pk_columns(&db), &[0u16]);
+        assert_eq!(event.changed_columns(&db), [] as [u16; 0]);
+        assert_eq!(event.value_at(&db, RowKind::Pk, 0).unwrap(), Value::Int(7));
+        assert_eq!(
+            event.value_at(&db, RowKind::Old, 1).unwrap(),
+            Value::Missing
+        );
+        assert_eq!(
+            event.value_at(&db, RowKind::Old, 2).unwrap(),
+            Value::String("paid".into())
+        );
+        assert_eq!(
+            event.value_at(&db, RowKind::New, 2).unwrap(),
+            Value::Missing
+        );
+    }
+
+    #[test]
+    fn updates_and_deletes_without_a_live_table_shape_require_catalog_arity() {
+        let db = orders_db();
+        for table in [
+            SimpleTable::new("orders", &[("id", ""), ("status", "")], &[0]),
+            SimpleTable::new(
+                "orders",
+                &[("id", ""), ("amount", ""), ("status", ""), ("extra", "")],
+                &[0],
+            ),
+        ] {
+            let update =
+                Update::<_, sqlite_diff_rs::ChangesetFormat, String, Vec<u8>>::from(table.clone())
+                    .set(0, 7_i64, 7_i64)
+                    .unwrap()
+                    .set(1, 10_i64, 20_i64)
+                    .unwrap();
+            let delete = ChangeDelete::from(table).set(0, 7_i64).unwrap();
+            let update_bytes: Vec<u8> =
+                ChangeSet::<_, String, Vec<u8>>::new().update(update).into();
+            let delete_bytes: Vec<u8> =
+                ChangeSet::<_, String, Vec<u8>>::new().delete(delete).into();
+            for bytes in [update_bytes, delete_bytes] {
+                for result in [
+                    SqliteChangesetParser.parse_wal_message(&bytes, &db),
+                    SqliteChangesetParser.parse_with_live_shapes(&bytes, &db, &BTreeMap::new()),
+                ] {
+                    assert!(matches!(
+                        result,
+                        Err(WalParseError::ArityMismatch {
+                            wal_count: 2 | 4,
+                            catalog_arity: 3,
+                            ..
+                        })
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn typed_sqlite_dispatches_through_engine() {
         let db = orders_db();
         let mut engine: crate::SubscriptionEngine<

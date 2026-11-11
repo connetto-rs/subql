@@ -7,21 +7,49 @@
 //! served.
 #![allow(clippy::unwrap_used)]
 
-use diesel::{sql_query, Connection, RunQueryDsl, SqliteConnection};
+use diesel::{sql_query, Connection, ExpressionMethods, RunQueryDsl, SqliteConnection};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::SQLiteDialect;
 use subql::backend::{CdcEvent, RowKind, SQLite, Value};
-use subql::drift::{DriftGuard, DriftSignal, Incompatibility, SqliteLiveReader};
-use subql::sqlite_cdc::{SqliteCdcSource, SqliteChangesetEvent};
+use subql::drift::{
+    DriftGuard, DriftGuardError, DriftSignal, Incompatibility, SqliteLiveReader, SqliteShapeError,
+};
+use subql::sqlite_cdc::{SqliteCdcError, SqliteCdcSource, SqliteChangesetEvent};
 use subql::wal::{CdcSource, SourceItem};
 
 type Guard = DriftGuard<SqliteCdcSource<ParserDB>, ParserDB, SqliteLiveReader>;
 type Item = SourceItem<SqliteChangesetEvent, core::convert::Infallible, DriftSignal>;
 
+diesel::table! {
+    orders (id) {
+        id -> Integer,
+    }
+}
+
+diesel::table! {
+    ledger (id) {
+        id -> Integer,
+    }
+}
+
+diesel::table! {
+    untracked (id) {
+        id -> Integer,
+    }
+}
+
 /// A file-backed live database, its `SqliteLiveReader` connection and the
 /// catalog. The file, not `:memory:`, is what lets the reader's own
 /// connection see the source's database.
 fn live_db(catalog_ddl: &str, statements: &[&str]) -> (tempfile::TempDir, Guard) {
+    live_db_with_source_catalog(catalog_ddl, catalog_ddl, statements)
+}
+
+fn live_db_with_source_catalog(
+    catalog_ddl: &str,
+    source_catalog_ddl: &str,
+    statements: &[&str],
+) -> (tempfile::TempDir, Guard) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("live.sqlite");
     let mut source_connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
@@ -32,7 +60,8 @@ fn live_db(catalog_ddl: &str, statements: &[&str]) -> (tempfile::TempDir, Guard)
     }
     let reader_connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
     let catalog = ParserDB::parse::<SQLiteDialect>(catalog_ddl).unwrap();
-    let source = SqliteCdcSource::new(source_connection, catalog.clone()).unwrap();
+    let source_catalog = ParserDB::parse::<SQLiteDialect>(source_catalog_ddl).unwrap();
+    let source = SqliteCdcSource::new(source_connection, source_catalog).unwrap();
     let guard = subql::testing::block_on(DriftGuard::new(
         source,
         catalog,
@@ -321,4 +350,305 @@ fn acks_advance_across_dropped_events() {
             .unwrap(),
         Value::Int(2)
     );
+}
+
+#[test]
+fn startup_refusals_are_enumerated_before_any_event() {
+    let (_dir, mut guard) = live_db(
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, amount INTEGER, status TEXT);
+         CREATE TABLE missing (id INTEGER PRIMARY KEY);
+         CREATE TABLE ledger (id INTEGER PRIMARY KEY);",
+        &[
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE ledger (id INTEGER PRIMARY KEY)",
+        ],
+    );
+    let orders = table_id(guard.catalog(), "orders");
+    let missing = table_id(guard.catalog(), "missing");
+    let ledger = table_id(guard.catalog(), "ledger");
+    let mut expected = vec![
+        (
+            orders,
+            vec![
+                Incompatibility::ColumnDropped {
+                    column: "amount".into(),
+                },
+                Incompatibility::ColumnDropped {
+                    column: "status".into(),
+                },
+            ],
+        ),
+        (missing, vec![Incompatibility::TableMissing]),
+    ];
+    expected.sort_by_key(|(table, _)| *table);
+    let refused: Vec<_> = guard
+        .refused_tables()
+        .map(|(table, reasons)| (table, reasons.to_vec()))
+        .collect();
+    assert_eq!(refused, expected);
+    assert!(guard.is_refused(orders));
+    assert!(guard.is_refused(missing));
+    assert!(!guard.is_refused(ledger));
+
+    diesel::insert_into(orders::table)
+        .values(orders::id.eq(7))
+        .execute(guard.inner().connection())
+        .unwrap();
+    diesel::insert_into(ledger::table)
+        .values(ledger::id.eq(1))
+        .execute(guard.inner().connection())
+        .unwrap();
+    let mut signals = Vec::new();
+    for _ in 0..expected.len() {
+        let item = subql::testing::block_on(guard.next_item())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(item, SourceItem::Relation(_)));
+        signals.extend(signals_of(&[item]));
+    }
+    signals.sort_by_key(|signal| match signal {
+        DriftSignal::Refused { table, .. } | DriftSignal::ChangesLost { table } => *table,
+        _ => u32::MAX,
+    });
+    assert_eq!(
+        signals,
+        expected
+            .into_iter()
+            .map(|(table, reasons)| DriftSignal::Refused { table, reasons })
+            .collect::<Vec<_>>()
+    );
+    let items = drain(&mut guard);
+    assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+    let events = events_of(items);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].table_id(guard.catalog()), ledger);
+    assert_eq!(
+        events[0]
+            .value_at(guard.catalog(), RowKind::New, 0)
+            .unwrap(),
+        Value::Int(1)
+    );
+}
+
+#[test]
+fn startup_refusal_survives_restoration_and_further_schema_changes() {
+    let (_dir, mut guard) = live_db(
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, amount INTEGER);
+         CREATE TABLE ledger (id INTEGER PRIMARY KEY);",
+        &[
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE ledger (id INTEGER PRIMARY KEY)",
+        ],
+    );
+    let orders = table_id(guard.catalog(), "orders");
+    let ledger = table_id(guard.catalog(), "ledger");
+    let reasons = vec![Incompatibility::ColumnDropped {
+        column: "amount".into(),
+    }];
+    assert_eq!(
+        signals_of(&drain(&mut guard)),
+        vec![DriftSignal::Refused {
+            table: orders,
+            reasons: reasons.clone(),
+        }]
+    );
+    for (id, ddl) in [
+        (1, "ALTER TABLE orders ADD COLUMN amount INTEGER"),
+        (2, "ALTER TABLE orders ADD COLUMN extra TEXT"),
+    ] {
+        sql_query(ddl).execute(guard.inner().connection()).unwrap();
+        diesel::insert_into(orders::table)
+            .values(orders::id.eq(id))
+            .execute(guard.inner().connection())
+            .unwrap();
+        diesel::insert_into(ledger::table)
+            .values(ledger::id.eq(id))
+            .execute(guard.inner().connection())
+            .unwrap();
+        let items = drain(&mut guard);
+        assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+        let events = events_of(items);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].table_id(guard.catalog()), ledger);
+        assert_eq!(
+            events[0]
+                .value_at(guard.catalog(), RowKind::New, 0)
+                .unwrap(),
+            Value::Int(i64::from(id))
+        );
+        assert!(guard.is_refused(orders));
+        let refused: Vec<_> = guard
+            .refused_tables()
+            .map(|(table, reasons)| (table, reasons.to_vec()))
+            .collect();
+        assert_eq!(refused, vec![(orders, reasons.clone())]);
+    }
+}
+
+#[test]
+fn unknown_schema_signals_and_events_do_not_hide_known_events() {
+    let catalog_ddl = "CREATE TABLE orders (id INTEGER PRIMARY KEY);";
+    let source_catalog_ddl = "CREATE TABLE orders (id INTEGER PRIMARY KEY);
+         CREATE TABLE untracked (id INTEGER PRIMARY KEY);";
+    let (_dir, mut guard) = live_db_with_source_catalog(
+        catalog_ddl,
+        source_catalog_ddl,
+        &[
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE untracked (id INTEGER PRIMARY KEY)",
+        ],
+    );
+    let orders = table_id(guard.catalog(), "orders");
+    assert_eq!(table_id(guard.inner().catalog(), "orders"), orders);
+    assert_ne!(table_id(guard.inner().catalog(), "untracked"), orders);
+    sql_query("ALTER TABLE untracked ADD COLUMN extra TEXT")
+        .execute(guard.inner().connection())
+        .unwrap();
+    diesel::insert_into(untracked::table)
+        .values(untracked::id.eq(9))
+        .execute(guard.inner().connection())
+        .unwrap();
+    diesel::insert_into(orders::table)
+        .values(orders::id.eq(7))
+        .execute(guard.inner().connection())
+        .unwrap();
+
+    let items = drain(&mut guard);
+    assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+    let events = events_of(items);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].table_id(guard.catalog()), orders);
+    assert_eq!(
+        events[0]
+            .value_at(guard.catalog(), RowKind::New, 0)
+            .unwrap(),
+        Value::Int(7)
+    );
+    assert!(!guard.is_refused(orders));
+}
+
+#[test]
+fn losing_changes_to_a_live_only_column_requests_resync_without_refusal() {
+    let (_dir, mut guard) = live_db(
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY);
+         CREATE TABLE ledger (id INTEGER PRIMARY KEY);",
+        &[
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, extra TEXT)",
+            "CREATE TABLE ledger (id INTEGER PRIMARY KEY)",
+        ],
+    );
+    let orders = table_id(guard.catalog(), "orders");
+    let ledger = table_id(guard.catalog(), "ledger");
+    diesel::insert_into(orders::table)
+        .values(orders::id.eq(7))
+        .execute(guard.inner().connection())
+        .unwrap();
+    diesel::insert_into(ledger::table)
+        .values(ledger::id.eq(1))
+        .execute(guard.inner().connection())
+        .unwrap();
+    sql_query("ALTER TABLE orders DROP COLUMN extra")
+        .execute(guard.inner().connection())
+        .unwrap();
+
+    let items = drain(&mut guard);
+    assert_eq!(
+        signals_of(&items),
+        vec![DriftSignal::ChangesLost { table: orders }]
+    );
+    let events = events_of(items);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].table_id(guard.catalog()), ledger);
+    assert!(!guard.is_refused(orders));
+    diesel::insert_into(orders::table)
+        .values(orders::id.eq(8))
+        .execute(guard.inner().connection())
+        .unwrap();
+    let items = drain(&mut guard);
+    assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+    let events = events_of(items);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].table_id(guard.catalog()), orders);
+    assert_eq!(
+        events[0]
+            .value_at(guard.catalog(), RowKind::New, 0)
+            .unwrap(),
+        Value::Int(8)
+    );
+}
+
+#[test]
+fn locked_live_shape_reads_surface_errors_without_refusing_tables() {
+    let ddl = "CREATE TABLE orders (id INTEGER PRIMARY KEY)";
+    let (dir, mut guard) = live_db(ddl, &[ddl]);
+    let path = dir.path().join("live.sqlite");
+    let catalog = guard.catalog().clone();
+    let orders = table_id(&catalog, "orders");
+    let source_connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+    let source = SqliteCdcSource::new(source_connection, catalog.clone()).unwrap();
+    let reader_connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+    sql_query("BEGIN EXCLUSIVE")
+        .execute(guard.inner().connection())
+        .unwrap();
+
+    let startup = subql::testing::block_on(DriftGuard::new(
+        source,
+        catalog,
+        SqliteLiveReader::new(reader_connection),
+    ));
+    assert!(matches!(
+        startup,
+        Err(DriftGuardError::Shape(SqliteShapeError::Diesel(_)))
+    ));
+    sql_query("ALTER TABLE orders ADD COLUMN extra TEXT")
+        .execute(guard.inner().connection())
+        .unwrap();
+    assert!(matches!(
+        subql::testing::block_on(guard.next_item()),
+        Err(DriftGuardError::Shape(SqliteShapeError::Diesel(_)))
+    ));
+    assert!(!guard.is_refused(orders));
+    sql_query("ROLLBACK")
+        .execute(guard.inner().connection())
+        .unwrap();
+    assert!(drain(&mut guard).is_empty());
+    diesel::insert_into(orders::table)
+        .values(orders::id.eq(7))
+        .execute(guard.inner().connection())
+        .unwrap();
+    let events = events_of(drain(&mut guard));
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].table_id(guard.catalog()), orders);
+}
+
+#[test]
+fn a_locked_source_preserves_pending_changes_for_retry() {
+    let ddl = "CREATE TABLE orders (id INTEGER PRIMARY KEY)";
+    let (dir, mut guard) = live_db(ddl, &[ddl]);
+    let orders = table_id(guard.catalog(), "orders");
+    diesel::insert_into(orders::table)
+        .values(orders::id.eq(7))
+        .execute(guard.inner().connection())
+        .unwrap();
+    let path = dir.path().join("live.sqlite");
+    let mut locker = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+    sql_query("BEGIN EXCLUSIVE").execute(&mut locker).unwrap();
+    assert!(matches!(
+        subql::testing::block_on(guard.next_item()),
+        Err(DriftGuardError::Inner(SqliteCdcError::Diesel(_)))
+    ));
+    sql_query("ROLLBACK").execute(&mut locker).unwrap();
+
+    let items = drain(&mut guard);
+    assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+    let events = events_of(items);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].table_id(guard.catalog()), orders);
+    assert_eq!(
+        events[0]
+            .value_at(guard.catalog(), RowKind::New, 0)
+            .unwrap(),
+        Value::Int(7)
+    );
+    assert!(!guard.is_refused(orders));
 }

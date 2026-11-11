@@ -232,4 +232,74 @@ mod tests {
         let shape = reader.shape("t1").await.expect("read").expect("t1");
         assert_eq!(shape.checks(), &["v > -5".to_string()]);
     }
+
+    #[tokio::test]
+    async fn a_reader_reports_a_locked_database_and_recovers_after_rollback() {
+        let (dir, mut connection) = live_db(&["CREATE TABLE t1 (id INTEGER PRIMARY KEY)"]);
+        raw("PRAGMA busy_timeout = 0")
+            .execute(&mut connection)
+            .expect("disable lock waiting");
+        let path = dir.path().join("live.sqlite");
+        let mut writer =
+            SqliteConnection::establish(path.to_str().expect("UTF-8 path")).expect("open writer");
+        raw("BEGIN EXCLUSIVE")
+            .execute(&mut writer)
+            .expect("hold the database lock");
+        let mut reader = SqliteLiveReader::new(connection);
+        assert!(matches!(
+            reader.shape("t1").await,
+            Err(SqliteShapeError::Diesel(
+                diesel::result::Error::DatabaseError(_, _)
+            ))
+        ));
+        raw("ROLLBACK")
+            .execute(&mut writer)
+            .expect("release the database lock");
+        let shape = reader.shape("t1").await.expect("read resumes").expect("t1");
+        assert_eq!(shape.primary_key(), &["id".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_virtual_table_without_a_catalog_shape_reports_a_lookup_error() {
+        let (_dir, connection) = live_db(&["CREATE VIRTUAL TABLE t1 USING fts5(body)"]);
+        let mut reader = SqliteLiveReader::new(connection);
+        assert!(matches!(
+            reader.shape("t1").await,
+            Err(SqliteShapeError::Lookup(
+                sql_traits::errors::LookupError::TableNotFound { object_name }
+            )) if object_name == "t1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn unsupported_virtual_table_arguments_report_a_parse_error() {
+        let (_dir, connection) =
+            live_db(&["CREATE VIRTUAL TABLE t1 USING fts5(body, tokenize = 'porter')"]);
+        let mut reader = SqliteLiveReader::new(connection);
+        assert!(matches!(
+            reader.shape("t1").await,
+            Err(SqliteShapeError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn schema_signals_resolve_tracked_tables_and_distinguish_lost_changes() {
+        let catalog = ParserDB::parse::<SQLiteDialect>("CREATE TABLE t1 (id INTEGER PRIMARY KEY)")
+            .expect("catalog");
+        let id =
+            crate::catalog_helpers::table_id::<SQLite, _>(&catalog, "t1").expect("tracked table");
+        for (name, expected) in [("t1", Some(id)), ("untracked", None)] {
+            let changed = SqliteSchemaSignal::SchemaChanged {
+                table: name.to_string(),
+                create_sql: None,
+            };
+            let lost = SqliteSchemaSignal::ChangesLost {
+                table: name.to_string(),
+            };
+            assert_eq!(changed.table(&catalog), expected);
+            assert_eq!(lost.table(&catalog), expected);
+            assert!(!changed.changes_lost());
+            assert!(lost.changes_lost());
+        }
+    }
 }
