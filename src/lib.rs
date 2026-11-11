@@ -44,7 +44,7 @@ pub use wal::{
     ClusterIdentity, PgStreamingCdcSource, PgStreamingConfig, PgStreamingError, TimelineSwitch,
 };
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
-pub use wal::{PgTypeRegistry, PgTypeRegistryError};
+pub use wal::{PgTypeRegistry, PgTypeRegistryError, UnsendableColumn};
 
 // Re-export the sql-traits types subql consumers most often need to spell out
 // at call sites: trait bounds for generic code, the canonical schema

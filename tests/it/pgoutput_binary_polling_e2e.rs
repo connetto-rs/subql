@@ -87,7 +87,8 @@ fn engine(catalog: &ParserDB) -> Engine {
     engine
 }
 
-async fn row_events(source: &mut PollingPgCdcSource, count: usize) -> Vec<PgChangeEvent> {
+/// The first `count` row events of `source`, once it has let go of the slot.
+async fn drain_and_release(mut source: PollingPgCdcSource, count: usize) -> Vec<PgChangeEvent> {
     let mut events = Vec::new();
     while events.len() < count {
         let item = tokio::time::timeout(Duration::from_secs(10), source.next_item())
@@ -98,6 +99,16 @@ async fn row_events(source: &mut PollingPgCdcSource, count: usize) -> Vec<PgChan
         if let Some(event) = item.into_event() {
             events.push(event);
         }
+    }
+    let exited = source.task_exited_handle();
+    drop(source);
+    let released = std::time::Instant::now();
+    while !exited.load(std::sync::atomic::Ordering::Relaxed) {
+        assert!(
+            released.elapsed() < Duration::from_secs(10),
+            "the poller exits"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     events
 }
@@ -236,14 +247,15 @@ fn binary_and_text_streams_read_and_dispatch_alike() {
         .build()
         .unwrap()
         .block_on(async {
-            let mut text = PollingPgCdcSource::connect(config(), catalog.clone())
+            // A peek holds the slot, so each source reads alone and lets go first.
+            let text = PollingPgCdcSource::connect(config(), catalog.clone())
                 .await
                 .expect("text source");
-            let mut binary = PollingPgCdcSource::connect(config().binary(true), catalog.clone())
+            let text_events = drain_and_release(text, STATEMENTS.len()).await;
+            let binary = PollingPgCdcSource::connect(config().binary(true), catalog.clone())
                 .await
                 .expect("binary source");
-            let text_events = row_events(&mut text, STATEMENTS.len()).await;
-            let binary_events = row_events(&mut binary, STATEMENTS.len()).await;
+            let binary_events = drain_and_release(binary, STATEMENTS.len()).await;
 
             assert_eq!(carried(&binary_events[0], "big"), Some("binary"));
             assert_eq!(carried(&binary_events[0], "feel"), Some("binary"));
@@ -258,17 +270,6 @@ fn binary_and_text_streams_read_and_dispatch_alike() {
             #[cfg(feature = "pgoutput-emit")]
             emits_alike(&catalog, &text_events, &binary_events);
 
-            // The push source holds the slot, so the pollers let go of it first.
-            let exited = [text.task_exited_handle(), binary.task_exited_handle()];
-            drop((text, binary));
-            let released = std::time::Instant::now();
-            while !exited
-                .iter()
-                .all(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
-            {
-                assert!(released.elapsed() < Duration::from_secs(10), "pollers exit");
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
             let push = PgStreamingConfig::new(db.url(), &slot, publication).binary(true);
             let mut push = PgStreamingCdcSource::connect(push, catalog.clone())
                 .await
@@ -286,6 +287,89 @@ fn binary_and_text_streams_read_and_dispatch_alike() {
             reads_alike(&catalog, &text_events, &push_events);
             #[cfg(feature = "pgoutput-emit")]
             emits_alike(&catalog, &text_events, &push_events);
+        });
+
+    common::drop_slot(&mut setup, &slot);
+}
+
+/// `array_send` raises when the element type has no send function, so a
+/// binary source refuses a published `aclitem[]` column when it connects.
+/// A column list that leaves the column out publishes nothing to refuse.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_binary_source_refuses_a_column_nesting_a_type_without_send() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    // DDL, which the query DSL does not express.
+    sql_query("CREATE TABLE grants (id INT PRIMARY KEY, acls ACLITEM[])")
+        .execute(&mut setup)
+        .expect("create table");
+    let slot = db.slot("subql_binary_unsendable");
+    common::create_publication(&mut setup, "every_column", "grants");
+    common::create_publication(&mut setup, "keys_only", "grants (id)");
+    common::create_pgoutput_slot(&mut setup, &slot);
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(
+        "CREATE TABLE grants (id INT PRIMARY KEY, acls ACLITEM[]);",
+    )
+    .expect("parse DDL");
+    let config = |publication: &str| PollingPgCdcConfig::new(db.url(), &slot, publication);
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let refusal =
+                PollingPgCdcSource::connect(config("every_column").binary(true), catalog.clone())
+                    .await
+                    .err()
+                    .expect("the binary source refuses");
+            let subql::PollingPgCdcError::Unsendable(column) = refusal else {
+                panic!("expected an unsendable column, got {refusal}");
+            };
+            assert_eq!(
+                (
+                    column.table(),
+                    column.column(),
+                    column.unsendable_type_oid()
+                ),
+                ("grants", "acls", 1033)
+            );
+            PollingPgCdcSource::connect(config("every_column"), catalog.clone())
+                .await
+                .expect("a text source takes the column");
+            PollingPgCdcSource::connect(config("keys_only").binary(true), catalog.clone())
+                .await
+                .expect("the column list leaves the column out");
+
+            let push = |publication: &str| PgStreamingConfig::new(db.url(), &slot, publication);
+            let refusal =
+                PgStreamingCdcSource::connect(push("every_column").binary(true), catalog.clone())
+                    .await
+                    .err()
+                    .expect("the binary push source refuses");
+            let subql::PgStreamingError::Unsendable(column) = refusal else {
+                panic!("expected an unsendable column, got {refusal}");
+            };
+            assert_eq!(
+                (
+                    column.table(),
+                    column.column(),
+                    column.unsendable_type_oid()
+                ),
+                ("grants", "acls", 1033)
+            );
+            drop(
+                PgStreamingCdcSource::connect(push("every_column"), catalog.clone())
+                    .await
+                    .expect("a text push source takes the column"),
+            );
+            drop(
+                PgStreamingCdcSource::connect(push("keys_only").binary(true), catalog.clone())
+                    .await
+                    .expect("the column list leaves the column out of the push source"),
+            );
         });
 
     common::drop_slot(&mut setup, &slot);

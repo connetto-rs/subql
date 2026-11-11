@@ -320,7 +320,7 @@ fn a_registered_domain_reads_through_its_base_type() {
     let db = kinds();
     let domain = 16_500;
     let event = deliver(
-        PgOutputOrder::binary(PgTypeRegistry::builtin().with_user_type(domain, true, Some(23))),
+        PgOutputOrder::binary(PgTypeRegistry::builtin().with_type(domain, true, Some(23), [])),
         relation(&[("id", domain)]),
         RowData::from_pairs(vec![("id", int4(7))]),
     );
@@ -332,7 +332,7 @@ fn a_registered_user_type_without_a_send_function_stays_text() {
     let db = kinds();
     let user = 16_600;
     let event = deliver(
-        PgOutputOrder::binary(PgTypeRegistry::builtin().with_user_type(user, false, None)),
+        PgOutputOrder::binary(PgTypeRegistry::builtin().with_type(user, false, None, [])),
         relation(&[("body", user)]),
         RowData::from_pairs(vec![("body", ColumnValue::text("plain"))]),
     );

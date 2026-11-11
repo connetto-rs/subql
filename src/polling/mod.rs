@@ -88,6 +88,9 @@ pub struct PollingPgCdcConfig {
     pub buffer_capacity: usize,
     /// Ask pgoutput for `binary on`, read once when the source connects.
     /// Default off.
+    ///
+    /// A binary source refuses to connect when a published column nests a
+    /// type without a send function, which PostgreSQL cannot send in binary.
     pub binary: bool,
 }
 
@@ -154,6 +157,10 @@ pub enum PollingPgCdcError {
     /// A `pg_type` row read for a binary stream could not be read.
     #[error("type registry: {0}")]
     TypeRegistry(#[from] crate::wal::PgTypeRegistryError),
+    /// A published column nests a type without a send function, so a
+    /// binary stream cannot carry it.
+    #[error(transparent)]
+    Unsendable(#[from] crate::wal::UnsendableColumn),
 }
 
 /// Polling-based Postgres CDC source.
@@ -198,6 +205,7 @@ impl PollingPgCdcSource {
         let slot_name_for_check = config.slot_name.clone();
         let url = config.url.clone();
         let binary = config.binary;
+        let publication = config.publication_name.clone();
         // Connect and slot-check are both synchronous on `pg_walstream`'s
         // libpq surface and would block the calling tokio worker, so
         // bounce both through the blocking pool in a single hop.
@@ -219,7 +227,9 @@ impl PollingPgCdcSource {
                 )));
                 }
                 let registry = if binary {
-                    Some(read_type_registry(&mut conn)?)
+                    let registry = read_type_registry(&mut conn)?;
+                    refuse_unsendable_columns(&mut conn, &registry, &publication)?;
+                    Some(registry)
                 } else {
                     None
                 };
@@ -354,11 +364,11 @@ impl Drop for PollingPgCdcSource {
     }
 }
 
-/// Every type at or above the unpinned OIDs, read from `pg_type`.
+/// Every type, read from `pg_type` with the types it nests.
 fn read_type_registry(
     conn: &mut PgReplicationConnection,
 ) -> Result<crate::wal::PgTypeRegistry, PollingPgCdcError> {
-    let rows = conn.exec(crate::wal::PgTypeRegistry::USER_TYPES_SQL)?;
+    let rows = conn.exec(crate::wal::PgTypeRegistry::TYPES_SQL)?;
     let column = |row, col| {
         rows.get_value(row, col).ok_or_else(|| {
             PollingPgCdcError::Protocol(format!("pg_type row {row} has no column {col}"))
@@ -366,10 +376,68 @@ fn read_type_registry(
     };
     let mut registry = crate::wal::PgTypeRegistry::builtin();
     for row in 0..rows.ntuples() {
-        registry =
-            registry.with_user_type_row(&column(row, 0)?, &column(row, 1)?, &column(row, 2)?)?;
+        registry = registry.with_type_row(
+            &column(row, 0)?,
+            &column(row, 1)?,
+            &column(row, 2)?,
+            &column(row, 3)?,
+            &column(row, 4)?,
+            &column(row, 5)?,
+        )?;
     }
     Ok(registry)
+}
+
+/// Refuse the first column `publication` publishes whose type nests a type
+/// without a send function, which the server cannot write in binary.
+fn refuse_unsendable_columns(
+    conn: &mut PgReplicationConnection,
+    registry: &crate::wal::PgTypeRegistry,
+    publication: &str,
+) -> Result<(), PollingPgCdcError> {
+    let version = conn.exec("SELECT current_setting('server_version_num')")?;
+    let version = version
+        .get_value(0, 0)
+        .and_then(|text| text.parse::<u32>().ok())
+        .ok_or_else(|| PollingPgCdcError::Protocol("unreadable server_version_num".into()))?;
+    // `attnames` exists from PostgreSQL 15 and names generated columns that
+    // pgoutput sends only from 18.
+    let published = if version >= 180_000 {
+        "a.attname = ANY (pt.attnames)"
+    } else if version >= 150_000 {
+        "a.attname = ANY (pt.attnames) AND a.attgenerated = ''"
+    } else {
+        "a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''"
+    };
+    let rows = conn.exec(&format!(
+        "SELECT pt.schemaname, pt.tablename, a.attname, a.atttypid \
+         FROM pg_catalog.pg_publication_tables pt \
+         JOIN pg_catalog.pg_attribute a \
+         ON a.attrelid = format('%I.%I', pt.schemaname, pt.tablename)::regclass \
+         AND {published} \
+         WHERE pt.pubname = {}",
+        sql_string_literal(publication),
+    ))?;
+    let column = |row, col| {
+        rows.get_value(row, col).ok_or_else(|| {
+            PollingPgCdcError::Protocol(format!("published column row {row} has no column {col}"))
+        })
+    };
+    for row in 0..rows.ntuples() {
+        let type_oid = column(row, 3)?;
+        let type_oid = type_oid.parse::<u32>().map_err(|_| {
+            PollingPgCdcError::Protocol(format!("published column type `{type_oid}` is no OID"))
+        })?;
+        if let Some(refusal) = registry.unsendable_column(
+            &column(row, 0)?,
+            &column(row, 1)?,
+            &column(row, 2)?,
+            type_oid,
+        ) {
+            return Err(refusal.into());
+        }
+    }
+    Ok(())
 }
 
 impl crate::CdcSource for PollingPgCdcSource {
