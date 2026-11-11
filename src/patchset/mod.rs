@@ -129,6 +129,19 @@ fn check_refusals<'n, R: RefusalView>(
     Ok(())
 }
 
+/// Await the apply only when the refusal check succeeded.
+#[cfg(any(
+    feature = "apply-patchset-postgres-async",
+    feature = "apply-patchset-mysql-async"
+))]
+async fn apply_after_refusal_check(
+    refused: Result<(), ApplyError>,
+    apply: impl core::future::Future<Output = diesel::result::QueryResult<usize>>,
+) -> Result<usize, ApplyError> {
+    refused?;
+    apply.await.map_err(ApplyError::from)
+}
+
 // Engine entry point (generic over any diesel Backend)
 
 impl<E, I, DB> crate::SubscriptionEngine<E, I, DB>
@@ -346,10 +359,7 @@ where
             .iter()
             .map(|op| op.with_adapter::<DBend, _>(adapter))
             .apply_transactional_async(conn);
-        async move {
-            refused?;
-            apply.await.map_err(ApplyError::from)
-        }
+        apply_after_refusal_check(refused, apply)
     }
 
     /// Async peer of [`Self::apply_changeset`], driven by
@@ -401,10 +411,7 @@ where
             .iter()
             .map(|op| op.with_adapter::<DBend, _>(adapter))
             .apply_transactional_async(conn);
-        async move {
-            refused?;
-            apply.await.map_err(ApplyError::from)
-        }
+        apply_after_refusal_check(refused, apply)
     }
 
     /// Async peer of [`Self::apply_diffset_bytes`], driven by
