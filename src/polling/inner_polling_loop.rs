@@ -37,6 +37,7 @@ pub(super) fn polling_loop(
     mut conn: PgReplicationConnection,
     slot_name: String,
     publication_name: String,
+    binary: Option<crate::wal::PgTypeRegistry>,
     poll_interval: Duration,
     event_tx: tokio::sync::mpsc::Sender<Result<PgSourceItem, PollingPgCdcError>>,
     ack_rx: std::sync::mpsc::Receiver<PgCommitPosition>,
@@ -51,7 +52,13 @@ pub(super) fn polling_loop(
     let _exit_guard = crate::wal::ExitFlagGuard(task_exited);
 
     let mut decoder = PgOutputDecoder::with_protocol_version(1);
-    let mut order = PgOutputOrder::new();
+    // The consuming `get` discards its output, so only `peek` asks for the format.
+    let format = if binary.is_some() {
+        "'binary', 'on', "
+    } else {
+        ""
+    };
+    let mut order = binary.map_or_else(PgOutputOrder::new, PgOutputOrder::binary);
     let mut items: Vec<PgRowItem> = Vec::new();
     let mut releases = ReleaseQueue::new();
     // A peek re-reads every unacknowledged transaction at the same positions.
@@ -101,7 +108,7 @@ pub(super) fn polling_loop(
         let query = format!(
             "SELECT lsn::text, encode(data, 'hex') FROM pg_logical_slot_peek_binary_changes(\
                 {slot}, NULL, NULL, \
-                'proto_version', '1', \
+                'proto_version', '1', {format}\
                 'publication_names', {publication}\
             )"
         );

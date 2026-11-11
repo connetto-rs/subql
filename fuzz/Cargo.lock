@@ -368,9 +368,11 @@ source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece82381
 dependencies = [
  "bigdecimal",
  "bitflags",
+ "byteorder",
  "chrono",
  "diesel_derives",
  "downcast-rs",
+ "itoa",
  "libsqlite3-sys",
  "num-bigint",
  "num-integer",
@@ -379,6 +381,7 @@ dependencies = [
  "sqlite-wasm-rs",
  "sqlstate",
  "time",
+ "uuid",
 ]
 
 [[package]]
@@ -1677,7 +1680,9 @@ version = "1.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
 dependencies = [
+ "js-sys",
  "serde_core",
+ "wasm-bindgen",
 ]
 
 [[package]]

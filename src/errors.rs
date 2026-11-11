@@ -316,6 +316,25 @@ pub enum ValueError {
         /// The custom type that refused it, as it prints.
         custom: alloc::string::String,
     },
+    /// A pgoutput cell whose format byte disagrees with the format its
+    /// column's type fixes for the stream.
+    #[error("column {column} carried a cell in the format its type does not send, {expected:?}")]
+    CellFormat {
+        /// Column ordinal whose cell disagreed.
+        column: crate::ColumnId,
+        /// The format the column's type sends on this stream.
+        expected: crate::wal::PgCellFormat,
+    },
+    /// A binary pgoutput stream carried a column whose format the stream
+    /// does not know, since its type is missing from the stream's type
+    /// registry or its relation was never announced.
+    #[error("column {column} has no known format on this stream (type OID {type_oid:?})")]
+    UnresolvedFormat {
+        /// Column ordinal that could not be read.
+        column: crate::ColumnId,
+        /// The column's type, when its relation named one.
+        type_oid: Option<u32>,
+    },
 }
 
 /// Errors during event dispatch

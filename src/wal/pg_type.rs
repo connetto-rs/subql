@@ -73,6 +73,35 @@ pub(super) fn text_to_pg_value_by_kind(text: &str, kind: DeclaredType) -> Value<
     }
 }
 
+/// Read a binary pgoutput cell sent by type `reader_oid` as the type the
+/// column declares, or [`Value::Missing`] when the bytes are not a value of
+/// that type, matching what [`text_to_pg_value_by_kind`] answers for text.
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+pub(super) fn binary_to_pg_value_by_kind(
+    bytes: &[u8],
+    reader_oid: u32,
+    kind: DeclaredType,
+) -> Value<Postgres> {
+    use crate::diesel_decode::{pg_canonical, SpellCanonical};
+
+    let Ok(canonical) = pg_canonical(Some(bytes), reader_oid) else {
+        return Value::Missing;
+    };
+    let value = match (Postgres::value_from_canonical(canonical), kind) {
+        (Value::Float(double), DeclaredType::Float(FloatWidth::Single)) => {
+            Value::Float(at_float4(double))
+        }
+        (value, _) => value,
+    };
+    let read_as_declared =
+        value.scalar_kind() == Some(crate::backend::ValueKind::Builtin(kind.family()));
+    if read_as_declared {
+        value
+    } else {
+        Value::Missing
+    }
+}
+
 fn decode_hex_bytes(hex: &str) -> Option<alloc::vec::Vec<u8>> {
     if !hex.is_ascii() || !hex.len().is_multiple_of(2) {
         return None;

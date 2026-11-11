@@ -86,11 +86,14 @@ pub struct PollingPgCdcConfig {
     pub poll_interval: Duration,
     /// Bounded back-pressure ceiling for the internal event channel.
     pub buffer_capacity: usize,
+    /// Ask pgoutput for `binary on`, read once when the source connects.
+    /// Default off.
+    pub binary: bool,
 }
 
 impl PollingPgCdcConfig {
     /// Build a config with sensible defaults: `poll_interval = 100 ms`,
-    /// `buffer_capacity = 1024`.
+    /// `buffer_capacity = 1024`, text format.
     #[must_use]
     pub fn new(
         url: impl Into<String>,
@@ -103,6 +106,7 @@ impl PollingPgCdcConfig {
             publication_name: publication_name.into(),
             poll_interval: Duration::from_millis(100),
             buffer_capacity: 1024,
+            binary: false,
         }
     }
 
@@ -117,6 +121,13 @@ impl PollingPgCdcConfig {
     #[must_use]
     pub const fn buffer_capacity(mut self, buffer_capacity: usize) -> Self {
         self.buffer_capacity = buffer_capacity;
+        self
+    }
+
+    /// Ask pgoutput for its binary format (default text).
+    #[must_use]
+    pub const fn binary(mut self, binary: bool) -> Self {
+        self.binary = binary;
         self
     }
 }
@@ -140,6 +151,9 @@ pub enum PollingPgCdcError {
     /// rows could not be placed in commit order.
     #[error("decoded changes out of order: {0}")]
     TransactionOrder(#[from] TransactionOrderError),
+    /// A `pg_type` row read for a binary stream could not be read.
+    #[error("type registry: {0}")]
+    TypeRegistry(#[from] crate::wal::PgTypeRegistryError),
 }
 
 /// Polling-based Postgres CDC source.
@@ -183,6 +197,7 @@ impl PollingPgCdcSource {
     ) -> Result<Self, PollingPgCdcError> {
         let slot_name_for_check = config.slot_name.clone();
         let url = config.url.clone();
+        let binary = config.binary;
         // Connect and slot-check are both synchronous on `pg_walstream`'s
         // libpq surface and would block the calling tokio worker, so
         // bounce both through the blocking pool in a single hop.
@@ -193,19 +208,25 @@ impl PollingPgCdcSource {
             "SELECT 1 FROM pg_replication_slots WHERE slot_name = {}",
             sql_string_literal(&slot_name_for_check),
         );
-        let conn = tokio::task::spawn_blocking(move || -> Result<_, PollingPgCdcError> {
-            let mut conn = PgReplicationConnection::connect(&url)?;
-            let slot_check = conn.exec(&slot_check_sql)?;
-            if slot_check.ntuples() == 0 {
-                return Err(PollingPgCdcError::Protocol(format!(
+        let (conn, registry) =
+            tokio::task::spawn_blocking(move || -> Result<_, PollingPgCdcError> {
+                let mut conn = PgReplicationConnection::connect(&url)?;
+                let slot_check = conn.exec(&slot_check_sql)?;
+                if slot_check.ntuples() == 0 {
+                    return Err(PollingPgCdcError::Protocol(format!(
                     "replication slot `{slot_name_for_check}` does not exist; the polling source \
                      will not auto-create slots"
                 )));
-            }
-            Ok(conn)
-        })
-        .await
-        .map_err(|e| PollingPgCdcError::Protocol(format!("connection task panicked: {e}")))??;
+                }
+                let registry = if binary {
+                    Some(read_type_registry(&mut conn)?)
+                } else {
+                    None
+                };
+                Ok((conn, registry))
+            })
+            .await
+            .map_err(|e| PollingPgCdcError::Protocol(format!("connection task panicked: {e}")))??;
 
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(config.buffer_capacity);
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
@@ -233,6 +254,7 @@ impl PollingPgCdcSource {
                 conn,
                 task_slot,
                 task_publication,
+                registry,
                 task_interval,
                 event_tx,
                 ack_rx,
@@ -330,6 +352,24 @@ impl Drop for PollingPgCdcSource {
         self.shutdown.store(true, Ordering::Relaxed);
         self.task.abort();
     }
+}
+
+/// Every type at or above the unpinned OIDs, read from `pg_type`.
+fn read_type_registry(
+    conn: &mut PgReplicationConnection,
+) -> Result<crate::wal::PgTypeRegistry, PollingPgCdcError> {
+    let rows = conn.exec(crate::wal::PgTypeRegistry::USER_TYPES_SQL)?;
+    let column = |row, col| {
+        rows.get_value(row, col).ok_or_else(|| {
+            PollingPgCdcError::Protocol(format!("pg_type row {row} has no column {col}"))
+        })
+    };
+    let mut registry = crate::wal::PgTypeRegistry::builtin();
+    for row in 0..rows.ntuples() {
+        registry =
+            registry.with_user_type_row(&column(row, 0)?, &column(row, 1)?, &column(row, 2)?)?;
+    }
+    Ok(registry)
 }
 
 impl crate::CdcSource for PollingPgCdcSource {

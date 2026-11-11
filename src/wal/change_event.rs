@@ -22,6 +22,11 @@ use pg_walstream::RelationColumn;
 use pg_walstream::{ChangeEvent, ColumnValue, EventType, ReplicaIdentity, RowData};
 use sql_traits::prelude::DatabaseLike;
 
+use super::pg_format::PgCellFormat;
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+use super::pg_format::{ColumnPlan, PgRelationFormat};
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+use super::pg_type::binary_to_pg_value_by_kind;
 use super::pg_type::text_to_pg_value_by_kind;
 use super::resolve_table;
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
@@ -45,16 +50,63 @@ use crate::{PgCommitPosition, PgLsn};
 pub struct PgChangeEvent {
     change: ChangeEvent,
     position: PgCommitPosition,
+    /// The column plans of a binary stream's relation, `None` on a text stream.
+    #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+    format: Option<Arc<PgRelationFormat>>,
 }
 
 impl PgChangeEvent {
-    /// The row change `change` at `position`.
+    /// The row change `change` at `position`, from a text-format stream.
     ///
     /// `change` is an Insert, Update, Delete, or single-table Truncate. Any
     /// other variant is not a row event, and reading its kind panics.
     #[must_use]
     pub const fn new(change: ChangeEvent, position: PgCommitPosition) -> Self {
-        Self { change, position }
+        Self {
+            change,
+            position,
+            #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+            format: None,
+        }
+    }
+
+    /// The row change `change` at `position`, read by `format`'s column plans.
+    #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+    const fn on_binary_stream(
+        change: ChangeEvent,
+        position: PgCommitPosition,
+        format: Arc<PgRelationFormat>,
+    ) -> Self {
+        Self {
+            change,
+            position,
+            format: Some(format),
+        }
+    }
+
+    /// The plan of column `name`, or `None` on a text stream.
+    #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+    fn plan(&self, name: &str) -> Option<ColumnPlan> {
+        self.format.as_ref().map(|format| format.column(name))
+    }
+
+    /// How column `name` is sent on this event's stream: `None` for text,
+    /// or the type its binary cells read as.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::ValueError::UnresolvedFormat`] when the stream does not
+    /// know the column's format.
+    #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+    fn binary_reader(&self, col: ColumnId, name: &str) -> Result<Option<u32>, crate::ValueError> {
+        match self.plan(name) {
+            None | Some(ColumnPlan::Text) => Ok(None),
+            Some(ColumnPlan::Binary { reader_oid }) => Ok(Some(reader_oid)),
+            Some(ColumnPlan::Unresolved { type_oid }) => Err(crate::ValueError::UnresolvedFormat {
+                column: col,
+                type_oid,
+            }),
+        }
     }
 
     /// Where the change falls in commit order.
@@ -310,14 +362,59 @@ impl ReleaseQueue {
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 pub struct PgOutputOrder {
     order: TransactionOrder<(PgLsn, PgXid)>,
+    /// The column plans of a binary stream, `None` on a text stream.
+    binary: Option<BinaryStream>,
+}
+
+/// What a binary stream knows about how each announced relation is sent.
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+struct BinaryStream {
+    registry: super::pg_format::PgTypeRegistry,
+    relations: alloc::collections::BTreeMap<u32, Arc<PgRelationFormat>>,
+    unannounced: Arc<PgRelationFormat>,
 }
 
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 impl PgOutputOrder {
+    /// The order of a text-format stream.
     pub const fn new() -> Self {
         Self {
             order: TransactionOrder::new(),
+            binary: None,
         }
+    }
+
+    /// The order of a stream that asked for `binary on`, whose types
+    /// `registry` describes.
+    #[cfg_attr(
+        not(any(test, feature = "pg-streaming")),
+        expect(dead_code, reason = "only the streaming sources start a binary stream")
+    )]
+    pub fn binary(registry: super::pg_format::PgTypeRegistry) -> Self {
+        Self {
+            order: TransactionOrder::new(),
+            binary: Some(BinaryStream {
+                registry,
+                relations: alloc::collections::BTreeMap::new(),
+                unannounced: Arc::new(PgRelationFormat::unannounced()),
+            }),
+        }
+    }
+
+    /// `change` at `position`, carrying its relation's column plans on a
+    /// binary stream.
+    fn row(&self, change: ChangeEvent, position: PgCommitPosition) -> PgChangeEvent {
+        let Some(stream) = &self.binary else {
+            return PgChangeEvent::new(change, position);
+        };
+        let relation = match &change.event_type {
+            EventType::Insert { relation_oid, .. }
+            | EventType::Update { relation_oid, .. }
+            | EventType::Delete { relation_oid, .. } => stream.relations.get(relation_oid),
+            _ => None,
+        };
+        let format = Arc::clone(relation.unwrap_or(&stream.unannounced));
+        PgChangeEvent::on_binary_stream(change, position, format)
     }
 
     /// Place `change`, appending the items it carries to `items`, and
@@ -334,10 +431,9 @@ impl PgOutputOrder {
         match &change.event_type {
             EventType::Insert { .. } | EventType::Update { .. } | EventType::Delete { .. } => {
                 let ((commit, xid), ordinal) = self.order.next_row()?;
-                items.extend([PgRowItem::Event(PgChangeEvent::new(
-                    change,
-                    PgCommitPosition::new(commit, xid, ordinal),
-                ))]);
+                items.extend([PgRowItem::Event(
+                    self.row(change, PgCommitPosition::new(commit, xid, ordinal)),
+                )]);
             }
             EventType::Truncate {
                 tables,
@@ -368,14 +464,20 @@ impl PgOutputOrder {
                 relation_name,
                 replica_identity,
                 columns,
-            } => items.extend([PgRowItem::Relation(relation_item(
-                PgLsn(change.lsn.value()),
-                *relation_id,
-                namespace,
-                relation_name,
-                *replica_identity,
-                columns,
-            ))]),
+            } => {
+                if let Some(stream) = &mut self.binary {
+                    let format = PgRelationFormat::plan(&stream.registry, columns);
+                    stream.relations.insert(*relation_id, Arc::new(format));
+                }
+                items.extend([PgRowItem::Relation(relation_item(
+                    PgLsn(change.lsn.value()),
+                    *relation_id,
+                    namespace,
+                    relation_name,
+                    *replica_identity,
+                    columns,
+                ))]);
+            }
             EventType::Begin {
                 transaction_id,
                 final_lsn,
@@ -405,6 +507,7 @@ impl PgOutputOrder {
                     )
                 }));
             }
+
             EventType::Type { .. } | EventType::Origin { .. } | EventType::Message { .. } => {}
             EventType::StreamStart { .. }
             | EventType::StreamStop
@@ -615,14 +718,19 @@ impl WireEvent for PgChangeEvent {
             return Ok(Value::Missing);
         };
         match image.get(&name) {
-            // A column the wire did not carry, and binary-format cells
-            // (which do not appear on subql's text-mode proto v1 streams),
-            // are both Missing here: they escalate to re-execution rather
-            // than surfacing as a decode error.
-            None | Some(ColumnValue::Binary(_)) => Ok(Value::Missing),
+            // The wire did not carry the column, so the cell escalates to
+            // re-execution.
+            None => Ok(Value::Missing),
             Some(ColumnValue::Null) if is_padding(&self.change, row, &name) => Ok(Value::Missing),
             Some(ColumnValue::Null) => Ok(Value::Null),
             Some(ColumnValue::Text(bytes)) => {
+                #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+                if self.binary_reader(col, &name)?.is_some() {
+                    return Err(crate::ValueError::CellFormat {
+                        column: col,
+                        expected: PgCellFormat::Binary,
+                    });
+                }
                 catalog_helpers::column_scalar_kind::<Postgres, DB>(db, table_id, col).map_or(
                     Ok(Value::Missing),
                     |kind| {
@@ -646,6 +754,23 @@ impl WireEvent for PgChangeEvent {
                         })
                     },
                 )
+            }
+            Some(ColumnValue::Binary(bytes)) => {
+                #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+                if let Some(reader_oid) = self.binary_reader(col, &name)? {
+                    return catalog_helpers::column_scalar_kind::<Postgres, DB>(db, table_id, col)
+                        .map_or(Ok(Value::Missing), |kind| {
+                            crate::backend::decode_cell(col, kind, |builtin| {
+                                binary_to_pg_value_by_kind(bytes, reader_oid, builtin)
+                            })
+                        });
+                }
+                #[cfg(not(any(feature = "pg-streaming", feature = "pg-sqlite-emu")))]
+                let _ = bytes;
+                Err(crate::ValueError::CellFormat {
+                    column: col,
+                    expected: PgCellFormat::Text,
+                })
             }
         }
     }
@@ -1425,3 +1550,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, any(feature = "pg-streaming", feature = "pg-sqlite-emu")))]
+#[allow(clippy::unwrap_used)]
+mod binary_tests;
