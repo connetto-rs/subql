@@ -26,11 +26,13 @@ pub const fn image_of<'a, R: ?Sized>(
     version: RowVersion,
 ) -> Option<&'a R> {
     match (write, version) {
-        (RowWrite::Insert { new } | RowWrite::Update { new, .. }, RowVersion::Resulting) => {
+        (RowWrite::Insert { new, .. } | RowWrite::Update { new, .. }, RowVersion::Resulting) => {
             Some(new)
         }
         (
-            RowWrite::Delete { old } | RowWrite::UpdateUsing { old } | RowWrite::Update { old, .. },
+            RowWrite::Delete { old, .. }
+            | RowWrite::UpdateUsing { old, .. }
+            | RowWrite::Update { old, .. },
             RowVersion::Existing,
         ) => Some(old),
         // `RowVersion` is `#[non_exhaustive]`, and a version this does not know
@@ -45,9 +47,9 @@ where
     R: RowView + ?Sized,
 {
     match write {
-        RowWrite::Insert { new } => new.table_id(),
-        RowWrite::Update { old, .. } | RowWrite::UpdateUsing { old } | RowWrite::Delete { old } => {
-            old.table_id()
-        }
+        RowWrite::Insert { new, .. } => new.table_id(),
+        RowWrite::Update { old, .. }
+        | RowWrite::UpdateUsing { old, .. }
+        | RowWrite::Delete { old, .. } => old.table_id(),
     }
 }

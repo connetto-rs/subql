@@ -82,11 +82,11 @@ use super::{RowView, RowWrite, Verdict};
 ///         // A replacement is granted only if this watcher owns the row both
 ///         // before and after, so it cannot write itself in as the new owner.
 ///         let allowed = match write {
-///             RowWrite::Insert { new } => owner_of(new) == Some(*watcher),
-///             RowWrite::Update { old, new } => {
+///             RowWrite::Insert { new, .. } => owner_of(new) == Some(*watcher),
+///             RowWrite::Update { old, new, .. } => {
 ///                 owner_of(old) == Some(*watcher) && owner_of(new) == Some(*watcher)
 ///             }
-///             RowWrite::UpdateUsing { old } | RowWrite::Delete { old } => {
+///             RowWrite::UpdateUsing { old, .. } | RowWrite::Delete { old, .. } => {
 ///                 owner_of(old) == Some(*watcher)
 ///             }
 ///             // A verb this does not know refuses rather than guessing.
@@ -116,15 +116,27 @@ use super::{RowView, RowWrite, Verdict};
 /// runtime.block_on(OwnerPolicy.may_see(&row, &watchers, &mut verdicts))?;
 /// assert_eq!(verdicts, [Verdict::Allow, Verdict::Deny, Verdict::Allow]);
 ///
-/// let write = runtime.block_on(OwnerPolicy.may_write(RowWrite::Delete { old: &row }, &9))?;
+/// // The `WHERE` clause reads the key column alone.
+/// let write = runtime.block_on(
+///     OwnerPolicy.may_write(RowWrite::Delete { old: &row, read: &[0] }, &9),
+/// )?;
 /// assert_eq!(write, Verdict::Deny);
 ///
 /// // Watcher 7 owns row 4 and may delete it, and may not hand it to 9.
 /// let handover =
 ///     TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::Int(9)]).with_pk_columns([0u16]);
 /// let next = EventRow::current(&handover, &db).expect("an insert carries a post-image");
+/// // `SET owner = 9 WHERE id = 4` assigns the owner column and reads the key.
 /// let rewrite = runtime.block_on(
-///     OwnerPolicy.may_write(RowWrite::Update { old: &row, new: &next }, &7),
+///     OwnerPolicy.may_write(
+///         RowWrite::Update {
+///             old: &row,
+///             new: &next,
+///             assigned: &[1],
+///             read: &[0],
+///         },
+///         &7,
+///     ),
 /// )?;
 /// assert_eq!(rewrite, Verdict::Deny, "7 owns it now and would not after");
 /// # Ok::<(), Box<dyn std::error::Error>>(())

@@ -23,10 +23,12 @@ use sql_traits::prelude::DatabaseLike;
 
 use crate::backend::Backend;
 use crate::visibility::policy::{image_of, statement_of, table_of, RequestValues, Subject};
-use crate::TableId;
+use crate::{catalog_helpers, ColumnId, TableId};
 use core::ops::Not;
 
-use rls2fga_types::{ActionAnswer, ActionStatement, RowVersion};
+use rls2fga_types::{
+    ActionAnswer, ActionJudgement, ActionStatement, ColumnAnswer, ColumnCommand, RowVersion,
+};
 
 use crate::visibility::records::render_text;
 use crate::visibility::shapes::{RequiredParameter, Shapes, SharedShapes};
@@ -343,11 +345,36 @@ fn context_for<W: Subject + ?Sized>(
     }
 }
 
-/// One question, and which watcher it belongs to.
+/// One question, which watcher it belongs to, and which of that watcher's
+/// requirements it answers.
 struct Question {
     /// Where the answer goes.
     place: usize,
+    /// Which requirement of the watcher this answers. A watcher is granted once
+    /// every requirement it carries has a granting answer, and a name granting
+    /// one requirement satisfies that one alone.
+    requirement: usize,
     item: BatchCheckItem,
+}
+
+/// What one question asks, apart from who asks it.
+struct Target<'q> {
+    /// The object asked about.
+    object: &'q str,
+    /// The relation asked.
+    relation: &'q str,
+    /// The facts the question carries beside the acting role's.
+    contextual: &'q [TupleKey],
+}
+
+/// What a read of one table asks, where the model names something to ask.
+struct ReadPlan<'s> {
+    /// The relation judging the row as it is, or [`None`] where nothing
+    /// restricts the rows.
+    rows: Option<&'s RelationName>,
+    /// The column relations asked beside the rows, where some acting role
+    /// reads some columns only.
+    columns: Option<&'s ColumnAnswer>,
 }
 
 /// What answering a statement takes, where the model states a refusal instead of
@@ -419,13 +446,17 @@ where
     B: Backend,
 {
     /// Ask `questions` at `consistency`, in calls of at most the configured cap,
-    /// writing each answer where its question says.
+    /// granting a watcher once every requirement it carries has a granting answer.
     async fn ask(
         &self,
         questions: Vec<Question>,
         verdicts: &mut [Verdict],
         consistency: ConsistencyPreference,
     ) -> Result<(), OpenFgaError> {
+        let mut granted: BTreeMap<(usize, usize), bool> = questions
+            .iter()
+            .map(|question| ((question.place, question.requirement), false))
+            .collect();
         for chunk in questions.chunks(self.max_checks_per_batch) {
             let request = batch_request(&self.store_id, &self.model.id, chunk, consistency);
             let answers = self.batch_check(request).await?;
@@ -436,8 +467,17 @@ where
                     unanswered += 1;
                     continue;
                 };
-                if *result {
-                    if let Some(verdict) = verdicts.get_mut(question.place) {
+                if !*result {
+                    continue;
+                }
+                let place = question.place;
+                granted.insert((place, question.requirement), true);
+                // Written at once, so a grant reached before a later call fails stands.
+                if granted
+                    .range((place, 0)..=(place, usize::MAX))
+                    .all(|(_, held)| *held)
+                {
+                    if let Some(verdict) = verdicts.get_mut(place) {
                         *verdict = Verdict::Allow;
                     }
                 }
@@ -505,7 +545,8 @@ where
         }
     }
 
-    /// Every question one relation on one row raises for `watchers`.
+    /// Every question one relation on one row raises for `watchers`, each the
+    /// watcher's only requirement.
     fn questions<R>(
         &self,
         row: &R,
@@ -517,49 +558,177 @@ where
         R: RowView + ?Sized,
     {
         let object = self.object_of(row)?;
+        let target = Target {
+            object: &object,
+            relation,
+            contextual,
+        };
         let mut values = RequestValues::new();
         let mut questions = Vec::new();
         for (place, watcher) in watchers.iter().enumerate() {
             let context = context_for(self.shapes.required_parameters(), watcher, &mut values);
-            // The role the request acts as travels with each question, stated only
-            // where the model admits it.
-            let role = watcher.acting_role();
-            // A watcher may authenticate as several names, and any of them
-            // granting grants the watcher, so each is its own question.
-            for (nth, name) in watcher.subjects().enumerate() {
-                let user = name.into_owned();
-                let mut tuple_keys = Vec::new();
-                if !contextual.is_empty() {
-                    tuple_keys.extend_from_slice(contextual);
-                }
-                if let Some(role) = role {
-                    if let Some(object) = self.shapes.acting_object(role) {
-                        // The fact names the role's usage object, and the model
-                        // states which subject may stand for it.
-                        if self.model.admits(object, &user) {
-                            tuple_keys.push(TupleKey {
-                                user: user.clone(),
-                                relation: ROLE_USAGE.to_string(),
-                                object: object.to_string(),
-                                condition: None,
-                            });
-                        }
+            self.push_questions(
+                &mut questions,
+                (place, 0),
+                watcher,
+                &target,
+                context.as_ref(),
+            );
+        }
+        Ok(questions)
+    }
+
+    /// The questions asking `target` for `watcher`, answering the requirement
+    /// `key` names, one per name the watcher is known by.
+    fn push_questions(
+        &self,
+        out: &mut Vec<Question>,
+        (place, requirement): (usize, usize),
+        watcher: &W,
+        target: &Target<'_>,
+        context: Option<&Struct>,
+    ) {
+        // The role the request acts as travels with each question, stated only
+        // where the model admits it.
+        let role = watcher.acting_role();
+        // A watcher may authenticate as several names, and any of them
+        // granting grants the watcher, so each is its own question.
+        for (nth, name) in watcher.subjects().enumerate() {
+            let user = name.into_owned();
+            let mut tuple_keys = Vec::new();
+            if !target.contextual.is_empty() {
+                tuple_keys.extend_from_slice(target.contextual);
+            }
+            if let Some(role) = role {
+                if let Some(object) = self.shapes.acting_object(role) {
+                    // The fact names the role's usage object, and the model
+                    // states which subject may stand for it.
+                    if self.model.admits(object, &user) {
+                        tuple_keys.push(TupleKey {
+                            user: user.clone(),
+                            relation: ROLE_USAGE.to_string(),
+                            object: object.to_string(),
+                            condition: None,
+                        });
                     }
                 }
-                questions.push(Question {
-                    place,
-                    item: BatchCheckItem {
-                        tuple_key: Some(CheckRequestTupleKey {
-                            user,
-                            relation: relation.to_string(),
-                            object: object.clone(),
-                        }),
-                        contextual_tuples: (!tuple_keys.is_empty())
-                            .then_some(ContextualTupleKeys { tuple_keys }),
-                        context: context.clone(),
-                        correlation_id: alloc::format!("w{place}n{nth}"),
-                    },
-                });
+            }
+            out.push(Question {
+                place,
+                requirement,
+                item: BatchCheckItem {
+                    tuple_key: Some(CheckRequestTupleKey {
+                        user,
+                        relation: target.relation.to_string(),
+                        object: target.object.to_string(),
+                    }),
+                    contextual_tuples: (!tuple_keys.is_empty())
+                        .then_some(ContextualTupleKeys { tuple_keys }),
+                    context: context.cloned(),
+                    correlation_id: alloc::format!("w{place}r{requirement}n{nth}"),
+                },
+            });
+        }
+    }
+
+    /// The relations `answer` asks on its gate, each once, for a statement
+    /// touching `touched(command)` of `table` with each command it carries, or
+    /// [`None`] where a command has no column set or a column is not in `table`.
+    fn gate_relations<'s, 'c>(
+        &'s self,
+        table: TableId,
+        answer: &'s ColumnAnswer,
+        touched: impl Fn(ColumnCommand) -> Option<&'c [ColumnId]>,
+    ) -> Option<BTreeSet<&'s RelationName>> {
+        let mut relations = BTreeSet::new();
+        for command in &answer.commands {
+            relations.extend(self.shapes.column_relations(
+                table,
+                command,
+                touched(command.command)?,
+            )?);
+        }
+        Some(relations)
+    }
+
+    /// Every question a read of `row` raises for `watchers` under `plan`.
+    fn read_questions<R>(
+        &self,
+        row: &R,
+        plan: &ReadPlan<'_>,
+        watchers: &[W],
+    ) -> Result<Vec<Question>, OpenFgaError>
+    where
+        R: RowView + ?Sized,
+    {
+        let unanswered = || OpenFgaError::StatementNotAnswered {
+            statement: ActionStatement::Select,
+        };
+        let table = row.table_id();
+        let object = plan.rows.map(|_| self.object_of(row)).transpose()?;
+        // What a watcher naming no columns reads, built once per row.
+        let every: Vec<ColumnId> = match plan.columns {
+            Some(_) => {
+                let arity = catalog_helpers::table_arity(self.shapes.catalog(), table)
+                    .map_err(|_| unanswered())?;
+                (0..arity)
+                    .map(ColumnId::try_from)
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| unanswered())?
+            }
+            None => Vec::new(),
+        };
+        let mut values = RequestValues::new();
+        let mut questions = Vec::new();
+        for (place, watcher) in watchers.iter().enumerate() {
+            let context = context_for(self.shapes.required_parameters(), watcher, &mut values);
+            let mut requirement = 0;
+            if let (Some(relation), Some(object)) = (plan.rows, object.as_deref()) {
+                let target = Target {
+                    object,
+                    relation: relation.as_str(),
+                    contextual: &[],
+                };
+                self.push_questions(
+                    &mut questions,
+                    (place, 0),
+                    watcher,
+                    &target,
+                    context.as_ref(),
+                );
+                requirement += 1;
+            }
+            let Some(columns) = plan.columns else {
+                continue;
+            };
+            let read = watcher.columns_read(table).unwrap_or(&every);
+            let relations = if read.is_empty() {
+                // Any column's grant admits a read of none, which no conjunction states.
+                columns
+                    .commands
+                    .iter()
+                    .map(|command| &command.on_table)
+                    .collect()
+            } else {
+                self.gate_relations(table, columns, |command| {
+                    (command == ColumnCommand::Select).then_some(read)
+                })
+                .ok_or_else(unanswered)?
+            };
+            for relation in relations {
+                let target = Target {
+                    object: &columns.gate,
+                    relation: relation.as_str(),
+                    contextual: &[],
+                };
+                self.push_questions(
+                    &mut questions,
+                    (place, requirement),
+                    watcher,
+                    &target,
+                    context.as_ref(),
+                );
+                requirement += 1;
             }
         }
         Ok(questions)
@@ -572,7 +741,8 @@ where
     /// A replacement is two rules across two versions. The one choosing which
     /// rows may be touched reads the stored row, and the one admitting the
     /// result reads a row the store has never seen, so that group carries the
-    /// facts the new row implies.
+    /// facts the new row implies. Where some acting role holds a command on some
+    /// columns only, the columns the write touches are one more group.
     fn write_plan<R>(
         &self,
         write: RowWrite<'_, R>,
@@ -587,24 +757,29 @@ where
             .shapes
             .answer(table, statement)
             .ok_or(OpenFgaError::StatementNotAnswered { statement })?;
-        let judges = match answer {
+        let unanswered = || OpenFgaError::StatementNotAnswered { statement };
+        let (judges, columns): (&[ActionJudgement], _) = match answer {
             // The model grants every acting role without a row or request
             // condition, so there is nothing to ask and no group has to grant.
             ActionAnswer::Unrestricted => return Ok(Asked::Ask(Vec::new())),
             // The model grants nobody, so the write is refused without asking.
             ActionAnswer::Denied => return Ok(Asked::Refused),
-            ActionAnswer::Judged(judges) if judges.is_empty().not() => judges,
+            ActionAnswer::Judged(judges) if judges.is_empty().not() => (judges, None),
+            ActionAnswer::ByColumn(columns) => match &*columns.rows {
+                ActionAnswer::Unrestricted => (&[], Some(columns)),
+                ActionAnswer::Judged(judges) if judges.is_empty().not() => (judges, Some(columns)),
+                _ => return Err(unanswered()),
+            },
             // One relation fusing both versions cannot be asked against either
             // image: judging the check clause on the row as it is grants a
             // change that clause was written to refuse.
-            _ => return Err(OpenFgaError::StatementNotAnswered { statement }),
+            _ => return Err(unanswered()),
         };
 
         let only = core::slice::from_ref(watcher);
         let mut plan = Vec::with_capacity(judges.len());
         for judge in judges {
-            let row = image_of(&write, judge.version)
-                .ok_or(OpenFgaError::StatementNotAnswered { statement })?;
+            let row = image_of(&write, judge.version).ok_or_else(unanswered)?;
             // A row the store has never seen carries the facts it implies, so the
             // rule admitting it has something to read. The stored row needs none.
             let contextual = match judge.version {
@@ -613,20 +788,60 @@ where
             };
             plan.push(self.questions(row, judge.relation.as_str(), only, &contextual)?);
         }
+        if let Some(columns) = columns {
+            let relations = self
+                .gate_relations(table, columns, |command| {
+                    Some(match command {
+                        ColumnCommand::Select => write.read(),
+                        ColumnCommand::Insert | ColumnCommand::Update => write.assigned(),
+                    })
+                })
+                .ok_or_else(unanswered)?;
+            let context = context_for(
+                self.shapes.required_parameters(),
+                watcher,
+                &mut RequestValues::new(),
+            );
+            let mut questions = Vec::new();
+            for (requirement, relation) in relations.into_iter().enumerate() {
+                let target = Target {
+                    object: &columns.gate,
+                    relation: relation.as_str(),
+                    contextual: &[],
+                };
+                self.push_questions(
+                    &mut questions,
+                    (0, requirement),
+                    watcher,
+                    &target,
+                    context.as_ref(),
+                );
+            }
+            if questions.is_empty().not() {
+                plan.push(questions);
+            }
+        }
         Ok(Asked::Ask(plan))
     }
 
-    /// The relation that answers a read of `table`, as the model reports it, or
+    /// What answers a read of `table`, as the model reports it, or
     /// [`Asked::Refused`] where the model grants nobody.
     ///
-    /// A read judges the existing row against one relation.
+    /// A read judges the existing row against one relation, and the columns it
+    /// reads where some acting role reads some columns only.
     ///
     /// # Errors
     ///
     /// [`OpenFgaError::RowCannotBeNamed`] when the model names no row type, and
     /// [`OpenFgaError::StatementNotAnswered`] when it reports no single
     /// existing-row relation to ask.
-    fn read_relation(&self, table: TableId) -> Result<Asked<RelationName>, OpenFgaError> {
+    fn read_plan(&self, table: TableId) -> Result<Asked<ReadPlan<'_>>, OpenFgaError> {
+        fn existing(judges: &[ActionJudgement]) -> Option<&RelationName> {
+            match judges {
+                [judge] if judge.version == RowVersion::Existing => Some(&judge.relation),
+                _ => None,
+            }
+        }
         if self.shapes.naming(table).is_none() {
             return Err(OpenFgaError::RowCannotBeNamed);
         }
@@ -639,12 +854,18 @@ where
         {
             // The model grants nobody, so the read is refused without asking.
             ActionAnswer::Denied => Ok(Asked::Refused),
-            ActionAnswer::Judged(judges) => match judges.as_slice() {
-                [judge] if judge.version == RowVersion::Existing => {
-                    Ok(Asked::Ask(judge.relation.clone()))
-                }
-                _ => Err(unanswered()),
-            },
+            ActionAnswer::Judged(judges) => Ok(Asked::Ask(ReadPlan {
+                rows: Some(existing(judges).ok_or_else(unanswered)?),
+                columns: None,
+            })),
+            ActionAnswer::ByColumn(columns) => Ok(Asked::Ask(ReadPlan {
+                rows: match &*columns.rows {
+                    ActionAnswer::Unrestricted => None,
+                    ActionAnswer::Judged(judges) => Some(existing(judges).ok_or_else(unanswered)?),
+                    _ => return Err(unanswered()),
+                },
+                columns: Some(columns),
+            })),
             // An unrestricted table has nothing to ask, and this path exists to
             // ask, so the caller answers it locally or not at all.
             _ => Err(unanswered()),
@@ -1599,11 +1820,11 @@ where
     where
         R: RowView<Backend = Self::Backend> + Sync + ?Sized,
     {
-        let questions = match self.read_relation(row.table_id()) {
+        let questions = match self.read_plan(row.table_id()) {
             // Nobody is granted, and the caller pre-filled a denial for every
             // watcher, so there is nothing to ask and nothing to write.
             Ok(Asked::Refused) => Ok(Vec::new()),
-            Ok(Asked::Ask(relation)) => self.questions(row, relation.as_str(), watchers, &[]),
+            Ok(Asked::Ask(plan)) => self.read_questions(row, &plan, watchers),
             Err(err) => Err(err),
         };
         let consistency = consistency_for(ActionStatement::Select, self.read_consistency);
@@ -1701,6 +1922,7 @@ mod tests {
     fn question(place: usize, correlation_id: &str) -> Question {
         Question {
             place,
+            requirement: 0,
             item: BatchCheckItem {
                 tuple_key: Some(CheckRequestTupleKey {
                     user: alloc::format!("user:{place}"),
@@ -1715,7 +1937,7 @@ mod tests {
     }
 
     fn a_question() -> Question {
-        question(0, "w0n0")
+        question(0, "w0r0n0")
     }
 
     fn batch_response(results: impl IntoIterator<Item = (String, bool)>) -> BatchCheckResponse {
@@ -2373,7 +2595,7 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
     #[test]
     fn the_bound_id_reaches_the_transport() {
         let transport = Scripted::new([ScriptedReply::message(batch_response([(
-            "w0n0".to_string(),
+            "w0r0n0".to_string(),
             true,
         )]))]);
         let policy = scripted_policy_over(OWNED, transport.clone());
@@ -2979,7 +3201,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
     fn a_generated_reply_crosses_the_scripted_transport() {
         let mut response = BatchCheckResponse::default();
         response.result.insert(
-            "w0n0".to_string(),
+            "w0r0n0".to_string(),
             BatchCheckSingleResult {
                 check_result: Some(CheckResult::Allowed(true)),
             },
@@ -2995,7 +3217,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
         )))
         .unwrap();
 
-        assert_eq!(got, BTreeMap::from([("w0n0".to_string(), true)]));
+        assert_eq!(got, BTreeMap::from([("w0r0n0".to_string(), true)]));
     }
 
     /// The retry setting counts retries after the first transport attempt.
@@ -3040,7 +3262,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
     fn batch_check_asks_again_after_the_call_timed_out() {
         let mut response = BatchCheckResponse::default();
         response.result.insert(
-            "w0n0".to_string(),
+            "w0r0n0".to_string(),
             BatchCheckSingleResult {
                 check_result: Some(CheckResult::Allowed(true)),
             },
@@ -3058,7 +3280,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
             ConsistencyPreference::MinimizeLatency,
         )));
 
-        assert_eq!(got, Ok(BTreeMap::from([("w0n0".to_string(), true)])));
+        assert_eq!(got, Ok(BTreeMap::from([("w0r0n0".to_string(), true)])));
         assert_eq!(transport.calls().len(), 2);
     }
 
@@ -3109,7 +3331,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
     fn a_malformed_batch_answer_is_incomplete() {
         let transport = Scripted::new([ScriptedReply::message(BatchCheckResponse {
             result: core::iter::once((
-                "w0n0".to_string(),
+                "w0r0n0".to_string(),
                 BatchCheckSingleResult { check_result: None },
             ))
             .collect(),
@@ -3183,7 +3405,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
         fn assert_send<T: Send>(_: &T) {}
 
         let transport = Scripted::new([ScriptedReply::message(batch_response([(
-            "w0n0".to_string(),
+            "w0r0n0".to_string(),
             true,
         )]))]);
         let policy = scripted_policy_over(OWNED, transport);
@@ -3206,8 +3428,8 @@ CREATE POLICY p ON docs FOR SELECT USING (
     #[test]
     fn a_replacement_stops_after_the_first_refused_judge() {
         let transport = Scripted::new([
-            ScriptedReply::message(batch_response([("w0n0".to_string(), false)])),
-            ScriptedReply::message(batch_response([("w0n0".to_string(), true)])),
+            ScriptedReply::message(batch_response([("w0r0n0".to_string(), false)])),
+            ScriptedReply::message(batch_response([("w0r0n0".to_string(), true)])),
         ]);
         let policy = scripted_policy_over(UPDATE_TWO_SIDED, transport.clone());
         let docs =
@@ -3233,6 +3455,8 @@ CREATE POLICY p ON docs FOR SELECT USING (
             RowWrite::Update {
                 old: &old,
                 new: &new,
+                assigned: &[],
+                read: &[],
             },
             &"user:bob".to_string(),
         ));
@@ -3425,8 +3649,13 @@ CREATE POLICY p ON docs FOR SELECT USING (
             .with_pk_columns([0u16]);
         let view = EventRow::current(&event, policy.shapes().catalog()).unwrap();
 
-        let got =
-            block_on(policy.may_write(RowWrite::Insert { new: &view }, &"user:alice".to_string()));
+        let got = block_on(policy.may_write(
+            RowWrite::Insert {
+                new: &view,
+                assigned: &[],
+            },
+            &"user:alice".to_string(),
+        ));
 
         assert_eq!(got, Ok(Verdict::Deny), "nobody may write this table");
     }
@@ -3472,11 +3701,12 @@ CREATE POLICY p ON docs FOR SELECT USING (
         )
         .unwrap();
 
-        let asked = policy.read_relation(docs).unwrap();
-        let Asked::Ask(relation) = asked else {
+        let asked = policy.read_plan(docs).unwrap();
+        let Asked::Ask(plan) = asked else {
             panic!("a granted read names the relation that answers it");
         };
-        assert_eq!(relation.as_str(), "can_select");
+        assert_eq!(plan.rows.map(RelationName::as_str), Some("can_select"));
+        assert!(plan.columns.is_none(), "no column grant narrows the read");
     }
 
     /// One fact stated twice with different conditions must not be deleted

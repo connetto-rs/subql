@@ -3,6 +3,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 
 use super::request_values::RequestValues;
+use crate::{ColumnId, TableId};
 
 /// The authenticated principals, acting PostgreSQL role and request values of a watcher.
 ///
@@ -28,6 +29,15 @@ pub trait Subject {
 
     /// The authenticated request's acting role, or [`None`] when it is unknown locally.
     fn acting_role(&self) -> Option<&str> {
+        None
+    }
+
+    /// The columns of `table` this watcher's subscription reads anywhere in its
+    /// SQL, or [`None`] for every column, as `SELECT *` reads.
+    ///
+    /// An empty slice is asked as the privilege on the whole table.
+    fn columns_read(&self, table: TableId) -> Option<&[ColumnId]> {
+        let _ = table;
         None
     }
 
@@ -68,6 +78,10 @@ impl<T: Subject + ?Sized> Subject for &T {
         (*self).acting_role()
     }
 
+    fn columns_read(&self, table: TableId) -> Option<&[ColumnId]> {
+        (*self).columns_read(table)
+    }
+
     fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
         (*self).request_value(parameter, out)
     }
@@ -85,6 +99,10 @@ impl<T: Subject + ?Sized> Subject for Arc<T> {
 
     fn acting_role(&self) -> Option<&str> {
         (**self).acting_role()
+    }
+
+    fn columns_read(&self, table: TableId) -> Option<&[ColumnId]> {
+        (**self).columns_read(table)
     }
 
     fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {

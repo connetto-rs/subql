@@ -32,7 +32,7 @@ enum Local {
 
 /// What the model says answering one statement on one table takes.
 ///
-/// Three states rather than a list of judgements, because two of them are not
+/// States rather than a list of judgements, because two of them are not
 /// lists: a statement the model grants every acting role without a row or
 /// request condition has nothing to satisfy and grants, and one the model
 /// refuses grants nobody. An empty list cannot spell both, and reading it as
@@ -46,6 +46,28 @@ enum Requirement<'a> {
     /// Every judgement has to grant, read against the version it names. Never
     /// empty.
     Judged(&'a [ActionJudgement]),
+    /// Rows to satisfy beside columns asked on the gate, which no row settles,
+    /// so the row can refuse and never grant.
+    ByColumn(&'a ActionAnswer),
+}
+
+impl<'a> Requirement<'a> {
+    /// What `answer` requires, or [`None`] when nothing here can read it.
+    ///
+    /// The wildcard covers a relation that fuses both versions, which no single
+    /// image answers, and every answer a later revision adds. Neither is reached
+    /// by the four statements a write asks about today, since the fused one is
+    /// reported for an update naming no rows and nothing here asks that. It is
+    /// the guard for the next variant rather than a live branch.
+    fn of(answer: &'a ActionAnswer) -> Option<Self> {
+        Some(match answer {
+            ActionAnswer::Unrestricted => Self::Granted,
+            ActionAnswer::Denied => Self::Refused,
+            ActionAnswer::Judged(judges) if !judges.is_empty() => Self::Judged(judges),
+            ActionAnswer::ByColumn(columns) => Self::ByColumn(&columns.rows),
+            _ => return None,
+        })
+    }
 }
 
 /// Evaluate `decision` against `row` for one watcher.
@@ -481,19 +503,8 @@ where
 
     /// What answering `statement` on rows of `table` takes, or [`None`] when
     /// nothing here can answer it.
-    ///
-    /// The wildcard covers a relation that fuses both versions, which no single
-    /// image answers, and every answer a later revision adds. Neither is reached
-    /// by the four statements a write asks about today, since the fused one is
-    /// reported for an update naming no rows and nothing here asks that. It is
-    /// the guard for the next variant rather than a live branch.
     fn requirement(&self, table: TableId, statement: ActionStatement) -> Option<Requirement<'_>> {
-        Some(match self.shapes().answer(table, statement)? {
-            ActionAnswer::Unrestricted => Requirement::Granted,
-            ActionAnswer::Denied => Requirement::Refused,
-            ActionAnswer::Judged(judges) if !judges.is_empty() => Requirement::Judged(judges),
-            _ => return None,
-        })
+        Requirement::of(self.shapes().answer(table, statement)?)
     }
 
     /// Read `required` against the row versions `image` hands out.
@@ -502,7 +513,8 @@ where
     /// grants because there is no rule, the other refuses because no rule can
     /// ever grant. A refusal on any judgement is definite whatever the others
     /// say, so it answers rather than delegating, and an unreadable one is not
-    /// an answer.
+    /// an answer. Rows that pass where the columns are asked as well are not an
+    /// answer either, since only the service holds the caller's columns.
     fn judge<'a, R, F>(
         &self,
         required: Requirement<'_>,
@@ -514,10 +526,17 @@ where
         R: RowView + ?Sized + 'a,
         F: Fn(RowVersion) -> Option<&'a R>,
     {
-        let judges = match required {
+        let (judges, columns_asked) = match required {
             Requirement::Granted => return Local::Allow,
             Requirement::Refused => return Local::Deny,
-            Requirement::Judged(judges) => judges,
+            Requirement::Judged(judges) => (judges, false),
+            Requirement::ByColumn(rows) => match Requirement::of(rows) {
+                Some(Requirement::Judged(judges)) => (judges, true),
+                Some(Requirement::Refused) => return Local::Deny,
+                // Rows nothing restricts leave only the columns, and rls2fga
+                // nests no `ByColumn` in another.
+                _ => return Local::Unresolved,
+            },
         };
         for judge in judges {
             let Some(row) = image(judge.version) else {
@@ -532,6 +551,10 @@ where
                 Local::Allow => {}
             }
         }
-        Local::Allow
+        if columns_asked {
+            Local::Unresolved
+        } else {
+            Local::Allow
+        }
     }
 }

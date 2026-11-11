@@ -289,7 +289,15 @@ async fn replacement_verdict(
 ) -> Verdict {
     const fn assert_send<T: Send>(_: &T) {}
 
-    let answer = policy.may_write(RowWrite::Update { old, new }, watcher);
+    let answer = policy.may_write(
+        RowWrite::Update {
+            old,
+            new,
+            assigned: &[],
+            read: &[],
+        },
+        watcher,
+    );
     assert_send(&answer);
     answer.await.expect("the service answered both judges")
 }
@@ -390,7 +398,13 @@ async fn assert_independent_replacement_judges(fixture: &ReplacementFixture) {
     assert_eq!(
         fixture
             .policy
-            .may_write(RowWrite::UpdateUsing { old: &old }, &alice)
+            .may_write(
+                RowWrite::UpdateUsing {
+                    old: &old,
+                    read: &[]
+                },
+                &alice
+            )
             .await
             .expect("ask the existing-row relation"),
         Verdict::Allow
@@ -398,7 +412,13 @@ async fn assert_independent_replacement_judges(fixture: &ReplacementFixture) {
     assert_eq!(
         fixture
             .policy
-            .may_write(RowWrite::UpdateUsing { old: &old }, &bob)
+            .may_write(
+                RowWrite::UpdateUsing {
+                    old: &old,
+                    read: &[]
+                },
+                &bob
+            )
             .await
             .expect("ask the existing-row relation"),
         Verdict::Deny
@@ -2306,8 +2326,14 @@ async fn a_bot_gate_is_answered_locally_as_the_service_answers() {
 
         for watcher in &watchers {
             for write in [
-                RowWrite::Insert { new: &row },
-                RowWrite::Delete { old: &row },
+                RowWrite::Insert {
+                    new: &row,
+                    assigned: &[],
+                },
+                RowWrite::Delete {
+                    old: &row,
+                    read: &[],
+                },
             ] {
                 assert_eq!(
                     local.may_write(write, watcher).await.expect("never fails"),
@@ -2581,4 +2607,339 @@ async fn a_quoted_role_is_stated_with_its_encoded_name() {
         [format!("{QUOTED_ROLE_OBJECT}#usage")],
         "the one constant stands under the encoded name"
     );
+}
+
+/// `docs` with a role holding `SELECT` and `UPDATE` on the whole table beside
+/// roles holding them on some columns only, each role named under `prefix`.
+fn column_grants(prefix: &str) -> String {
+    format!(
+        "CREATE ROLE {prefix}_login LOGIN NOINHERIT;
+         CREATE ROLE {prefix}_keeper NOLOGIN;
+         CREATE ROLE {prefix}_editor NOLOGIN;
+         CREATE ROLE {prefix}_reader NOLOGIN;
+         CREATE ROLE {prefix}_writer NOLOGIN;
+         CREATE ROLE {prefix}_updater NOLOGIN;
+         CREATE TABLE public.docs(id INTEGER PRIMARY KEY, title TEXT, body TEXT);
+         ALTER TABLE docs OWNER TO {prefix}_keeper;
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY docs_read ON docs FOR SELECT USING (true);
+         CREATE POLICY docs_write ON docs FOR UPDATE USING (true);
+         GRANT SELECT, UPDATE ON docs TO {prefix}_editor;
+         GRANT SELECT (id, title) ON docs TO {prefix}_reader;
+         GRANT SELECT (id, title) ON docs TO {prefix}_writer;
+         GRANT UPDATE (title) ON docs TO {prefix}_writer;
+         GRANT SELECT (id) ON docs TO {prefix}_updater;
+         GRANT UPDATE (title) ON docs TO {prefix}_updater;"
+    )
+}
+
+/// The acting roles of [`column_grants`].
+const COLUMN_ROLES: [&str; 4] = ["editor", "reader", "writer", "updater"];
+
+/// A caller acting as one role, reading the columns its subscription names.
+#[derive(Clone)]
+struct Reading {
+    role: String,
+    read: Option<&'static [u16]>,
+}
+
+impl Subject for Reading {
+    fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
+        std::iter::once(Cow::Borrowed("user:alice"))
+    }
+
+    fn acting_role(&self) -> Option<&str> {
+        Some(&self.role)
+    }
+
+    fn columns_read(&self, _table: TableId) -> Option<&[u16]> {
+        self.read
+    }
+}
+
+/// One statement, what subql is told it touches, and what PostgreSQL answers.
+struct ColumnCase {
+    role: &'static str,
+    sql: &'static str,
+    read: Option<&'static [u16]>,
+    assigned: &'static [u16],
+    allowed: bool,
+}
+
+const fn read_case(
+    role: &'static str,
+    sql: &'static str,
+    read: Option<&'static [u16]>,
+    allowed: bool,
+) -> ColumnCase {
+    ColumnCase {
+        role,
+        sql,
+        read,
+        assigned: &[],
+        allowed,
+    }
+}
+
+const fn update_case(
+    role: &'static str,
+    sql: &'static str,
+    assigned: &'static [u16],
+    read: &'static [u16],
+    allowed: bool,
+) -> ColumnCase {
+    ColumnCase {
+        role,
+        sql,
+        read: Some(read),
+        assigned,
+        allowed,
+    }
+}
+
+/// `docs` is `id`, `title`, `body`, by ordinal.
+const READS: [ColumnCase; 4] = [
+    read_case("editor", "SELECT * FROM docs", None, true),
+    read_case("reader", "SELECT id, title FROM docs", Some(&[0, 1]), true),
+    read_case("reader", "SELECT id, body FROM docs", Some(&[0, 2]), false),
+    read_case("reader", "SELECT * FROM docs", None, false),
+];
+
+const UPDATES: [ColumnCase; 7] = [
+    update_case(
+        "editor",
+        "UPDATE docs SET body = 'x' WHERE id = 1",
+        &[2],
+        &[0],
+        true,
+    ),
+    update_case(
+        "writer",
+        "UPDATE docs SET title = 'x' WHERE id = 1",
+        &[1],
+        &[0],
+        true,
+    ),
+    update_case(
+        "writer",
+        "UPDATE docs SET title = body WHERE id = 1",
+        &[1],
+        &[0, 2],
+        false,
+    ),
+    update_case(
+        "writer",
+        "UPDATE docs SET title = 'x' WHERE body = 'y'",
+        &[1],
+        &[2],
+        false,
+    ),
+    update_case(
+        "writer",
+        "UPDATE docs SET body = 'x' WHERE id = 1",
+        &[2],
+        &[0],
+        false,
+    ),
+    update_case(
+        "updater",
+        "UPDATE docs SET title = 'x' WHERE id = 1",
+        &[1],
+        &[0],
+        true,
+    ),
+    update_case(
+        "reader",
+        "UPDATE docs SET title = 'x' WHERE id = 1",
+        &[1],
+        &[0],
+        false,
+    ),
+];
+
+/// Whether PostgreSQL runs `sql` as `role`, refusing only for a privilege.
+fn postgres_allows(pg: &mut diesel::PgConnection, role: &str, sql: &str) -> bool {
+    use diesel::connection::SimpleConnection;
+    pg.batch_execute(&format!("SET ROLE {role}"))
+        .expect("set the acting role");
+    let ran = pg.batch_execute(sql);
+    pg.batch_execute("RESET ROLE").expect("reset the role");
+    match ran {
+        Ok(()) => true,
+        Err(diesel::result::Error::DatabaseError(_, info))
+            if info.message().starts_with("permission denied") =>
+        {
+            false
+        }
+        Err(error) => panic!("{sql} as {role} failed for another reason: {error}"),
+    }
+}
+
+/// What PostgreSQL answers for every case, on a database holding `schema`.
+fn postgres_answers(prefix: &str, schema: &str) -> Vec<bool> {
+    use diesel::connection::SimpleConnection;
+    let db = crate::common::pg::pg_database();
+    let mut pg = db.connect();
+    pg.batch_execute(schema)
+        .expect("create the roles and the table");
+    pg.batch_execute("INSERT INTO docs VALUES (1, 't', 'b')")
+        .expect("seed one row");
+    let answers = READS
+        .iter()
+        .chain(&UPDATES)
+        .map(|case| postgres_allows(&mut pg, &format!("{prefix}_{}", case.role), case.sql))
+        .collect();
+    // Roles are cluster-wide, and the table holds every grant they have.
+    let roles = ["login", "keeper"]
+        .iter()
+        .chain(&COLUMN_ROLES)
+        .map(|role| format!("{prefix}_{role}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    pg.batch_execute(&format!("DROP TABLE docs; DROP ROLE {roles}"))
+        .expect("drop the roles");
+    answers
+}
+
+/// The policy over [`column_grants`] under `prefix`, with the row [`column_row`]
+/// stores and the acting constants written to a fresh store.
+async fn column_grant_policy(
+    prefix: &str,
+    schema: &str,
+) -> (
+    RowPolicy<ParserDB, OpenFgaPolicy<ParserDB, Channel, Reading, Postgres>>,
+    TableId,
+) {
+    let mut client = openfga().await;
+    let db = ParserDB::parse::<PostgreSqlDialect>(schema).expect("the schema parses");
+    let acting = COLUMN_ROLES.map(|role| format!("{prefix}_{role}"));
+    let outputs = TranslatorBuilder::new(
+        Deployment::new(
+            format!("{prefix}_login"),
+            acting.iter(),
+            Vec::<SessionSetting>::new(),
+        )
+        .expect("a valid deployment"),
+    )
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db)
+    .expect("the schema translates")
+    .outputs_accepting_gaps();
+    let constants = constants(&outputs);
+    let model = outputs.json_model();
+    let docs =
+        catalog_helpers::table_id::<Postgres, _>(&db, "docs").expect("docs is in the catalog");
+    let (store, model_id) =
+        create_store_with_model(&mut client, "subql-column-grants", &model).await;
+    let installed = installed_model(&model, &model_id);
+    let shapes = Wiring {
+        db,
+        outputs,
+        model,
+        pool: None,
+    }
+    .shapes();
+    let backend = OpenFgaPolicy::<_, _, Reading, Postgres>::new(
+        Arc::clone(&shapes),
+        client,
+        store,
+        &installed,
+    )
+    .expect("the index carries what the questions need");
+    let stored = TestEvent::<Postgres>::insert(docs, column_row("t")).with_pk_columns([0u16]);
+    let (facts, _requeries) = shapes.diff(&stored).expect("the row states its facts");
+    backend.apply(&facts).await.expect("write the row's facts");
+    backend
+        .write_records(&constants)
+        .await
+        .expect("write the acting constants");
+    (RowPolicy::new(shapes, backend), docs)
+}
+
+/// A role holding a command on some columns only is asked about the columns a
+/// statement touches, beside a role holding it on the whole table, as
+/// PostgreSQL asks.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires docker"]
+async fn a_column_grant_is_asked_per_column_as_postgres_asks() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let prefix = format!("bycol{}x{nanos}", std::process::id());
+    let schema = column_grants(&prefix);
+    let (postgres, prefix, schema) =
+        tokio::task::spawn_blocking(move || (postgres_answers(&prefix, &schema), prefix, schema))
+            .await
+            .expect("ask postgres");
+    let expected: Vec<bool> = READS
+        .iter()
+        .chain(&UPDATES)
+        .map(|case| case.allowed)
+        .collect();
+    assert_eq!(postgres, expected, "PostgreSQL answers as the cases say");
+
+    let (policy, docs) = column_grant_policy(&prefix, &schema).await;
+    assert!(
+        !policy.answers_locally(docs, ActionStatement::Select),
+        "a role reading some columns only is asked on the gate"
+    );
+
+    let stored = TestEvent::<Postgres>::insert(docs, column_row("t")).with_pk_columns([0u16]);
+    let row = EventRow::current(&stored, policy.catalog()).expect("an insert carries a post-image");
+    let changed = TestEvent::<Postgres>::update(docs, column_row("t"), column_row("x"))
+        .with_pk_columns([0u16]);
+    let old = EventRow::previous(&changed, policy.catalog()).expect("pre-image");
+    let new = EventRow::current(&changed, policy.catalog()).expect("post-image");
+    let mut subql = Vec::new();
+    for case in &READS {
+        let watcher = [Reading {
+            role: format!("{prefix}_{}", case.role),
+            read: case.read,
+        }];
+        let mut verdicts = Vec::new();
+        Verdict::reset(&mut verdicts, 1);
+        policy
+            .may_see(&row, &watcher, &mut verdicts)
+            .await
+            .expect("the service answered the read");
+        subql.push(verdicts[0] == Verdict::Allow);
+    }
+    for case in &UPDATES {
+        let watcher = Reading {
+            role: format!("{prefix}_{}", case.role),
+            read: None,
+        };
+        let write = RowWrite::Update {
+            old: &old,
+            new: &new,
+            assigned: case.assigned,
+            read: case.read.unwrap_or_default(),
+        };
+        let verdict = policy
+            .may_write(write, &watcher)
+            .await
+            .expect("the service answered the update");
+        subql.push(verdict == Verdict::Allow);
+    }
+    let statements: Vec<_> = READS
+        .iter()
+        .chain(&UPDATES)
+        .map(|case| (case.role, case.sql))
+        .collect();
+    assert_eq!(
+        statements.iter().zip(&subql).collect::<Vec<_>>(),
+        statements.iter().zip(&postgres).collect::<Vec<_>>(),
+        "subql answers each statement as PostgreSQL does"
+    );
+}
+
+/// One row of `docs` with key 1.
+fn column_row(title: &str) -> Vec<Value<Postgres>> {
+    vec![
+        Value::Int(1),
+        Value::String(title.into()),
+        Value::String("b".into()),
+    ]
 }

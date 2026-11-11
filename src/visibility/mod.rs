@@ -176,11 +176,11 @@ mod tests {
             R: RowView<Backend = Postgres> + Sync + ?Sized,
         {
             let owns = match write {
-                RowWrite::Insert { new } => owner_of(new) == Some(*watcher),
-                RowWrite::Update { old, new } => {
+                RowWrite::Insert { new, .. } => owner_of(new) == Some(*watcher),
+                RowWrite::Update { old, new, .. } => {
                     owner_of(old) == Some(*watcher) && owner_of(new) == Some(*watcher)
                 }
-                RowWrite::UpdateUsing { old } | RowWrite::Delete { old } => {
+                RowWrite::UpdateUsing { old, .. } | RowWrite::Delete { old, .. } => {
                     owner_of(old) == Some(*watcher)
                 }
             };
@@ -310,20 +310,32 @@ mod tests {
         let event = TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::Int(7)]);
         let row = EventRow::current(&event, &db).expect("insert carries a post-image");
 
-        let allowed =
-            block_on(OwnerPolicy { fail_from: None }.may_write(RowWrite::Insert { new: &row }, &7))
-                .expect("policy answers");
+        let allowed = block_on(OwnerPolicy { fail_from: None }.may_write(
+            RowWrite::Insert {
+                new: &row,
+                assigned: &[],
+            },
+            &7,
+        ))
+        .expect("policy answers");
         assert_eq!(allowed, Verdict::Allow);
 
-        let denied =
-            block_on(OwnerPolicy { fail_from: None }.may_write(RowWrite::Delete { old: &row }, &9))
-                .expect("policy answers");
+        let denied = block_on(OwnerPolicy { fail_from: None }.may_write(
+            RowWrite::Delete {
+                old: &row,
+                read: &[],
+            },
+            &9,
+        ))
+        .expect("policy answers");
         assert_eq!(denied, Verdict::Deny);
 
         let undetermined = block_on(OwnerPolicy { fail_from: Some(0) }.may_write(
             RowWrite::Update {
                 old: &row,
                 new: &row,
+                assigned: &[],
+                read: &[],
             },
             &7,
         ));
@@ -487,17 +499,34 @@ mod tests {
         let answer = |write| {
             block_on(OwnerPolicy { fail_from: None }.may_write(write, &7)).expect("policy answers")
         };
-        assert_eq!(answer(RowWrite::Insert { new: &row }), Verdict::Allow);
         assert_eq!(
-            answer(RowWrite::Update {
-                old: &row,
-                new: &row
+            answer(RowWrite::Insert {
+                new: &row,
+                assigned: &[]
             }),
             Verdict::Allow
         );
-        assert_eq!(answer(RowWrite::UpdateUsing { old: &row }), Verdict::Allow);
         assert_eq!(
-            answer(RowWrite::Delete { old: &row }),
+            answer(RowWrite::Update {
+                old: &row,
+                new: &row,
+                assigned: &[],
+                read: &[]
+            }),
+            Verdict::Allow
+        );
+        assert_eq!(
+            answer(RowWrite::UpdateUsing {
+                old: &row,
+                read: &[]
+            }),
+            Verdict::Allow
+        );
+        assert_eq!(
+            answer(RowWrite::Delete {
+                old: &row,
+                read: &[]
+            }),
             Verdict::Deny,
             "the policy refuses deletes, so the verb must have arrived"
         );
@@ -520,7 +549,9 @@ mod tests {
             block_on(policy.may_write(
                 RowWrite::Update {
                     old: &old,
-                    new: &new
+                    new: &new,
+                    assigned: &[],
+                    read: &[]
                 },
                 &9
             )),
@@ -532,7 +563,9 @@ mod tests {
             block_on(policy.may_write(
                 RowWrite::Update {
                     old: &old,
-                    new: &new
+                    new: &new,
+                    assigned: &[],
+                    read: &[]
                 },
                 &7
             )),
@@ -541,7 +574,13 @@ mod tests {
         );
         // Asked only about the row as it stands, 7 holds it.
         assert_eq!(
-            block_on(policy.may_write(RowWrite::UpdateUsing { old: &old }, &7)),
+            block_on(policy.may_write(
+                RowWrite::UpdateUsing {
+                    old: &old,
+                    read: &[]
+                },
+                &7,
+            )),
             Ok(Verdict::Allow)
         );
     }
