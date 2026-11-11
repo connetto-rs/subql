@@ -2619,6 +2619,7 @@ fn column_grants(prefix: &str) -> String {
          CREATE ROLE {prefix}_reader NOLOGIN;
          CREATE ROLE {prefix}_writer NOLOGIN;
          CREATE ROLE {prefix}_updater NOLOGIN;
+         CREATE ROLE {prefix}_stranger NOLOGIN;
          CREATE TABLE public.docs(id INTEGER PRIMARY KEY, title TEXT, body TEXT);
          ALTER TABLE docs OWNER TO {prefix}_keeper;
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -2634,7 +2635,7 @@ fn column_grants(prefix: &str) -> String {
 }
 
 /// The acting roles of [`column_grants`].
-const COLUMN_ROLES: [&str; 4] = ["editor", "reader", "writer", "updater"];
+const COLUMN_ROLES: [&str; 5] = ["editor", "reader", "writer", "updater", "stranger"];
 
 /// A caller acting as one role, reading the columns its subscription names.
 #[derive(Clone)]
@@ -2698,11 +2699,15 @@ const fn update_case(
 }
 
 /// `docs` is `id`, `title`, `body`, by ordinal.
-const READS: [ColumnCase; 4] = [
+const READS: [ColumnCase; 8] = [
     read_case("editor", "SELECT * FROM docs", None, true),
     read_case("reader", "SELECT id, title FROM docs", Some(&[0, 1]), true),
     read_case("reader", "SELECT id, body FROM docs", Some(&[0, 2]), false),
     read_case("reader", "SELECT * FROM docs", None, false),
+    read_case("reader", "SELECT 1 FROM docs", Some(&[]), true),
+    read_case("reader", "SELECT count(*) FROM docs", Some(&[]), true),
+    read_case("editor", "SELECT 1 FROM docs", Some(&[]), true),
+    read_case("stranger", "SELECT 1 FROM docs", Some(&[]), false),
 ];
 
 const UPDATES: [ColumnCase; 7] = [

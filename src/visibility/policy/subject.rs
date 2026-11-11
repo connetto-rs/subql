@@ -35,7 +35,7 @@ pub trait Subject {
     /// The columns of `table` this watcher's subscription reads anywhere in its
     /// SQL, or [`None`] for every column, as `SELECT *` reads.
     ///
-    /// An empty slice is asked as the privilege on the whole table.
+    /// An empty slice, as `SELECT 1` reads, is granted on the grant of any column.
     fn columns_read(&self, table: TableId) -> Option<&[ColumnId]> {
         let _ = table;
         None
