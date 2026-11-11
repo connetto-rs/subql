@@ -8,9 +8,8 @@ use rls2fga_types::{Record, RecordDescription, RelationName, ReplayScope};
 ///
 /// Named here rather than taken as `rls2fga`'s own tuple query, because this
 /// index is built from `rls2fga-types` alone and the translator is a separate
-/// feature. A caller holding a translation maps each of its queries into one of
-/// these, dropping the ones that carry no description since those enumerate
-/// nothing.
+/// feature. A caller holding a translation turns each of its queries into one
+/// of these through [`Enumeration::of`].
 #[derive(Clone, Copy, Debug)]
 pub struct Enumeration<'a> {
     /// The producer whose facts these rows are.
@@ -19,6 +18,23 @@ pub struct Enumeration<'a> {
     pub sql: &'a str,
     /// Condition the result rows carry, absent where they carry none.
     pub condition: Option<&'a str>,
+}
+
+#[cfg(any(test, feature = "membership-term"))]
+impl<'a> Enumeration<'a> {
+    /// The enumeration `query` states, or [`None`] where it carries no
+    /// description, since such a query enumerates nothing.
+    #[must_use]
+    pub fn of(query: &'a rls2fga::generator::tuple_generator::TupleQuery) -> Option<Self> {
+        query.description.as_ref().map(|description| Self {
+            description,
+            sql: &query.sql,
+            condition: query
+                .condition
+                .as_ref()
+                .map(rls2fga_types::ConditionName::as_str),
+        })
+    }
 }
 
 /// The caller's half of a group reconcile: run one member's query and hand
@@ -326,5 +342,66 @@ impl Materialisation {
     #[must_use]
     pub fn constants(&self) -> &[Record] {
         &self.constants
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use rls2fga::generator::tuple_generator::TupleQuery;
+    use rls2fga::translator::TranslatorBuilder;
+    use rls2fga_types::ConfidenceLevel;
+
+    use super::Enumeration;
+    use crate::testing::deployment;
+
+    /// A membership gated by the clock, so its query carries a condition.
+    const EXPIRING: &str = "
+CREATE TABLE teams(id INTEGER PRIMARY KEY);
+CREATE TABLE team_members(team_id INTEGER REFERENCES teams(id), user_id TEXT,
+    expires_at TIMESTAMPTZ);
+CREATE TABLE docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES teams(id));
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON docs FOR SELECT USING (
+  EXISTS (SELECT 1 FROM team_members
+          WHERE team_members.team_id = docs.team_id
+            AND team_members.user_id = current_setting('app.user_id', true)
+            AND team_members.expires_at > now()));
+";
+
+    #[test]
+    fn a_query_enumerates_only_when_it_describes_its_records() {
+        let db = deployment::db(EXPIRING);
+        let outputs = TranslatorBuilder::new(deployment::callers())
+            .with_min_confidence(ConfidenceLevel::B)
+            .build()
+            .translate(&db)
+            .unwrap()
+            .outputs_accepting_gaps();
+        let conditional = outputs
+            .tuple_queries()
+            .iter()
+            .find(|query| query.description.is_some() && query.condition.is_some())
+            .expect("the clock-gated membership carries a condition");
+
+        let enumeration = Enumeration::of(conditional).unwrap();
+        assert!(core::ptr::eq(
+            enumeration.description,
+            conditional.description.as_ref().unwrap()
+        ));
+        assert_eq!(enumeration.sql, conditional.sql);
+        assert_eq!(
+            enumeration.condition,
+            Some(conditional.condition.as_ref().unwrap().as_str())
+        );
+
+        let skipped = TupleQuery {
+            description: None,
+            ..conditional.clone()
+        };
+        assert!(
+            Enumeration::of(&skipped).is_none(),
+            "a query describing nothing enumerates nothing, whatever its SQL"
+        );
     }
 }
