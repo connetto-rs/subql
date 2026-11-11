@@ -16,7 +16,8 @@
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
-    feature = "executor-diesel-async-postgres"
+    feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary"
 ))]
 use crate::backend::Postgres;
 use crate::backend::Value;
@@ -26,7 +27,8 @@ use alloc::string::{String, ToString};
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
-    feature = "executor-diesel-async-postgres"
+    feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary"
 ))]
 use core::num::NonZeroU32;
 use diesel::backend::Backend;
@@ -34,6 +36,7 @@ use diesel::backend::Backend;
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
     feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary",
     feature = "diesel-typed-mysql",
     feature = "executor-diesel-mysql",
     feature = "executor-diesel-async-mysql"
@@ -42,13 +45,15 @@ use diesel::deserialize::FromSql;
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
-    feature = "executor-diesel-async-postgres"
+    feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary"
 ))]
 use diesel::pg::{Pg, PgValue};
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
-    feature = "executor-diesel-async-postgres"
+    feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary"
 ))]
 use diesel::sql_types;
 
@@ -57,7 +62,8 @@ use diesel::sql_types;
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
-    feature = "executor-diesel-async-postgres"
+    feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary"
 ))]
 pub mod oid {
     pub const BOOL: u32 = 16;
@@ -231,7 +237,8 @@ fn mysql_int_ne(b: &[u8], signed: bool) -> Result<i64, RegisterError> {
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
-    feature = "executor-diesel-async-postgres"
+    feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary"
 ))]
 pub fn pg_canonical(bytes: Option<&[u8]>, type_oid: u32) -> Result<Canonical, RegisterError> {
     let Some(b) = bytes else {
@@ -313,7 +320,8 @@ pub fn pg_canonical(bytes: Option<&[u8]>, type_oid: u32) -> Result<Canonical, Re
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
-    feature = "executor-diesel-async-postgres"
+    feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary"
 ))]
 fn pg_from_sql<ST, T: FromSql<ST, Pg>>(
     bytes: &[u8],
@@ -388,7 +396,8 @@ where
     any(
         feature = "diesel-typed",
         feature = "executor-diesel-postgres",
-        feature = "executor-diesel-async-postgres"
+        feature = "executor-diesel-async-postgres",
+        feature = "pgoutput-binary"
     )
 ))]
 #[allow(clippy::unwrap_used)]
@@ -706,7 +715,8 @@ pub trait SpellCanonical: crate::backend::Backend + Sized {
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
-    feature = "executor-diesel-async-postgres"
+    feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary"
 ))]
 impl SpellCanonical for Postgres {
     fn value_from_canonical(value: Canonical) -> Value<Self> {
@@ -783,7 +793,8 @@ impl SpellCanonical for crate::backend::SQLite {
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel-postgres",
-    feature = "executor-diesel-async-postgres"
+    feature = "executor-diesel-async-postgres",
+    feature = "pgoutput-binary"
 ))]
 impl RowFieldDecode for Pg {
     fn field_to_canonical(value: Option<PgValue<'_>>) -> Result<Canonical, RegisterError> {

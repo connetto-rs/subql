@@ -60,11 +60,16 @@ pub struct PgStreamingConfig {
     pub start: Option<PgCommitPosition>,
     /// Minimum interval between changed-LSN feedback checks while the reader is polled.
     pub status_interval: Duration,
+    /// Ask pgoutput for `binary on`. Default off.
+    ///
+    /// The stream reads `pg_type` on its own connection before it starts, so
+    /// a type created later is unknown to it and its columns are refused.
+    pub binary: bool,
 }
 
 impl PgStreamingConfig {
-    /// Build a config with the defaults `start = None` and
-    /// `status_interval = 10s`.
+    /// Build a config with the defaults `start = None`,
+    /// `status_interval = 10s` and text format.
     #[must_use]
     pub fn new(
         url: impl Into<String>,
@@ -77,6 +82,7 @@ impl PgStreamingConfig {
             publication_name: publication_name.into(),
             start: None,
             status_interval: Duration::from_secs(10),
+            binary: false,
         }
     }
 
@@ -92,6 +98,13 @@ impl PgStreamingConfig {
     #[must_use]
     pub const fn status_interval(mut self, status_interval: Duration) -> Self {
         self.status_interval = status_interval;
+        self
+    }
+
+    /// Ask pgoutput for its binary format (default text).
+    #[must_use]
+    pub const fn binary(mut self, binary: bool) -> Self {
+        self.binary = binary;
         self
     }
 }
@@ -196,6 +209,7 @@ impl PgStreamingCdcSource {
                 config.publication_name.clone(),
             )
             .with_protocol_version(1)
+            .with_binary(config.binary)
             .with_feedback_interval(config.status_interval)
             .with_retry_config(RetryConfig {
                 max_attempts: 1,
@@ -236,10 +250,23 @@ impl PgStreamingCdcSource {
             timeline,
             history,
         };
+        // `pg_type` is readable only before `START_REPLICATION`.
+        let order = if config.binary {
+            let registry = reader
+                .type_catalog()
+                .await?
+                .iter()
+                .filter(|info| info.oid() >= crate::wal::PgTypeRegistry::FIRST_UNPINNED_OID)
+                .fold(crate::wal::PgTypeRegistry::builtin(), |registry, info| {
+                    registry.with_user_type(info.oid(), info.sends_binary(), info.base_type())
+                });
+            PgOutputOrder::binary(registry)
+        } else {
+            PgOutputOrder::new()
+        };
         reader
             .start(start.map(|position| position.commit_lsn().0))
             .await?;
-
         // A row-ordinal resume does not acknowledge its transaction.
         reader.shared_lsn_feedback = SharedLsnFeedback::new_shared();
         reader.shared_lsn_feedback.update_applied_lsn(base_lsn);
@@ -247,7 +274,7 @@ impl PgStreamingCdcSource {
             config,
             reader,
             cancel: CancellationToken::new(),
-            delivery: Delivery::new(start),
+            delivery: Delivery::new(start, order),
             events_received: 0,
             base_lsn,
             acked_lsn: base_lsn,
@@ -360,9 +387,9 @@ struct Delivery {
 }
 
 impl Delivery {
-    const fn new(start: Option<PgCommitPosition>) -> Self {
+    const fn new(start: Option<PgCommitPosition>, order: PgOutputOrder) -> Self {
         Self {
-            order: PgOutputOrder::new(),
+            order,
             items: VecDeque::new(),
             staged: Vec::new(),
             releases: ReleaseQueue::new(),

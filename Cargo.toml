@@ -538,6 +538,19 @@ pg-streaming = [
     "pg_walstream/rustls-tls",
     "dep:tokio",
     "dep:tokio-util",
+    "pgoutput-binary",
+]
+
+# Opt-in: read binary pgoutput cells through diesel's `FromSql` for their type OID.
+pgoutput-binary = [
+    "std",
+    "dep:diesel",
+    "diesel?/postgres_backend",
+    "diesel?/uuid",
+    "diesel?/chrono",
+    "diesel?/numeric",
+    "diesel?/serde_json",
+    "diesel?/i-implement-a-third-party-backend-and-opt-into-breaking-changes",
 ]
 
 # Opt-in: the live SqliteCdcSource that owns a diesel SqliteConnection
@@ -563,13 +576,11 @@ pg-sqlite-emu = [
     "dep:diesel-sqlite-session",
     "dep:pg2sqlite",
     "sqlite-diff-rs/pg-walstream",
-    # The row-lookup read names its table and columns at runtime and reads back
-    # a row of runtime-known shape, so it needs diesel's dynamic query builder
-    # plus subql's own `DynamicRow`. Deliberately not `diesel-typed-sqlite`,
-    # which would drag `postgres_backend`, `uuid`, `chrono`, `numeric` and
-    # `serde_json` into an emulator that needs none of them.
+    # The row-lookup read reads back a row of runtime-known shape.
     "dep:diesel-dynamic-schema",
     "diesel-dynamic-schema?/sqlite",
+    # The emulator's events read binary cells through diesel's `FromSql`.
+    "pgoutput-binary",
 ]
 
 # Folds pgoutput `ChangeEvent`s through sqlite-diff-rs's digest surface.

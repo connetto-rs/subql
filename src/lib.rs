@@ -34,8 +34,8 @@ pub use sqlite_cdc::{SqliteChangesetEvent, SqliteChangesetParser};
 pub use types::*;
 pub use wal::{
     parse_maxwell, parse_wal2json_v1, ChangeEvent, ChangeV1, MaxwellEvent, MaxwellMessage,
-    MessageV2, PgChangeEvent, PgCommit, PgRelation, PgRelationColumn, TransactionOrderError,
-    Wal2JsonV2Event, Wal2JsonV2Reader, WalParseError, WalParser,
+    MessageV2, PgCellFormat, PgChangeEvent, PgCommit, PgRelation, PgRelationColumn,
+    TransactionOrderError, Wal2JsonV2Event, Wal2JsonV2Reader, WalParseError, WalParser,
 };
 #[cfg(feature = "std")]
 pub use wal::{CdcSource, SourceItem, SourceItemOf};
@@ -43,6 +43,8 @@ pub use wal::{CdcSource, SourceItem, SourceItemOf};
 pub use wal::{
     ClusterIdentity, PgStreamingCdcSource, PgStreamingConfig, PgStreamingError, TimelineSwitch,
 };
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+pub use wal::{PgTypeRegistry, PgTypeRegistryError};
 
 // Re-export the sql-traits types subql consumers most often need to spell out
 // at call sites: trait bounds for generic code, the canonical schema
@@ -102,14 +104,12 @@ mod term_compile;
 pub mod visibility;
 pub mod wal;
 
-// Value decoding shared by the diesel-typed query API, the diesel-backed
-// re-execution connectors, and the SQLite-backed Postgres emulator. All three
-// need the same raw-value readers, so the convention lives in one place rather
-// than one per consumer.
+// The raw-value readers every diesel consumer and the binary pgoutput path share.
 #[cfg(any(
     feature = "diesel-typed",
     feature = "executor-diesel",
-    feature = "pg-sqlite-emu"
+    feature = "pg-sqlite-emu",
+    feature = "pgoutput-binary"
 ))]
 pub mod diesel_decode;
 

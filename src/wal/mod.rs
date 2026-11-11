@@ -10,6 +10,7 @@
 
 mod change_event;
 mod maxwell;
+mod pg_format;
 #[cfg(feature = "pg-streaming")]
 mod pg_streaming;
 pub(crate) mod pg_type;
@@ -42,6 +43,9 @@ pub use streaming::{CdcSource, SourceItem, SourceItemOf};
 /// relation message states, or the commit ending its transaction.
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 pub(crate) type PgSourceItem = SourceItem<PgChangeEvent, PgCommit, PgRelation>;
+pub use pg_format::PgCellFormat;
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+pub use pg_format::{PgTypeRegistry, PgTypeRegistryError};
 pub use transaction_order::TransactionOrderError;
 pub use wal2json::{parse_wal2json_v1, Wal2JsonV2Event, Wal2JsonV2Reader};
 pub use wal2json_events::{ChangeV1, MessageV2};
