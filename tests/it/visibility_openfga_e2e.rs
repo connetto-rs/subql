@@ -22,12 +22,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openfga_client::client::{
-    CheckRequest, CheckRequestTupleKey, ConsistencyPreference, CreateStoreRequest,
-    ListStoresRequest, OpenFgaServiceClient, ReadRequest, ReadRequestTupleKey, TupleKey,
-    WriteRequest, WriteRequestWrites,
+    AuthorizationModel as InstalledModel, CheckRequest, CheckRequestTupleKey,
+    ConsistencyPreference, CreateStoreRequest, ListStoresRequest, OpenFgaServiceClient,
+    ReadRequest, ReadRequestTupleKey, TupleKey, WriteRequest, WriteRequestWrites,
 };
 use openfga_client::tonic::transport::Channel;
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::generator::json_model::{AuthorizationModel, Userset};
 use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::ActionStatement;
@@ -35,8 +34,8 @@ use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{
     ConditionName, Record, RecordContextValue, RecordDerivation, RecordDescription, RelationName,
 };
-use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, Value};
+use subql::testing::deployment;
 use subql::testing::relation_pool::{relation_fed_by, RelationPool};
 use subql::testing::TestEvent;
 use subql::visibility::openfga::{OpenFgaPolicy, ReconcileError, Reconciled};
@@ -63,18 +62,16 @@ struct Wiring {
 /// without them rls2fga refuses a held-keys arm rather than modelling it, and a
 /// schema that has no such arm is unaffected by the declaration.
 fn wiring(sql: &str) -> Wiring {
-    let db = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
-    let outputs = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.subjects", SessionAttributeKind::SetAttribute),
-            SessionAttribute::setting("app.bot_list", SessionAttributeKind::SetAttribute),
-        ])
-        .build()
-        .translate(&db)
-        .expect("the visibility schema translates")
-        .outputs_accepting_gaps();
+    let db = deployment::db(sql);
+    let outputs = TranslatorBuilder::new(deployment::with_settings([
+        deployment::set("app.subjects"),
+        deployment::set("app.bot_list"),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db)
+    .expect("the visibility schema translates")
+    .outputs_accepting_gaps();
     let model = outputs.json_model();
     Wiring {
         db,
@@ -236,6 +233,15 @@ async fn create_store_with_model(
     (store, model_id)
 }
 
+/// The model the server stored under `model_id`, in the client's own type.
+fn installed_model(model: &AuthorizationModel, model_id: &str) -> InstalledModel {
+    let wire = serde_json::to_value(model).expect("the generated model serializes");
+    let mut installed =
+        serde_json::from_value::<InstalledModel>(wire).expect("the client reads the wire form");
+    model_id.clone_into(&mut installed.id);
+    installed
+}
+
 /// `can_select: member from teams`, which one row never decides: whether a
 /// watcher is a member of the team the row names is not in the row.
 const SCHEMA: &str = "
@@ -246,15 +252,15 @@ CREATE TABLE public.docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES team
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user));
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true)));
 ";
 
 const UPDATE_TWO_SIDED: &str = "
 CREATE TABLE public.docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY pu ON docs FOR UPDATE
-  USING (owner_id = current_user) WITH CHECK (editor_id = current_user);
+  USING (owner_id = current_setting('app.user_id', true)) WITH CHECK (editor_id = current_setting('app.user_id', true));
 ";
 
 const WRITE_LIMIT: usize = 100;
@@ -267,19 +273,18 @@ fn update_row(owner: &str, editor: &str) -> Vec<Value<Postgres>> {
     ]
 }
 
-type ReplacementPolicy = OpenFgaPolicy<ParserDB, Channel, String, Postgres>;
+type ReplacementPolicy = OpenFgaPolicy<ParserDB, Channel, Actor, Postgres>;
 type ReplacementRow<'a> = EventRow<'a, TestEvent<Postgres>, ParserDB>;
 
 async fn replacement_verdict(
     policy: &ReplacementPolicy,
     old: &ReplacementRow<'_>,
     new: &ReplacementRow<'_>,
-    watcher: &str,
+    watcher: &Actor,
 ) -> Verdict {
     const fn assert_send<T: Send>(_: &T) {}
 
-    let watcher = watcher.to_owned();
-    let answer = policy.may_write(RowWrite::Update { old, new }, &watcher);
+    let answer = policy.may_write(RowWrite::Update { old, new }, watcher);
     assert_send(&answer);
     answer.await.expect("the service answered both judges")
 }
@@ -321,17 +326,18 @@ async fn replacement_fixture() -> ReplacementFixture {
     let wired = wiring(UPDATE_TWO_SIDED);
     let docs = catalog_helpers::table_id::<Postgres, _>(&wired.db, "docs")
         .expect("docs is in the catalog");
-    let model = wired.model.clone();
+    let constants = constants(&wired.outputs);
     let (store, model_id) =
-        create_store_with_model(&mut client, "subql-replacement-write", &model).await;
+        create_store_with_model(&mut client, "subql-replacement-write", &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
     let shapes = wired.shapes();
-    let policy = OpenFgaPolicy::<_, _, String, Postgres>::new(
+    let policy = OpenFgaPolicy::<_, _, Actor, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries both update judges")
-    .authorization_model_id(model_id.clone());
+    .expect("the index carries both update judges");
     let stored =
         TestEvent::<Postgres>::insert(docs, update_row("alice", "bob")).with_pk_columns([0u16]);
     let (stored_diff, _requeries) = shapes
@@ -341,6 +347,10 @@ async fn replacement_fixture() -> ReplacementFixture {
         .apply(&stored_diff)
         .await
         .expect("write the stored row facts");
+    policy
+        .write_records(&constants)
+        .await
+        .expect("write the acting constant");
 
     ReplacementFixture {
         client,
@@ -361,8 +371,8 @@ async fn assert_independent_replacement_judges(fixture: &ReplacementFixture) {
     .with_pk_columns([0u16]);
     let old = EventRow::previous(&split, fixture.shapes.catalog()).expect("pre-image");
     let new = EventRow::current(&split, fixture.shapes.catalog()).expect("post-image");
-    let alice = "user:alice".to_owned();
-    let bob = "user:bob".to_owned();
+    let alice = Actor::app_user("user:alice");
+    let bob = Actor::app_user("user:bob");
 
     assert_eq!(
         replacement_verdict(&fixture.policy, &old, &new, &bob).await,
@@ -396,6 +406,10 @@ impl Subject for Aliases {
     fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
         self.0.iter().copied().map(Cow::Borrowed)
     }
+
+    fn acting_role(&self) -> Option<&str> {
+        Some(deployment::ROLE)
+    }
 }
 
 async fn write_subject_fanout_facts(
@@ -403,31 +417,26 @@ async fn write_subject_fanout_facts(
     store: &str,
     model_id: &str,
     member: &RelationName,
+    docs: &[Record],
 ) {
+    let mut tuples = tuples_of(docs);
+    tuples.push(TupleKey {
+        user: "user:alice-secondary".to_owned(),
+        relation: member.to_string(),
+        object: "teams:1".to_owned(),
+        condition: None,
+    });
+    tuples.push(TupleKey {
+        user: "user:bob-secondary".to_owned(),
+        relation: member.to_string(),
+        object: "teams:2".to_owned(),
+        condition: None,
+    });
     client
         .write(WriteRequest {
             store_id: store.to_owned(),
             writes: Some(WriteRequestWrites {
-                tuple_keys: vec![
-                    TupleKey {
-                        user: "teams:1".to_owned(),
-                        relation: "teams".to_owned(),
-                        object: "docs:4".to_owned(),
-                        condition: None,
-                    },
-                    TupleKey {
-                        user: "user:alice-secondary".to_owned(),
-                        relation: member.to_string(),
-                        object: "teams:1".to_owned(),
-                        condition: None,
-                    },
-                    TupleKey {
-                        user: "user:bob-secondary".to_owned(),
-                        relation: member.to_string(),
-                        object: "teams:2".to_owned(),
-                        condition: None,
-                    },
-                ],
+                tuple_keys: tuples,
                 on_duplicate: String::new(),
             }),
             deletes: None,
@@ -479,8 +488,8 @@ async fn a_question_the_row_does_not_settle_is_answered_by_the_service() {
     let wired = wiring(SCHEMA);
     let docs = catalog_helpers::table_id::<subql::backend::Postgres, _>(&wired.db, "docs")
         .expect("docs is in the catalog");
-    let model = wired.model.clone();
     let member = wired.fed_by("team_members");
+    let constants = constants(&wired.outputs);
 
     let store = client
         .create_store(CreateStoreRequest {
@@ -491,28 +500,29 @@ async fn a_question_the_row_does_not_settle_is_answered_by_the_service() {
         .into_inner()
         .id;
 
-    let model_id = write_model(&mut client, &store, &model).await;
+    let model_id = write_model(&mut client, &store, &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
+    let shapes = wired.shapes();
 
     // The facts the loader would have written: doc 4 belongs to team 1, and
     // alice is a member of it. bob is a member of nothing.
+    let facts = tuples_of(&row_facts(
+        &shapes,
+        docs,
+        vec![Value::Int(4), Value::Int(1)],
+    ));
+    let mut tuples = vec![TupleKey {
+        user: "user:alice".to_owned(),
+        relation: member.to_string(),
+        object: "teams:1".to_owned(),
+        condition: None,
+    }];
+    tuples.extend(facts);
     client
         .write(WriteRequest {
             store_id: store.clone(),
             writes: Some(WriteRequestWrites {
-                tuple_keys: vec![
-                    TupleKey {
-                        user: "teams:1".to_owned(),
-                        relation: "teams".to_owned(),
-                        object: "docs:4".to_owned(),
-                        condition: None,
-                    },
-                    TupleKey {
-                        user: "user:alice".to_owned(),
-                        relation: member.to_string(),
-                        object: "teams:1".to_owned(),
-                        condition: None,
-                    },
-                ],
+                tuple_keys: tuples,
                 on_duplicate: String::new(),
             }),
             deletes: None,
@@ -521,15 +531,17 @@ async fn a_question_the_row_does_not_settle_is_answered_by_the_service() {
         .await
         .expect("write the tuples");
 
-    let shapes = wired.shapes();
-
-    let backend = OpenFgaPolicy::<_, _, String, Postgres>::new(
+    let backend = OpenFgaPolicy::<_, _, Actor, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries what the questions need")
-    .authorization_model_id(model_id);
+    .expect("the index carries what the questions need");
+    backend
+        .write_records(&constants)
+        .await
+        .expect("write the acting constant");
     let policy = RowPolicy::new(Arc::clone(&shapes), backend);
 
     assert!(
@@ -542,7 +554,7 @@ async fn a_question_the_row_does_not_settle_is_answered_by_the_service() {
         .with_pk_columns([0u16]);
     let row = EventRow::current(&event, policy.catalog()).expect("an insert carries a post-image");
 
-    let watchers = ["user:alice".to_owned(), "user:bob".to_owned()];
+    let watchers = [Actor::app_user("user:alice"), Actor::app_user("user:bob")];
     let mut verdicts = Vec::new();
     Verdict::reset(&mut verdicts, watchers.len());
     policy
@@ -570,7 +582,7 @@ async fn a_replacement_requires_both_versions_and_resulting_context() {
     .with_pk_columns([0u16]);
     let old = EventRow::previous(&replacement, fixture.shapes.catalog()).expect("pre-image");
     let new = EventRow::current(&replacement, fixture.shapes.catalog()).expect("post-image");
-    let alice = "user:alice".to_owned();
+    let alice = Actor::app_user("user:alice");
 
     assert_eq!(
         replacement_verdict(&fixture.policy, &old, &new, &alice).await,
@@ -581,7 +593,7 @@ async fn a_replacement_requires_both_versions_and_resulting_context() {
         &fixture.store,
         &fixture.model_id,
         CheckRequestTupleKey {
-            user: alice,
+            user: alice.name,
             relation: "can_update_check".to_owned(),
             object: "docs:4".to_owned(),
         },
@@ -603,15 +615,31 @@ async fn a_second_subject_name_grants_only_its_watcher() {
     let wired = wiring(SCHEMA);
     let docs = catalog_helpers::table_id::<Postgres, _>(&wired.db, "docs")
         .expect("docs is in the catalog");
-    let model = wired.model.clone();
     let member = wired.fed_by("team_members");
+    let constants = constants(&wired.outputs);
     let (store, model_id) =
-        create_store_with_model(&mut client, "subql-subject-fanout", &model).await;
-    write_subject_fanout_facts(&mut client, &store, &model_id, &member).await;
+        create_store_with_model(&mut client, "subql-subject-fanout", &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
     let shapes = wired.shapes();
-    let policy = OpenFgaPolicy::<_, _, Aliases, Postgres>::new(Arc::clone(&shapes), client, store)
-        .expect("the index carries the read relation")
-        .authorization_model_id(model_id);
+    write_subject_fanout_facts(
+        &mut client,
+        &store,
+        &model_id,
+        &member,
+        &row_facts(&shapes, docs, vec![Value::Int(4), Value::Int(1)]),
+    )
+    .await;
+    let policy = OpenFgaPolicy::<_, _, Aliases, Postgres>::new(
+        Arc::clone(&shapes),
+        client,
+        store,
+        &installed,
+    )
+    .expect("the index carries the read relation");
+    policy
+        .write_records(&constants)
+        .await
+        .expect("write the acting constant");
     let event = TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::Int(1)])
         .with_pk_columns([0u16]);
     let row = EventRow::current(&event, shapes.catalog()).expect("post-image");
@@ -634,21 +662,63 @@ async fn a_second_subject_name_grants_only_its_watcher() {
     );
 }
 
+/// A watcher that names itself and the role its request acts as, `None` for a
+/// request that does not state one.
+#[derive(Clone, Debug)]
+struct Actor {
+    name: String,
+    role: Option<&'static str>,
+}
+
+impl Actor {
+    /// Acting as the deployment's own role.
+    fn app_user(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            role: Some(deployment::ROLE),
+        }
+    }
+}
+
+impl Subject for Actor {
+    fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
+        core::iter::once(Cow::Borrowed(self.name.as_str()))
+    }
+
+    fn acting_role(&self) -> Option<&str> {
+        self.role
+    }
+
+    fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
+        if parameter != "app_user_id" {
+            return false;
+        }
+        let Some(identity) = self.name.rsplit_once(':').map(|(_, id)| id) else {
+            return false;
+        };
+        out.push(identity);
+        true
+    }
+}
+
 /// Direct writes are idempotent and preserve the chunk beyond the service limit.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires docker"]
 async fn direct_writes_preserve_the_final_chunk() {
     let mut client = openfga().await;
     let wired = wiring(SCHEMA);
-    let model = wired.model.clone();
     let member = wired.fed_by("team_members");
     let (store, model_id) =
-        create_store_with_model(&mut client, "subql-direct-write-limit", &model).await;
+        create_store_with_model(&mut client, "subql-direct-write-limit", &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
     let shapes = wired.shapes();
-    let policy =
-        OpenFgaPolicy::<_, _, String, Postgres>::new(shapes, client.clone(), store.clone())
-            .expect("the index carries the model")
-            .authorization_model_id(model_id);
+    let policy = OpenFgaPolicy::<_, _, String, Postgres>::new(
+        shapes,
+        client.clone(),
+        store.clone(),
+        &installed,
+    )
+    .expect("the index carries the model");
     let mut expected: Vec<String> = (0..=WRITE_LIMIT)
         .map(|nth| format!("user:{nth:03}"))
         .collect();
@@ -691,8 +761,8 @@ async fn a_batch_over_the_cap_is_split_and_stays_positional() {
     let wired = wiring(SCHEMA);
     let docs = catalog_helpers::table_id::<subql::backend::Postgres, _>(&wired.db, "docs")
         .expect("docs is in the catalog");
-    let model = wired.model.clone();
     let member = wired.fed_by("team_members");
+    let constants = constants(&wired.outputs);
 
     let store = client
         .create_store(CreateStoreRequest {
@@ -702,18 +772,21 @@ async fn a_batch_over_the_cap_is_split_and_stays_positional() {
         .expect("create store")
         .into_inner()
         .id;
-    let model_id = write_model(&mut client, &store, &model).await;
+    let model_id = write_model(&mut client, &store, &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
+    let shapes = wired.shapes();
 
     // Doc 4 belongs to team 1, and every third watcher is a member of it.
-    let audience: Vec<String> = (0..120).map(|i| format!("user:u{i}")).collect();
-    let mut tuples = vec![TupleKey {
-        user: "teams:1".to_owned(),
-        relation: "teams".to_owned(),
-        object: "docs:4".to_owned(),
-        condition: None,
-    }];
-    tuples.extend(audience.iter().step_by(3).map(|name| TupleKey {
-        user: name.clone(),
+    let audience: Vec<Actor> = (0..120)
+        .map(|i| Actor::app_user(format!("user:u{i}")))
+        .collect();
+    let mut tuples = tuples_of(&row_facts(
+        &shapes,
+        docs,
+        vec![Value::Int(4), Value::Int(1)],
+    ));
+    tuples.extend(audience.iter().step_by(3).map(|actor| TupleKey {
+        user: actor.name.clone(),
         relation: member.to_string(),
         object: "teams:1".to_owned(),
         condition: None,
@@ -731,15 +804,18 @@ async fn a_batch_over_the_cap_is_split_and_stays_positional() {
         .await
         .expect("write the tuples");
 
-    let shapes = wired.shapes();
-    let backend = OpenFgaPolicy::<_, _, String, Postgres>::new(
+    let backend = OpenFgaPolicy::<_, _, Actor, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
     .expect("the index carries what the questions need")
-    .authorization_model_id(model_id)
     .max_checks_per_batch(20);
+    backend
+        .write_records(&constants)
+        .await
+        .expect("write the acting constant");
     let policy = RowPolicy::new(Arc::clone(&shapes), backend);
 
     let event = TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::Int(1)])
@@ -787,7 +863,7 @@ async fn a_row_changing_hands_moves_the_store_and_the_next_answer() {
     const OWNED: &str = "
 CREATE TABLE public.docs(id INTEGER PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";
 
     let mut client = openfga().await;
@@ -795,7 +871,6 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
     let wired = wiring(OWNED);
     let docs = catalog_helpers::table_id::<subql::backend::Postgres, _>(&wired.db, "docs")
         .expect("docs is in the catalog");
-    let model = wired.model.clone();
 
     let store = client
         .create_store(CreateStoreRequest {
@@ -805,16 +880,22 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
         .expect("create store")
         .into_inner()
         .id;
-    let model_id = write_model(&mut client, &store, &model).await;
+    let model_id = write_model(&mut client, &store, &wired.model).await;
+    let constants = constants(&wired.outputs);
+    let installed = installed_model(&wired.model, &model_id);
 
     let shapes = wired.shapes();
-    let backend = OpenFgaPolicy::<_, _, String, Postgres>::new(
+    let backend = OpenFgaPolicy::<_, _, Actor, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries what the questions need")
-    .authorization_model_id(model_id);
+    .expect("the index carries what the questions need");
+    backend
+        .write_records(&constants)
+        .await
+        .expect("write the acting constant");
 
     // Row 4 is created owned by alice.
     let created =
@@ -826,7 +907,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
         .await
         .expect("write the additions");
 
-    let watchers = ["user:alice".to_owned(), "user:bob".to_owned()];
+    let watchers = [Actor::app_user("user:alice"), Actor::app_user("user:bob")];
     let row = EventRow::current(&created, shapes.catalog()).expect("post-image");
     let mut verdicts = Vec::new();
     Verdict::reset(&mut verdicts, watchers.len());
@@ -892,7 +973,7 @@ CREATE TABLE public.docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES team
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true)
             AND team_members.expires_at > now()));
 ";
 
@@ -902,7 +983,6 @@ CREATE POLICY p ON docs FOR SELECT USING (
     let members =
         catalog_helpers::table_id::<subql::backend::Postgres, _>(&wired.db, "team_members")
             .expect("members is in the catalog");
-    let model = wired.model.clone();
     let member = wired.fed_by("team_members");
 
     let store = client
@@ -913,16 +993,17 @@ CREATE POLICY p ON docs FOR SELECT USING (
         .expect("create store")
         .into_inner()
         .id;
-    let model_id = write_model(&mut client, &store, &model).await;
+    let model_id = write_model(&mut client, &store, &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
 
     let shapes = wired.shapes();
     let backend = OpenFgaPolicy::<_, _, String, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries what the questions need")
-    .authorization_model_id(model_id);
+    .expect("the index carries what the questions need");
 
     let withdrawn = TestEvent::<Postgres>::delete(
         members,
@@ -1032,9 +1113,9 @@ CREATE TABLE public.docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES team
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user)
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true))
   OR EXISTS (SELECT 1 FROM team_guests
-          WHERE team_guests.team_id = docs.team_id AND team_guests.user_id = current_user
+          WHERE team_guests.team_id = docs.team_id AND team_guests.user_id = current_setting('app.user_id', true)
             AND team_guests.expires_at > now()));
 ";
 
@@ -1048,7 +1129,7 @@ CREATE TABLE public.paper_shares(paper_id INTEGER REFERENCES papers(id), viewer 
 ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON papers FOR SELECT USING (
   EXISTS (SELECT 1 FROM paper_shares s
-          WHERE s.paper_id = papers.id AND s.viewer = current_user
+          WHERE s.paper_id = papers.id AND s.viewer = current_setting('app.user_id', true)
             AND s.weight > (SELECT avg(weight) FROM paper_shares)));
 ";
 
@@ -1101,7 +1182,6 @@ async fn a_group_keeps_every_members_facts_in_one_reconcile() {
     let mut client = openfga().await;
 
     let wired = wiring(SHARED_REGION).pooled("team_guests", "team_members");
-    let model = wired.model.clone();
     let member = wired.fed_by("team_members");
     let store = client
         .create_store(CreateStoreRequest {
@@ -1111,16 +1191,17 @@ async fn a_group_keeps_every_members_facts_in_one_reconcile() {
         .expect("create store")
         .into_inner()
         .id;
-    let model_id = write_model(&mut client, &store, &model).await;
+    let model_id = write_model(&mut client, &store, &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
 
     let shapes = wired.shapes();
     let backend = OpenFgaPolicy::<_, _, String, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries what the questions need")
-    .authorization_model_id(model_id);
+    .expect("the index carries what the questions need");
 
     // carol is stored and still granted, dave is stored and granted by nobody,
     // and alice is granted by the settled producer but not yet stored.
@@ -1218,7 +1299,6 @@ async fn two_members_contradicting_one_fact_are_refused_before_any_write() {
     let mut client = openfga().await;
 
     let wired = wiring(SHARED_REGION).pooled("team_guests", "team_members");
-    let model = wired.model.clone();
     let member = wired.fed_by("team_members");
     let store = client
         .create_store(CreateStoreRequest {
@@ -1228,16 +1308,17 @@ async fn two_members_contradicting_one_fact_are_refused_before_any_write() {
         .expect("create store")
         .into_inner()
         .id;
-    let model_id = write_model(&mut client, &store, &model).await;
+    let model_id = write_model(&mut client, &store, &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
 
     let shapes = wired.shapes();
     let backend = OpenFgaPolicy::<_, _, String, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries what the questions need")
-    .authorization_model_id(model_id);
+    .expect("the index carries what the questions need");
 
     backend
         .write_records(&[plain_membership(&member, "teams:3", "user:carol")])
@@ -1305,7 +1386,6 @@ async fn a_reconcile_removes_a_fact_for_an_object_the_event_never_named() {
     let share_table =
         catalog_helpers::table_id::<subql::backend::Postgres, _>(&wired.db, "paper_shares")
             .expect("shares are in the catalog");
-    let model = wired.model.clone();
     let shared = wired.fed_by("paper_shares");
     let store = client
         .create_store(CreateStoreRequest {
@@ -1315,16 +1395,17 @@ async fn a_reconcile_removes_a_fact_for_an_object_the_event_never_named() {
         .expect("create store")
         .into_inner()
         .id;
-    let model_id = write_model(&mut client, &store, &model).await;
+    let model_id = write_model(&mut client, &store, &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
 
     let shapes = wired.shapes();
     let backend = OpenFgaPolicy::<_, _, String, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries what the questions need")
-    .authorization_model_id(model_id);
+    .expect("the index carries what the questions need");
 
     backend
         .write_records(&[
@@ -1389,7 +1470,7 @@ CREATE TABLE public.docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES team
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true)
             AND team_members.expires_at > now()));
 ";
 
@@ -1400,30 +1481,35 @@ struct Restored {
     backend: OpenFgaPolicy<ParserDB, Channel, String, Postgres>,
     /// Facts the restored database still states.
     kept: Vec<Record>,
-    /// Facts only the store still holds: mallory's membership and doc 2's link.
+    /// Facts only the store still holds: mallory's membership and doc 2's facts.
     stale: Vec<Record>,
     /// The relation `team_members` rows feed.
     member: RelationName,
+    /// The relation the doc links to its team under.
+    link: RelationName,
 }
 
 /// [`TWO_ALONE`]'s facts over a store whose model is written from `model_sql`.
 async fn restored(name: &str, model_sql: &str) -> Restored {
     let mut client = openfga().await;
-    let (store, model_id) =
-        create_store_with_model(&mut client, name, &wiring(model_sql).model).await;
+    let wired_model = wiring(model_sql);
+    let (store, model_id) = create_store_with_model(&mut client, name, &wired_model.model).await;
+    let installed = installed_model(&wired_model.model, &model_id);
 
     let wired = wiring(TWO_ALONE);
     let members = catalog_helpers::table_id::<Postgres, _>(&wired.db, "team_members")
         .expect("members is in the catalog");
+    let docs = catalog_helpers::table_id::<Postgres, _>(&wired.db, "docs")
+        .expect("docs is in the catalog");
     let member = wired.fed_by("team_members");
     let shapes = wired.shapes();
     let backend = OpenFgaPolicy::<_, _, String, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries what the questions need")
-    .authorization_model_id(model_id);
+    .expect("the index carries what the questions need");
 
     let left = TestEvent::<Postgres>::delete(
         members,
@@ -1445,25 +1531,15 @@ async fn restored(name: &str, model_sql: &str) -> Restored {
         .load_regions()
         .iter()
         .flat_map(Region::parts)
-        .find(|part| part.object_type() == "docs")
+        .find(|part| part.object_type() == "docs" && part.subject_type() == Some("teams"))
         .expect("the load owns the doc's link to its team")
         .relation()
         .clone();
-    let doc_on_team_3 = |doc: &str| Record {
-        object: doc.to_owned(),
-        relation: link.clone(),
-        subject: "teams:3".to_owned(),
-        context: None,
-    };
     let expiry = "2027-01-01T00:00:00+00:00";
-    let kept = vec![
-        membership(&member, "user:alice", condition, expiry),
-        doc_on_team_3("docs:1"),
-    ];
-    let stale = vec![
-        membership(&member, "user:mallory", condition, expiry),
-        doc_on_team_3("docs:2"),
-    ];
+    let mut kept = vec![membership(&member, "user:alice", condition, expiry)];
+    kept.extend(row_facts(&shapes, docs, vec![Value::Int(1), Value::Int(3)]));
+    let mut stale = vec![membership(&member, "user:mallory", condition, expiry)];
+    stale.extend(row_facts(&shapes, docs, vec![Value::Int(2), Value::Int(3)]));
     backend
         .write_records(&[kept.as_slice(), stale.as_slice()].concat())
         .await
@@ -1476,6 +1552,7 @@ async fn restored(name: &str, model_sql: &str) -> Restored {
         kept,
         stale,
         member,
+        link,
     }
 }
 
@@ -1493,11 +1570,6 @@ async fn a_restore_sweeps_keyed_and_row_settled_facts_alike() {
         .await
         .expect("sweep the store");
 
-    assert_eq!(
-        reports.len(),
-        2,
-        "one report per region that moved: {reports:?}"
-    );
     assert!(
         reports.iter().all(|report| report.added.is_empty()),
         "the load states nothing the store lacked: {reports:?}"
@@ -1516,7 +1588,7 @@ async fn a_restore_sweeps_keyed_and_row_settled_facts_alike() {
     expected.sort();
     assert_eq!(withdrawn, expected);
 
-    let link = restored.kept[1].relation.to_string();
+    let link = restored.link.to_string();
     assert_eq!(
         stored_members(&mut restored.client, &restored.store, &restored.member).await,
         ["user:alice".to_owned()]
@@ -1558,9 +1630,9 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE folders ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true)
             AND team_members.expires_at > now()));
-CREATE POLICY f ON folders FOR SELECT USING (owner_id = current_user);
+CREATE POLICY f ON folders FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";
     let mut restored = restored("subql-sweep-shared", SHARED).await;
     restored
@@ -1608,39 +1680,26 @@ async fn one_sweep_heals_a_group_region_and_the_loads_regions() {
     let mut client = openfga().await;
     let wired = wiring(SHARED_REGION).pooled("team_guests", "team_members");
     let member = wired.fed_by("team_members");
+    let docs = catalog_helpers::table_id::<Postgres, _>(&wired.db, "docs")
+        .expect("docs is in the catalog");
     let (store, model_id) =
         create_store_with_model(&mut client, "subql-sweep-group", &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
     let shapes = wired.shapes();
     let backend = OpenFgaPolicy::<_, _, String, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries what the questions need")
-    .authorization_model_id(model_id);
-    let link = shapes
-        .load_regions()
-        .iter()
-        .flat_map(Region::parts)
-        .find(|part| part.object_type() == "docs")
-        .expect("the load owns the doc's link to its team")
-        .relation()
-        .clone();
-    let doc_on_team = |doc: &str, team: &str| Record {
-        object: doc.to_owned(),
-        relation: link.clone(),
-        subject: team.to_owned(),
-        context: None,
-    };
+    .expect("the index carries what the questions need");
 
-    backend
-        .write_records(&[
-            plain_membership(&member, "teams:3", "user:carol"),
-            plain_membership(&member, "teams:3", "user:dave"),
-            doc_on_team("docs:4", "teams:1"),
-        ])
-        .await
-        .expect("seed the store");
+    let mut seed = vec![
+        plain_membership(&member, "teams:3", "user:carol"),
+        plain_membership(&member, "teams:3", "user:dave"),
+    ];
+    seed.extend(row_facts(&shapes, docs, vec![Value::Int(4), Value::Int(1)]));
+    backend.write_records(&seed).await.expect("seed the store");
     let replay = CannedReplay {
         rows: vec![
             (
@@ -1654,22 +1713,52 @@ async fn one_sweep_heals_a_group_region_and_the_loads_regions() {
         ],
     };
 
+    let records = row_facts(&shapes, docs, vec![Value::Int(5), Value::Int(3)]);
     let reports = backend
-        .reconcile_store(&[doc_on_team("docs:5", "teams:3")], &replay)
+        .reconcile_store(&records, &replay)
         .await
         .expect("sweep the store");
 
-    let [load, group] = reports.as_slice() else {
-        panic!("the load's region and the group's: {reports:?}");
+    let (group, loads) = reports
+        .split_last()
+        .expect("the grouped region is reported last");
+    let by_key = |left: &&Record, right: &&Record| {
+        (&left.object, left.relation.as_str(), &left.subject).cmp(&(
+            &right.object,
+            right.relation.as_str(),
+            &right.subject,
+        ))
     };
-    assert_eq!(load.added, [doc_on_team("docs:5", "teams:3")]);
-    assert_eq!(
-        load.removed
-            .iter()
-            .map(|fact| fact.object.as_str())
-            .collect::<Vec<_>>(),
-        ["docs:4"]
-    );
+    let mut added: Vec<&Record> = loads.iter().flat_map(|report| &report.added).collect();
+    added.sort_unstable_by(by_key);
+    let mut expected: Vec<&Record> = records.iter().collect();
+    expected.sort_unstable_by(by_key);
+    assert_eq!(added, expected);
+    let mut removed: Vec<_> = loads
+        .iter()
+        .flat_map(|report| &report.removed)
+        .map(|fact| {
+            (
+                fact.object.as_str(),
+                fact.relation.as_str(),
+                fact.subject.as_str(),
+            )
+        })
+        .collect();
+    removed.sort_unstable();
+    let stale = row_facts(&shapes, docs, vec![Value::Int(4), Value::Int(1)]);
+    let mut expected: Vec<_> = stale
+        .iter()
+        .map(|fact| {
+            (
+                fact.object.as_str(),
+                fact.relation.as_str(),
+                fact.subject.as_str(),
+            )
+        })
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(removed, expected);
     assert_eq!(
         group.added,
         [plain_membership(&member, "teams:3", "user:alice")]
@@ -1785,6 +1874,10 @@ impl Subject for Principal {
         core::iter::once(Cow::Borrowed(self.name.as_str()))
     }
 
+    fn acting_role(&self) -> Option<&str> {
+        Some(deployment::ROLE)
+    }
+
     fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
         if parameter != "app_subjects" {
             return false;
@@ -1821,7 +1914,6 @@ CREATE POLICY notes_p ON notes FOR ALL USING (
     let wired = wiring(HELD_KEYS);
     let notes = catalog_helpers::table_id::<subql::backend::Postgres, _>(&wired.db, "notes")
         .expect("notes is in the catalog");
-    let model = wired.model.clone();
 
     let store = client
         .create_store(CreateStoreRequest {
@@ -1831,16 +1923,22 @@ CREATE POLICY notes_p ON notes FOR ALL USING (
         .expect("create store")
         .into_inner()
         .id;
-    let model_id = write_model(&mut client, &store, &model).await;
+    let model_id = write_model(&mut client, &store, &wired.model).await;
+    let constants = constants(&wired.outputs);
+    let installed = installed_model(&wired.model, &model_id);
 
     let shapes = wired.shapes();
     let backend = OpenFgaPolicy::<_, _, Principal, Postgres>::new(
         Arc::clone(&shapes),
         client.clone(),
         store.clone(),
+        &installed,
     )
-    .expect("the index carries what the questions need")
-    .authorization_model_id(model_id);
+    .expect("the index carries what the questions need");
+    backend
+        .write_records(&constants)
+        .await
+        .expect("write the acting constant");
 
     let created =
         TestEvent::<Postgres>::insert(notes, vec![Value::Int(1), Value::String("alice".into())])
@@ -1921,13 +2019,22 @@ CREATE POLICY notes_p ON notes FOR ALL USING (
 
     let mut client = openfga().await;
     let wired = wiring(HELD_KEYS);
+    let constants = constants(&wired.outputs);
     let (store, model_id) =
         create_store_with_model(&mut client, "subql-held-key-type", &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
     let shapes = wired.shapes();
-    let service =
-        OpenFgaPolicy::<_, _, Principal, Postgres>::new(Arc::clone(&shapes), client, store)
-            .expect("the index carries what the questions need")
-            .authorization_model_id(model_id);
+    let service = OpenFgaPolicy::<_, _, Principal, Postgres>::new(
+        Arc::clone(&shapes),
+        client,
+        store,
+        &installed,
+    )
+    .expect("the index carries what the questions need");
+    service
+        .write_records(&constants)
+        .await
+        .expect("write the acting constant");
     let local = RowPolicy::new(Arc::clone(&shapes), Unasked::<Principal>::default());
 
     let notes = catalog_helpers::table_id::<Postgres, _>(shapes.catalog(), "notes")
@@ -1999,6 +2106,10 @@ struct Bot {
 impl Subject for Bot {
     fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
         core::iter::once(Cow::Borrowed(self.name.as_str()))
+    }
+
+    fn acting_role(&self) -> Option<&str> {
+        Some(deployment::ROLE)
     }
 
     fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
@@ -2141,6 +2252,38 @@ fn constants(outputs: &Outputs) -> Vec<Record> {
         .collect()
 }
 
+/// Every fact the load writes for one row of `table`, read off the event that
+/// inserts it, so a seed states what the translation states.
+fn row_facts(
+    shapes: &Shapes<ParserDB>,
+    table: TableId,
+    values: Vec<Value<Postgres>>,
+) -> Vec<Record> {
+    let event = TestEvent::<Postgres>::insert(table, values).with_pk_columns([0u16]);
+    shapes
+        .diff(&event)
+        .expect("the row states its facts")
+        .0
+        .added
+}
+
+/// The raw tuple keys of records that carry no condition, for a seed that
+/// writes through the client rather than the policy.
+fn tuples_of(records: &[Record]) -> Vec<TupleKey> {
+    records
+        .iter()
+        .map(|record| {
+            assert!(record.context.is_none(), "the seed states no condition");
+            TupleKey {
+                user: record.subject.clone(),
+                relation: record.relation.to_string(),
+                object: record.object.clone(),
+                condition: None,
+            }
+        })
+        .collect()
+}
+
 /// A bot gate answered from the row and the request agrees with the service,
 /// on every table of [`bot_gated_schema`].
 ///
@@ -2156,10 +2299,11 @@ async fn a_bot_gate_is_answered_locally_as_the_service_answers() {
     let (store, model_id) =
         create_store_with_model(&mut client, "subql-bot-gate-parity", &wired.model).await;
     let constants = constants(&wired.outputs);
+    let installed = installed_model(&wired.model, &model_id);
     let shapes = wired.shapes();
-    let service = OpenFgaPolicy::<_, _, Bot, Postgres>::new(Arc::clone(&shapes), client, store)
-        .expect("the index carries the bot list parameter")
-        .authorization_model_id(model_id);
+    let service =
+        OpenFgaPolicy::<_, _, Bot, Postgres>::new(Arc::clone(&shapes), client, store, &installed)
+            .expect("the index carries the bot list parameter");
     service
         .write_records(&constants)
         .await

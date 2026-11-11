@@ -4,16 +4,7 @@ use alloc::sync::Arc;
 
 use super::request_values::RequestValues;
 
-/// The principals a watcher authenticates as, and the values it sent.
-///
-/// Two methods because subql needs two different things of a watcher and they
-/// are not the same thing spelled twice. A record's subject side is a
-/// `type:key` name, so answering from the row is a set-membership test over
-/// [`subjects`](Self::subjects). A request-gated grant is not a stored fact at
-/// all: the row settles one side of a comparison the caller's own value
-/// completes, and that value is bare and typed by the policy rather than by
-/// the model. Feeding one where the other belongs is a wrong comparison, and a
-/// bare key colliding with a name would be a wrong allow.
+/// The authenticated principals, acting PostgreSQL role and request values of a watcher.
 ///
 /// [`crate::visibility::VisibilityPolicy::Watcher`] stays opaque to subql everywhere else.
 ///
@@ -34,6 +25,11 @@ pub trait Subject {
     /// A principal carrying an identity and further subjects yields all of
     /// them: naming only the first would deny a holder the model grants.
     fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>>;
+
+    /// The authenticated request's acting role, or [`None`] when it is unknown locally.
+    fn acting_role(&self) -> Option<&str> {
+        None
+    }
 
     /// Write what this watcher sent under `parameter` into `out`, bare and
     /// untyped, and report whether it could answer at all.
@@ -68,6 +64,10 @@ impl<T: Subject + ?Sized> Subject for &T {
         (*self).subjects()
     }
 
+    fn acting_role(&self) -> Option<&str> {
+        (*self).acting_role()
+    }
+
     fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
         (*self).request_value(parameter, out)
     }
@@ -81,6 +81,10 @@ impl<T: Subject + ?Sized> Subject for &T {
 impl<T: Subject + ?Sized> Subject for Arc<T> {
     fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
         (**self).subjects()
+    }
+
+    fn acting_role(&self) -> Option<&str> {
+        (**self).acting_role()
     }
 
     fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {

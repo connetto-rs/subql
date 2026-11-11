@@ -418,15 +418,16 @@ mod membership {
     use super::*;
     use rls2fga::translator::TranslatorBuilder;
     use rls2fga::types::ConfidenceLevel;
+    use subql::testing::deployment;
     const DDL: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY); CREATE TABLE project_members(project_id INTEGER REFERENCES projects(id), user_id TEXT, PRIMARY KEY(project_id, user_id)); CREATE TABLE docs(id INTEGER PRIMARY KEY, project_id INTEGER, qty BIGINT);";
     const TERM: &str = "SELECT * FROM docs WHERE project_id IN (SELECT project_id FROM project_members WHERE user_id = current_setting('app.user_id', true))";
 
     fn members(sql: &str) -> (Engine, TableId, TableId, Vec<u64>) {
-        let db = ParserDB::parse::<PostgreSqlDialect>(DDL).unwrap();
+        let db = deployment::db(DDL);
         let docs = catalog_helpers::table_id::<Postgres, _>(&db, "docs").unwrap();
         let membership = catalog_helpers::table_id::<Postgres, _>(&db, "project_members").unwrap();
         let mut engine = Engine::new(db, PostgreSqlDialect {}).with_translator(
-            TranslatorBuilder::new()
+            TranslatorBuilder::new(deployment::callers())
                 .with_min_confidence(ConfidenceLevel::B)
                 .build(),
         );
@@ -561,9 +562,9 @@ mod membership {
 #[cfg(feature = "membership-term")]
 mod read_rule {
     use super::*;
-    use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
     use rls2fga::translator::TranslatorBuilder;
     use rls2fga::types::ConfidenceLevel;
+    use subql::testing::deployment;
 
     const OWNER_DDL: &str =
         "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
@@ -581,14 +582,10 @@ mod read_rule {
                      AND team_members.user_id = current_setting('app.user_id', true)));";
 
     fn folding(ddl: &str) -> Engine {
-        let db = ParserDB::parse::<PostgreSqlDialect>(ddl).unwrap();
+        let db = deployment::db(ddl);
         Engine::new(db, PostgreSqlDialect {}).with_translator(
-            TranslatorBuilder::new()
+            TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
                 .with_min_confidence(ConfidenceLevel::B)
-                .with_session_attributes([SessionAttribute::setting(
-                    "app.subjects",
-                    SessionAttributeKind::SetAttribute,
-                )])
                 .build(),
         )
     }

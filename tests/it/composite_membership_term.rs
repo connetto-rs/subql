@@ -4,13 +4,12 @@
 //! membership rows move the pair set.
 #![allow(clippy::unwrap_used)]
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, ScalarFamily, Value};
-use subql::testing::TestEvent;
+use subql::testing::{deployment, TestEvent};
 use subql::{
     catalog_helpers, DefaultIds, RegisterError, SubscriptionEngine, SubscriptionRequest, TableId,
     UnansweredCell,
@@ -32,17 +31,13 @@ const TERM: &str = "SELECT * FROM docs WHERE EXISTS (SELECT 1 FROM shares s \
 type Engine = SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB>;
 
 fn translator() -> Translator {
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
         .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )])
         .build()
 }
 
 fn engine() -> (Engine, TableId, TableId) {
-    let db = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("DDL parses");
+    let db = deployment::db(DDL);
     let docs =
         catalog_helpers::table_id::<Postgres, _>(&db, "docs").expect("docs is in the catalog");
     let shares =

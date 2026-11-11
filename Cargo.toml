@@ -13,9 +13,13 @@ pg_walstream = { git = "https://github.com/isdaniel/pg-walstream", branch = "mai
 # with no branch, exactly as diesel-sqlite-session names it, so both graphs
 # resolve to one diesel. Drop once these land in a diesel release.
 diesel = { git = "https://github.com/diesel-rs/diesel" }
+# The async driver shares Diesel's unreleased statement-cache contract.
+diesel-async = { git = "https://github.com/diesel-rs/diesel_async" }
 # Followed at main, whose version the `sqlparser` requirement must match for the patch to apply.
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 sqlparser_derive = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
+# rls2fga's `PgBpchar` equality requires the unreleased implementation.
+sql-values = { git = "https://github.com/connetto-rs/sql-values", branch = "main" }
 
 [package]
 name = "subql"

@@ -225,6 +225,7 @@ mod tests {
     use super::super::entry_point::{column_kind_from_scalar, direct_kind};
     use super::{render_text, RowValuesView};
     use crate::backend::{Postgres, Value};
+    use crate::testing::deployment;
     use crate::testing::TestEvent;
     use crate::visibility::records::{is_evaluable, records_from_row_view, RowRecordError};
     use crate::visibility::test_names;
@@ -240,7 +241,7 @@ mod tests {
                             meta JSONB, key UUID, note JSON, score DOUBLE PRECISION, \
                             taken DATE, blob BYTEA, at TIMESTAMPTZ);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs USING (owner = current_user);";
+CREATE POLICY docs_owner ON docs USING (owner = current_setting('app.user_id', true));";
 
     fn catalog() -> ParserDB {
         ParserDB::parse::<PostgreSqlDialect>(DDL).unwrap()
@@ -259,8 +260,8 @@ CREATE POLICY docs_owner ON docs USING (owner = current_user);";
     }
 
     fn translated_ownership() -> RecordDescription {
-        let db = ParserDB::parse::<PostgreSqlDialect>(POLICIED).unwrap();
-        TranslatorBuilder::new()
+        let db = deployment::db(POLICIED);
+        TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build()
             .translate(&db)

@@ -15,14 +15,13 @@
 //! covers, and that one fails where this property still passes.
 
 use proptest::prelude::*;
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use std::collections::BTreeSet;
 use subql::backend::{Postgres, Value};
-use subql::testing::TestEvent;
+use subql::testing::{deployment, TestEvent};
 use subql::{catalog_helpers, DefaultIds, SubscriptionEngine, SubscriptionRequest, TableId};
 
 const DDL: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
@@ -55,17 +54,13 @@ enum Op {
 }
 
 fn translator() -> Translator {
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
         .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )])
         .build()
 }
 
 fn engine() -> (Engine, TableId, TableId) {
-    let database = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("DDL parses");
+    let database = deployment::db(DDL);
     let docs = catalog_helpers::table_id::<Postgres, _>(&database, "docs").expect("docs");
     let members =
         catalog_helpers::table_id::<Postgres, _>(&database, "project_members").expect("members");

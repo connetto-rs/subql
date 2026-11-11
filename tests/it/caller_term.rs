@@ -10,13 +10,12 @@
 //! nothing ever moves the set, because an identity does not change.
 #![allow(clippy::unwrap_used)]
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, Value};
-use subql::testing::TestEvent;
+use subql::testing::{deployment, TestEvent};
 use subql::{
     catalog_helpers, DefaultIds, RegisterError, SubscriptionEngine, SubscriptionRequest, TableId,
 };
@@ -47,17 +46,13 @@ const SET_CALLER: &str = "SELECT * FROM notes \
 type Engine = SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB>;
 
 fn translator() -> Translator {
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
         .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )])
         .build()
 }
 
 fn engine() -> (Engine, TableId) {
-    let db = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("DDL parses");
+    let db = deployment::db(DDL);
     let notes = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "notes")
         .expect("notes is in the catalog");
     let engine = SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator());
@@ -456,10 +451,9 @@ fn the_batch_path_seeds_the_identity_as_the_single_path_does() {
 
 mod refusals {
     use super::{engine, note, refusal, rows_of, subscribe, Engine, CALLER, DDL, SET_CALLER};
-    use sql_traits::structs::ParserDB;
     use sqlparser::dialect::PostgreSqlDialect;
     use subql::backend::{Postgres, Value};
-    use subql::testing::TestEvent;
+    use subql::testing::{deployment, TestEvent};
     use subql::{DefaultIds, SubscriptionEngine, SubscriptionRequest, Tier, TierKind};
 
     /// The refusal the finding asked for by name: without the value the
@@ -476,8 +470,8 @@ mod refusals {
     }
 
     /// A setting key nothing declares as the caller is refused rather than read as
-    /// the subscriber. `app.user_id` answers through the registry's defaults, and
-    /// `app.tenant_id` is exactly the key those defaults do not name.
+    /// the subscriber. `app.user_id` is declared by the fixture deployment, and
+    /// `app.tenant_id` is exactly the key it does not name.
     #[test]
     fn an_undeclared_setting_key_is_refused() {
         let (mut engine, _) = engine();
@@ -673,7 +667,7 @@ mod refusals {
     /// names the caller, and says so.
     #[test]
     fn a_caller_comparison_is_refused_without_a_translator() {
-        let db = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("DDL parses");
+        let db = deployment::db(DDL);
         let mut engine: Engine = SubscriptionEngine::new(db, PostgreSqlDialect {});
         let reason = refusal(&mut engine, subscribe(1, "alice"));
         assert!(

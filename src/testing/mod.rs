@@ -23,6 +23,10 @@ pub mod dispatch_fixtures;
 #[cfg(all(any(test, feature = "testing"), feature = "visibility-records"))]
 pub mod relation_pool;
 
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+pub mod deployment;
+
 /// Concrete [`CdcEvent`] fixture for tests.
 ///
 /// Fields are public so tests can mutate individual row images without

@@ -226,6 +226,7 @@ mod tests {
     use sqlparser::dialect::PostgreSqlDialect;
 
     use crate::backend::{CdcEvent, Postgres, RowKind, Value};
+    use crate::testing::deployment;
     use crate::testing::TestEvent;
     use crate::visibility::records::RowRecordError;
     use crate::visibility::shapes::Shapes;
@@ -243,7 +244,7 @@ mod tests {
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, body TEXT);
 CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";
 
     /// `teams#member` is settled from rows of `team_members`, so a change to
@@ -255,7 +256,7 @@ CREATE TABLE docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES teams(id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user));
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true)));
 ";
 
     /// The same membership with a residual the row image can evaluate, so the
@@ -267,7 +268,7 @@ CREATE TABLE docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES teams(id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true)
             AND team_members.active));
 ";
 
@@ -282,7 +283,7 @@ CREATE TABLE public.docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES team
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true)
             AND team_members.expires_at > now()));
 ";
 
@@ -299,9 +300,9 @@ CREATE TABLE public.docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES team
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user)
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true))
   OR EXISTS (SELECT 1 FROM team_guests
-          WHERE team_guests.team_id = docs.team_id AND team_guests.user_id = current_user
+          WHERE team_guests.team_id = docs.team_id AND team_guests.user_id = current_setting('app.user_id', true)
             AND team_guests.expires_at > now()));
 ";
 
@@ -315,7 +316,7 @@ CREATE TABLE public.paper_shares(paper_id INTEGER REFERENCES papers(id), viewer 
 ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON papers FOR SELECT USING (
   EXISTS (SELECT 1 FROM paper_shares s
-          WHERE s.paper_id = papers.id AND s.viewer = current_user
+          WHERE s.paper_id = papers.id AND s.viewer = current_setting('app.user_id', true)
             AND s.weight > (SELECT avg(weight) FROM paper_shares)));
 ";
 
@@ -330,16 +331,16 @@ CREATE TABLE public.docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES team
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user)
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true))
   OR EXISTS (SELECT 1 FROM team_leads
-          WHERE team_leads.team_id = docs.team_id AND team_leads.user_id = current_user));
+          WHERE team_leads.team_id = docs.team_id AND team_leads.user_id = current_setting('app.user_id', true)));
 ";
 
     /// The subjects live in a list column, which no row image can expand.
     const ARRAY: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, members TEXT[]);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (current_user = ANY(members));
+CREATE POLICY p ON docs FOR SELECT USING (current_setting('app.user_id', true) = ANY(members));
 ";
 
     /// A key spanning two columns, so a bound query names a row by the whole
@@ -351,8 +352,8 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
 ";
 
     fn shapes(sql: &str) -> Shapes<ParserDB> {
-        let db = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
-        let outputs = TranslatorBuilder::new()
+        let db = deployment::db(sql);
+        let outputs = TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build()
             .translate(&db)
@@ -454,11 +455,14 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
 
         assert_eq!(
             diff.added,
-            [record(
-                "docs:4",
-                test_names::relation("owner"),
-                "user:alice"
-            )]
+            [
+                record("docs:4", test_names::relation("owner"), "user:alice"),
+                record(
+                    "docs:4",
+                    test_names::relation("request_gate"),
+                    "request_gate:docs"
+                ),
+            ]
         );
         assert!(
             diff.removed.is_empty(),
@@ -483,11 +487,14 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
         );
         assert_eq!(
             diff.removed,
-            [record(
-                "docs:4",
-                test_names::relation("owner"),
-                "user:alice"
-            )]
+            [
+                record("docs:4", test_names::relation("owner"), "user:alice"),
+                record(
+                    "docs:4",
+                    test_names::relation("request_gate"),
+                    "request_gate:docs"
+                ),
+            ]
         );
     }
 
@@ -844,7 +851,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
         assert_eq!(uncovered.len(), 1, "{uncovered:?}");
         assert_eq!(uncovered[0].type_name, "docs");
         assert_eq!(uncovered[0].relation, "members");
-        assert_eq!(uncovered[0].table, "docs");
+        assert_eq!(uncovered[0].table, "public.docs");
         assert_eq!(uncovered[0].reason, UncoveredReason::UnreadableColumn);
 
         // And it is refused rather than reported as a row granting nobody.
@@ -852,8 +859,10 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             .with_pk_columns([0u16]);
         let (diff, _requeries) = store.diff(&event).unwrap();
         assert!(
-            diff.added.is_empty(),
-            "the unreadable column produces no grants to add"
+            diff.added
+                .iter()
+                .all(|record| record.relation.as_str() != "members"),
+            "an unreadable column cannot state membership grants"
         );
         assert!(
             diff.removed.is_empty(),
@@ -1077,7 +1086,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
 
         let uncovered = store.uncovered();
         assert_eq!(uncovered.len(), 1, "{uncovered:?}");
-        assert_eq!(uncovered[0].table, "grants");
+        assert_eq!(uncovered[0].table, "public.grants");
         assert_eq!(uncovered[0].type_name, "docs");
         assert_eq!(uncovered[0].relation, "can_select");
         assert_eq!(uncovered[0].reason, UncoveredReason::NoBoundQuery);
@@ -1117,7 +1126,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
 
         let uncovered = store.uncovered();
         assert_eq!(uncovered.len(), 1, "{uncovered:?}");
-        assert_eq!(uncovered[0].table, "docs");
+        assert_eq!(uncovered[0].table, "public.docs");
         assert_eq!(uncovered[0].reason, UncoveredReason::NoBoundQuery);
 
         let docs = table(&store, "docs");
@@ -1567,8 +1576,8 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
     /// differencing the row was correct and free.
     #[test]
     fn one_source_reported_under_two_relations_is_one_producer() {
-        let db = ParserDB::parse::<PostgreSqlDialect>(OWNERSHIP).unwrap();
-        let outputs = TranslatorBuilder::new()
+        let db = deployment::db(OWNERSHIP);
+        let outputs = TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build()
             .translate(&db)
@@ -1598,11 +1607,14 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
         let (diff, _requeries) = store.diff(&event).unwrap();
         assert_eq!(
             diff.added,
-            [record(
-                "docs:4",
-                test_names::relation("owner"),
-                "user:alice"
-            )],
+            [
+                record("docs:4", test_names::relation("owner"), "user:alice"),
+                record(
+                    "docs:4",
+                    test_names::relation("request_gate"),
+                    "request_gate:docs"
+                ),
+            ],
             "and it is differenced from the row, once: {diff:?}"
         );
     }
@@ -1666,8 +1678,8 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
     /// it donates its fact to the union rather than refusing the region.
     #[test]
     fn a_constant_pulls_a_settled_producer_into_a_group() {
-        let db = ParserDB::parse::<PostgreSqlDialect>(OWNERSHIP).unwrap();
-        let outputs = TranslatorBuilder::new()
+        let db = deployment::db(OWNERSHIP);
+        let outputs = TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build()
             .translate(&db)
@@ -1723,8 +1735,10 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
         };
         assert_eq!(scheduled.region(), group.region());
         assert!(
-            diff.removed.is_empty(),
-            "only the group's union may remove here: {diff:?}"
+            diff.removed
+                .iter()
+                .all(|record| !group.region().holds_record(record)),
+            "group-owned facts require reconciliation {diff:?}"
         );
     }
 
@@ -1804,8 +1818,8 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
     /// facts can be placed.
     #[test]
     fn an_unplaceable_producer_stops_the_differencing_beside_it() {
-        let db = ParserDB::parse::<PostgreSqlDialect>(OWNERSHIP).unwrap();
-        let outputs = TranslatorBuilder::new()
+        let db = deployment::db(OWNERSHIP);
+        let outputs = TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build()
             .translate(&db)

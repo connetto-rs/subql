@@ -11,7 +11,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use std::hint::black_box;
 use subql::backend::{Postgres, Value};
-use subql::testing::TestEvent;
+use subql::testing::{deployment, TestEvent};
 use subql::{catalog_helpers, DefaultIds, SubscriptionEngine, SubscriptionRequest, TableId};
 
 const DDL: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
@@ -28,19 +28,15 @@ const SIZES: [u64; 3] = [500, 1_000, 2_000];
 type Engine = SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB>;
 
 fn engine() -> (Engine, TableId) {
-    let database = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("bench DDL parses");
+    let database = deployment::db(DDL);
     let members = catalog_helpers::table_id::<Postgres, _>(&database, "project_members")
         .expect("project_members is in the catalog");
     let engine = SubscriptionEngine::new(database, PostgreSqlDialect {}).with_translator(
-        rls2fga::translator::TranslatorBuilder::new()
-            .with_min_confidence(rls2fga::types::ConfidenceLevel::B)
-            .with_session_attributes([
-                rls2fga::classifier::function_registry::SessionAttribute::setting(
-                    "app.subjects",
-                    rls2fga::classifier::function_registry::SessionAttributeKind::SetAttribute,
-                ),
-            ])
-            .build(),
+        rls2fga::translator::TranslatorBuilder::new(deployment::with_settings([deployment::set(
+            "app.subjects",
+        )]))
+        .with_min_confidence(rls2fga::types::ConfidenceLevel::B)
+        .build(),
     );
     (engine, members)
 }

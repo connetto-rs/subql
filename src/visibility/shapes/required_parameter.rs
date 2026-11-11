@@ -17,12 +17,8 @@ pub struct RequiredParameter {
     /// The session setting it mirrors, so a watcher can be asked for it.
     /// [`None`] means no watcher can answer it, which today is the clock.
     pub setting_key: Option<String>,
-    /// Whether it holds a set rather than one value.
-    ///
-    /// Read off the reported separator and nothing else. The separator itself
-    /// is how the values reach Postgres joined into one string, and a watcher
-    /// holds them apart, so splitting one here would duplicate a rule the
-    /// deployment already owns.
+    /// Whether it holds a set rather than one value, read off the note's own
+    /// list report, since a JSON-array set names no separator to read it off.
     pub list: bool,
 }
 

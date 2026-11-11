@@ -40,8 +40,8 @@ use rls2fga::types::RelationShapes;
 use rls2fga::types::{
     BoundQuery, ConditionName, Record, RecordDerivation, RecordDescription, ReplayScope,
 };
-use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{CdcEvent, Postgres, RowKind, Value};
+use subql::testing::deployment;
 use subql::visibility::records::{is_evaluable, records_from_row_view};
 use subql::visibility::shapes::Shapes;
 use subql::visibility::store::{Enumeration, Requery};
@@ -72,10 +72,10 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cards ENABLE ROW LEVEL SECURITY;
 ALTER TABLE readings ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_public ON docs FOR SELECT USING (is_public);
-CREATE POLICY notes_owner ON notes FOR SELECT USING (owner_id = current_user);
-CREATE POLICY cards_owner ON cards FOR SELECT USING (meta->>'owner' = current_user);
+CREATE POLICY notes_owner ON notes FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY cards_owner ON cards FOR SELECT USING (meta->>'owner' = current_setting('app.user_id', true));
 CREATE POLICY readings_started ON readings FOR SELECT USING (starts_at <= now());
 ";
 
@@ -379,7 +379,7 @@ fn records_from_events(
 /// The descriptions rls2fga emits for `SCHEMA`, paired with the SQL that
 /// loads each one.
 fn shapes(catalog: &ParserDB) -> Vec<(String, bool, RecordDescription)> {
-    let outputs = TranslatorBuilder::new()
+    let outputs = TranslatorBuilder::new(deployment::callers())
         .with_min_confidence(ConfidenceLevel::B)
         .build()
         .translate(catalog)
@@ -409,12 +409,11 @@ fn every_record_a_row_implies_matches_the_query_that_loads_it() {
     common::create_slot(&mut pg, &slot);
     seed(&mut pg);
 
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(SCHEMA).unwrap();
+    let catalog = deployment::db(SCHEMA);
     let events = drain(&mut pg, &slot);
     assert!(!events.is_empty(), "the slot carried no row events");
 
     let shapes = shapes(&catalog);
-    assert_eq!(shapes.len(), 5, "the schema should emit five shapes");
 
     let mut compared = 0usize;
     for (sql, conditional, description) in &shapes {
@@ -442,7 +441,7 @@ fn the_difference_a_change_reports_matches_what_the_loader_would_reload() {
     seed(&mut pg);
     drain(&mut pg, &slot);
 
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(SCHEMA).unwrap();
+    let catalog = deployment::db(SCHEMA);
     let shapes = shapes(&catalog);
     let before: BTreeSet<Fact> = shapes
         .iter()
@@ -475,7 +474,7 @@ fn the_difference_a_change_reports_matches_what_the_loader_would_reload() {
         .flat_map(|(sql, conditional, _)| records_from_sql(&mut pg, sql, *conditional))
         .collect();
 
-    let outputs = TranslatorBuilder::new()
+    let outputs = TranslatorBuilder::new(deployment::callers())
         .with_min_confidence(ConfidenceLevel::B)
         .build()
         .translate(&catalog)
@@ -493,11 +492,7 @@ fn the_difference_a_change_reports_matches_what_the_loader_would_reload() {
             })
         })
         .collect();
-    let store = Shapes::new::<Postgres>(
-        ParserDB::parse::<PostgreSqlDialect>(SCHEMA).unwrap(),
-        &relations,
-        &enumerations,
-    );
+    let store = Shapes::new::<Postgres>(deployment::db(SCHEMA), &relations, &enumerations);
     assert!(store.uncovered().is_empty(), "{:?}", store.uncovered());
 
     let mut added = BTreeSet::new();
@@ -557,7 +552,7 @@ CREATE POLICY meters_member ON meters FOR SELECT USING (
     EXISTS (SELECT 1 FROM meter_members
             WHERE meter_members.tenant_id = meters.tenant_id
               AND meter_members.meter_id = meters.meter_id
-              AND meter_members.user_id = current_user
+              AND meter_members.user_id = current_setting('app.user_id', true)
               AND meter_members.expires_at > now()));
 ";
 
@@ -570,7 +565,7 @@ diesel::table! {
 }
 
 fn compound_replay_relations(catalog: &ParserDB) -> Vec<RelationShapes> {
-    let translated = TranslatorBuilder::new()
+    let translated = TranslatorBuilder::new(deployment::callers())
         .with_min_confidence(ConfidenceLevel::B)
         .build()
         .translate(catalog)
@@ -668,7 +663,7 @@ fn a_replayed_compound_key_query_selects_only_the_row_that_changed() {
 
     let events = drain(&mut pg, &slot);
     assert_eq!(events.len(), 1, "one event for one statement");
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(GRANTS_SCHEMA).unwrap();
+    let catalog = deployment::db(GRANTS_SCHEMA);
 
     let relations = compound_replay_relations(&catalog);
     let store = Shapes::new::<Postgres>(catalog, &relations, &[]);

@@ -7,13 +7,12 @@
 //! discriminating value lives on neither the subscribed row nor the subscriber.
 #![allow(clippy::unwrap_used)]
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, Value};
-use subql::testing::TestEvent;
+use subql::testing::{deployment, TestEvent};
 use subql::{
     catalog_helpers, DefaultIds, RegisterError, SubscriptionEngine, SubscriptionRequest, TableId,
 };
@@ -48,17 +47,13 @@ const SET_TERM: &str = "SELECT * FROM docs WHERE project_id IN \
 type Engine = SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB>;
 
 fn translator() -> Translator {
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
         .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )])
         .build()
 }
 
 fn engine() -> (Engine, TableId) {
-    let db = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("DDL parses");
+    let db = deployment::db(DDL);
     let docs = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "docs")
         .expect("docs is in the catalog");
     let engine = SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator());
@@ -467,9 +462,9 @@ fn a_reversed_spelling_binds_its_values_to_the_columns_they_name() {
 
 mod refusals {
     use super::{engine, refusal, rows_of, subscribe, Engine, DDL, SET_TERM, TERM};
-    use sql_traits::structs::ParserDB;
     use sqlparser::dialect::PostgreSqlDialect;
     use subql::backend::Value;
+    use subql::testing::deployment;
     use subql::{SubscriptionEngine, SubscriptionRequest};
 
     /// Without translation settings the engine cannot tell whether a relationship
@@ -477,7 +472,7 @@ mod refusals {
     /// the caller.
     #[test]
     fn a_term_is_refused_when_the_engine_has_no_translator() {
-        let db = ParserDB::parse::<PostgreSqlDialect>(DDL).expect("DDL parses");
+        let db = deployment::db(DDL);
         let mut engine: Engine = SubscriptionEngine::new(db, PostgreSqlDialect {});
         let reason = refusal(&mut engine, subscribe(1, "alice", &[7]));
         assert!(
@@ -1206,11 +1201,10 @@ mod changed_membership {
 
 mod describe_terms {
     use super::{engine, rows_of, subscribe, translator, Engine, SET_TERM, TERM};
-    use sql_traits::structs::ParserDB;
     use sqlparser::dialect::PostgreSqlDialect;
     use subql::backend::{ScalarFamily, Value};
     use subql::term::TermCaller;
-    use subql::testing::TestEvent;
+    use subql::testing::{deployment, TestEvent};
     use subql::{catalog_helpers, RegisterError, SubscriptionEngine, SubscriptionRequest, Tier};
 
     /// Registration consumes the seed, so a caller that cannot ask what to seed can
@@ -1458,7 +1452,7 @@ mod describe_terms {
         const CROSS_TERM: &str = "SELECT * FROM reports WHERE proj IN \
          (SELECT project_id FROM project_members WHERE user_id = current_setting('app.user_id', true))";
 
-        let db = ParserDB::parse::<PostgreSqlDialect>(CROSS_DDL).expect("DDL parses");
+        let db = deployment::db(CROSS_DDL);
         let reports = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "reports")
             .expect("reports is in the catalog");
         let mut engine: Engine =
