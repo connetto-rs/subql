@@ -102,6 +102,9 @@ impl PgStreamingConfig {
     }
 
     /// Ask pgoutput for its binary format (default text).
+    ///
+    /// A binary source refuses to connect when a published column nests a
+    /// type without a send function, which PostgreSQL cannot send in binary.
     #[must_use]
     pub const fn binary(mut self, binary: bool) -> Self {
         self.binary = binary;
@@ -128,6 +131,10 @@ pub enum PgStreamingError {
     /// could not be placed in commit order.
     #[error("replication stream out of order: {0}")]
     TransactionOrder(#[from] TransactionOrderError),
+    /// A published column nests a type without a send function, so a
+    /// binary stream cannot carry it.
+    #[error(transparent)]
+    Unsendable(#[from] crate::wal::UnsendableColumn),
 }
 
 /// One point where a later timeline branched from `timeline`.
@@ -194,7 +201,7 @@ impl PgStreamingCdcSource {
     ///
     /// # Errors
     ///
-    /// Returns an error if connection setup, identity discovery, slot lookup or replication startup fails.
+    /// Returns an error if connection setup, identity discovery, slot lookup or replication startup fails, and [`PgStreamingError::Unsendable`] when a binary source's publication sends a column nesting a type without a send function.
     pub fn connect<DB: DatabaseLike + 'static>(
         config: PgStreamingConfig,
         catalog: DB,
@@ -250,16 +257,31 @@ impl PgStreamingCdcSource {
             timeline,
             history,
         };
-        // `pg_type` is readable only before `START_REPLICATION`.
+        // `pg_type` and the publication are readable only before `START_REPLICATION`.
         let order = if config.binary {
-            let registry = reader
-                .type_catalog()
-                .await?
-                .iter()
-                .filter(|info| info.oid() >= crate::wal::PgTypeRegistry::FIRST_UNPINNED_OID)
-                .fold(crate::wal::PgTypeRegistry::builtin(), |registry, info| {
-                    registry.with_user_type(info.oid(), info.sends_binary(), info.base_type())
-                });
+            let registry = reader.type_catalog().await?.iter().fold(
+                crate::wal::PgTypeRegistry::builtin(),
+                |registry, info| {
+                    let nested = info
+                        .element()
+                        .into_iter()
+                        .chain(info.range_subtype())
+                        .chain(info.fields().iter().copied());
+                    registry.with_type(info.oid(), info.sends_binary(), info.base_type(), nested)
+                },
+            );
+            for relation in reader.published_relations().await? {
+                for column in &relation.columns {
+                    if let Some(refusal) = registry.unsendable_column(
+                        &relation.namespace,
+                        &relation.relation_name,
+                        &column.name,
+                        column.type_id,
+                    ) {
+                        return Err(refusal.into());
+                    }
+                }
+            }
             PgOutputOrder::binary(registry)
         } else {
             PgOutputOrder::new()
