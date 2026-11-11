@@ -1343,15 +1343,6 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
                 core::iter::once(Cow::Owned(alloc::format!("user:{}", self.0)))
             }
 
-            fn request_value(&self, parameter: &str, values: &mut RequestValues) -> bool {
-                if parameter != "app_user_id" {
-                    return false;
-                }
-                let id = alloc::format!("{}", self.0);
-                values.push(&id);
-                true
-            }
-
             fn acting_role(&self) -> Option<&str> {
                 Some(deployments::ROLE)
             }
@@ -1476,20 +1467,11 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         #[derive(Clone)]
         struct Several {
             names: Vec<String>,
-            identity: &'static str,
         }
 
         impl Subject for Several {
             fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
                 self.names.iter().map(|name| Cow::Borrowed(name.as_str()))
-            }
-
-            fn request_value(&self, parameter: &str, values: &mut RequestValues) -> bool {
-                if parameter != "app_user_id" {
-                    return false;
-                }
-                values.push(self.identity);
-                true
             }
 
             fn acting_role(&self) -> Option<&str> {
@@ -1504,11 +1486,9 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         let watchers = [
             Several {
                 names: vec!["group:g#member".to_string(), "user:alice".to_string()],
-                identity: "alice",
             },
             Several {
                 names: vec!["user:bob".to_string()],
-                identity: "bob",
             },
         ];
         let mut verdicts = vec![Verdict::Deny; 2];

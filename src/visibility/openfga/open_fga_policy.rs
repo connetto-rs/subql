@@ -1665,7 +1665,7 @@ mod tests {
         WriteRequest, MAX_TUPLES_PER_WRITE, ROLE_USAGE,
     };
     use crate::backend::{Postgres, Value};
-    use crate::testing::{block_on, deployment, TestEvent};
+    use crate::testing::{actor::Actor, block_on, deployment, TestEvent};
     use crate::visibility::shapes::Shapes;
     use crate::visibility::store::{Enumeration, Replay, Replayer, Requeries, Requery, StoreDiff};
     use crate::visibility::{test_names, test_pooling, EventRow, Verdict, VisibilityPolicy};
@@ -2051,34 +2051,6 @@ mod tests {
         );
     }
 
-    /// A watcher that names itself and the role its request acts as, `None`
-    /// for a request that does not state one.
-    struct Acting {
-        name: &'static str,
-        role: Option<&'static str>,
-    }
-
-    impl Subject for Acting {
-        fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
-            core::iter::once(Cow::Borrowed(self.name))
-        }
-
-        fn acting_role(&self) -> Option<&str> {
-            self.role
-        }
-
-        fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
-            if parameter != "app_user_id" {
-                return false;
-            }
-            let Some(identity) = self.name.rsplit_once(':').map(|(_, id)| id) else {
-                return false;
-            };
-            out.push(identity);
-            true
-        }
-    }
-
     /// A policy over a table whose read reaches only the deployment's role.
     const ROLE_SCOPED: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
@@ -2136,15 +2108,15 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
             condition: None,
         }];
         let watchers = [
-            Acting {
+            Actor {
                 name: "user:alice",
                 role: Some("app_user"),
             },
-            Acting {
+            Actor {
                 name: "user:alice",
                 role: Some("auditor"),
             },
-            Acting {
+            Actor {
                 name: "user:bob",
                 role: None,
             },
@@ -2208,7 +2180,7 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
 
     /// The event a role-scoped read is asked about.
     fn role_scoped_event(
-        policy: &OpenFgaPolicy<ParserDB, NeverAsked, Acting, Postgres>,
+        policy: &OpenFgaPolicy<ParserDB, NeverAsked, Actor<&'static str>, Postgres>,
     ) -> TestEvent<Postgres> {
         let docs = catalog_helpers::table_id::<crate::backend::Postgres, _>(
             policy.shapes().catalog(),
@@ -2224,24 +2196,32 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
     /// a userset, or a wildcard stands for nothing.
     #[test]
     fn inadmissible_subject_spellings_stand_for_no_role_tuple() {
-        let policy = role_policy::<Acting>();
+        let policy = role_policy::<Actor<&str>>();
         let event = role_scoped_event(&policy);
         let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
         let watchers = [
-            Acting {
+            Actor {
                 name: "user:alice",
                 role: Some("app_user"),
             },
-            Acting {
+            Actor {
                 name: "team:alice",
                 role: Some("app_user"),
             },
-            Acting {
+            Actor {
                 name: "user:alice#member",
                 role: Some("app_user"),
             },
-            Acting {
+            Actor {
                 name: "user:*",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "alice",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "user:",
                 role: Some("app_user"),
             },
         ];
@@ -2249,7 +2229,7 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
         let questions = policy
             .questions(&row, "can_select", &watchers, &[])
             .unwrap();
-        let [plain, other_type, userset, wildcard] = questions.as_slice() else {
+        let [plain, other_type, userset, wildcard, untyped, empty] = questions.as_slice() else {
             panic!("one question per subject name");
         };
         assert!(
@@ -2262,6 +2242,8 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
         );
         assert!(!carries_role_tuple(userset), "a userset subject is not");
         assert!(!carries_role_tuple(wildcard), "a wildcard is not");
+        assert!(!carries_role_tuple(untyped), "an untyped subject is not");
+        assert!(!carries_role_tuple(empty), "an empty identity is not");
     }
 
     /// The admission reads the model's own typed relation metadata, so a model
@@ -2294,19 +2276,19 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
         let event = role_scoped_event(&policy);
         let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
         let watchers = [
-            Acting {
+            Actor {
                 name: "user:alice",
                 role: Some("app_user"),
             },
-            Acting {
+            Actor {
                 name: "user:alice#member",
                 role: Some("app_user"),
             },
-            Acting {
+            Actor {
                 name: "user:*",
                 role: Some("app_user"),
             },
-            Acting {
+            Actor {
                 name: "team:alice",
                 role: Some("app_user"),
             },
@@ -2353,7 +2335,7 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
         .expect("a conditional model still states its ID");
         let event = role_scoped_event(&policy);
         let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
-        let watcher = Acting {
+        let watcher = Actor {
             name: "user:alice",
             role: Some("app_user"),
         };
@@ -2431,11 +2413,11 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
                 .with_pk_columns([0]);
         let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
         let watchers = [
-            Acting {
+            Actor {
                 name: "user:alice",
                 role: Some("app_user"),
             },
-            Acting {
+            Actor {
                 name: "user:alice",
                 role: None,
             },
@@ -2465,13 +2447,14 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
     #[test]
     fn a_quoted_role_travels_with_its_encoded_name() {
         let (shapes, model) = translation_over_quoted_role();
-        let policy: OpenFgaPolicy<ParserDB, NeverAsked, Acting, Postgres> = OpenFgaPolicy::new(
-            shapes,
-            OpenFgaServiceClient::new(NeverAsked),
-            "store",
-            &model,
-        )
-        .expect("a role-scoped read needs no request parameters");
+        let policy: OpenFgaPolicy<ParserDB, NeverAsked, Actor<&str>, Postgres> =
+            OpenFgaPolicy::new(
+                shapes,
+                OpenFgaServiceClient::new(NeverAsked),
+                "store",
+                &model,
+            )
+            .expect("a role-scoped read needs no request parameters");
         assert_eq!(
             policy.shapes().acting_object("reader:west"),
             Some("database_role:~7265616465723a77657374"),
@@ -2492,7 +2475,7 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
             TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::String("alice".into())])
                 .with_pk_columns([0]);
         let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
-        let watcher = Acting {
+        let watcher = Actor {
             name: "user:alice",
             role: Some("reader:west"),
         };

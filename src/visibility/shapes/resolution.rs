@@ -1200,6 +1200,7 @@ mod tests {
     use rls2fga_types::{ActionAnswer, ActionStatement};
     use rls2fga_types::{
         ConditionName, RecordDerivation, RecordDescription, RelationName, RelationShapes,
+        RequestPredicate, RowDecision,
     };
     use sql_traits::structs::{Deployment, SessionSetting, SetPacking, SettingValue};
     use sqlparser::ast::DataType;
@@ -1540,6 +1541,77 @@ mod tests {
         assert!(!parameter.list, "one value, not a set");
     }
 
+    /// Nested request predicates require parameters exactly when a leaf reads a caller value.
+    #[test]
+    fn nested_request_predicates_distinguish_roles_from_values() {
+        for value_bearing in [false, true] {
+            for any_first in [false, true] {
+                let (db, outputs) = translated_declaring(
+                    "CREATE TABLE docs(id INTEGER PRIMARY KEY);
+                     ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+                     CREATE POLICY d ON docs FOR SELECT USING (
+                       '*' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));",
+                    deployment::with_settings([deployment::set("app.bot_list")]),
+                );
+                let translation = outputs.translation();
+                let mut entry = translation
+                    .relations()
+                    .iter()
+                    .find(|entry| entry.relation == test_names::relation("can_select"))
+                    .expect("the select relation")
+                    .clone();
+                let Some(RowDecision::All(parts)) = entry.decision.as_mut() else {
+                    panic!("the request gate includes the acting role");
+                };
+                let predicate = parts
+                    .iter_mut()
+                    .find_map(|part| match part {
+                        RowDecision::Request {
+                            predicate: predicate @ RequestPredicate::Holds(_),
+                            ..
+                        } => Some(predicate),
+                        _ => None,
+                    })
+                    .expect("the caller value predicate");
+                let role = || RequestPredicate::ActsAs {
+                    role: deployment::ROLE.into(),
+                };
+                let leaf = if value_bearing {
+                    core::mem::replace(predicate, role())
+                } else {
+                    role()
+                };
+                *predicate = if any_first {
+                    RequestPredicate::Any(alloc::vec![
+                        role(),
+                        RequestPredicate::All(alloc::vec![role(), leaf]),
+                    ])
+                } else {
+                    RequestPredicate::All(alloc::vec![
+                        role(),
+                        RequestPredicate::Any(alloc::vec![role(), leaf]),
+                    ])
+                };
+                let naming = alloc::borrow::Cow::from(translation.row_naming()).into_owned();
+                let shapes = Shapes::new::<Postgres>(
+                    db,
+                    core::slice::from_ref(&entry),
+                    &enumerations(&outputs),
+                )
+                .with_row_naming(&naming)
+                .with_action_relations(translation.action_relations());
+                let docs = table(&shapes, "docs");
+
+                assert!(shapes.answers_locally(docs, ActionStatement::Select));
+                assert_eq!(
+                    shapes.has_request_gated_recipe(),
+                    value_bearing,
+                    "value_bearing={value_bearing}, any_first={any_first}"
+                );
+            }
+        }
+    }
+
     /// A set the deployment packs as a JSON array names no separator, and the
     /// note's own list report is what names it a list, so the index carries it
     /// as one.
@@ -1615,6 +1687,49 @@ mod tests {
             shapes.acting_object("nobody"),
             None,
             "a role the model admits no branch for maps nothing"
+        );
+    }
+
+    /// A constant subject without a type separator cannot name an acting role.
+    #[cfg(feature = "visibility-openfga")]
+    #[test]
+    fn an_untyped_constant_subject_does_not_name_an_acting_role() {
+        let (db, outputs) = translated(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, status TEXT);
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY d ON docs FOR SELECT USING (status = 'active');",
+        );
+        let mut enumerations = enumerations(&outputs);
+        let (record, sql) = enumerations
+            .iter()
+            .find_map(|entry| match &entry.description.derivation {
+                RecordDerivation::Constant { record } if record.subject.ends_with("#usage") => {
+                    Some((record.clone(), entry.sql))
+                }
+                _ => None,
+            })
+            .expect("a constant role grant");
+        let malformed = RecordDescription {
+            tables: Vec::new(),
+            derivation: RecordDerivation::Constant {
+                record: rls2fga_types::Record {
+                    subject: "nobody#usage".into(),
+                    ..record
+                },
+            },
+        };
+        enumerations.push(Enumeration {
+            description: &malformed,
+            sql,
+            condition: None,
+        });
+
+        let shapes = Shapes::new::<Postgres>(db, outputs.translation().relations(), &enumerations);
+
+        assert_eq!(shapes.acting_object("nobody"), None);
+        assert_eq!(
+            shapes.acting_object(deployment::ROLE),
+            Some("pg_role:app_user")
         );
     }
 

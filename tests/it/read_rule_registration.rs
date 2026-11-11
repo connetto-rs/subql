@@ -784,6 +784,83 @@ fn a_public_rule_reading_the_acting_role_keeps_query_only_matching() {
 }
 
 #[test]
+fn public_role_keywords_never_fold_a_same_named_column() {
+    for keyword in [
+        "current_role",
+        "CURRENT_ROLE",
+        "current_user",
+        "user",
+        "session_user",
+    ] {
+        for clause in [
+            format!("{keyword} = 'app_user'"),
+            format!("owner = current_setting('app.user_id', true) AND ({keyword} = 'app_user')"),
+        ] {
+            let ddl = format!(
+                "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, \"{}\" TEXT);
+                 ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY items_p ON items FOR SELECT TO PUBLIC USING ({clause});",
+                keyword.to_ascii_lowercase(),
+            );
+            let (mut engine, items) = engine_with(&ddl);
+            for (consumer, user) in [(1, "alice"), (2, "bob")] {
+                let registered = engine
+                    .register(for_user(consumer, user, &[]))
+                    .expect("the registration falls back to the query");
+                assert!(
+                    !registered
+                        .served()
+                        .expect("an in-process answer")
+                        .read_rule_folded,
+                    "{clause}",
+                );
+            }
+
+            let notifs = engine
+                .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+                .expect("dispatch runs");
+            assert_eq!(notifs.inserted(), &[1, 2], "{clause}");
+        }
+    }
+}
+
+#[test]
+fn quoted_role_keyword_columns_fold_their_public_read_rule() {
+    for keyword in ["current_role", "current_user", "user", "session_user"] {
+        let ddl = format!(
+            "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, \"{keyword}\" TEXT);
+             ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY items_p ON items FOR SELECT TO PUBLIC USING (\"{keyword}\" = 'public');",
+        );
+        let (mut engine, items) = engine_with(&ddl);
+        for (consumer, user) in [(1, "alice"), (2, "bob")] {
+            let registered = engine
+                .register(for_user(consumer, user, &[]))
+                .expect("the column rule folds");
+            assert!(
+                registered
+                    .served()
+                    .expect("an in-process answer")
+                    .read_rule_folded,
+                "{keyword}",
+            );
+        }
+
+        let notifs = engine
+            .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+            .expect("dispatch runs");
+        assert!(notifs.inserted().is_empty(), "{keyword}");
+
+        let mut public = item(2, "carol", 7);
+        public[3] = Value::String("public".into());
+        let notifs = engine
+            .consumers(&TestEvent::insert(items, public))
+            .expect("dispatch runs");
+        assert_eq!(notifs.inserted(), &[1, 2], "{keyword}");
+    }
+}
+
+#[test]
 fn a_below_threshold_rule_keeps_query_only_matching() {
     let db = parse(DDL);
     let items = table_id(&db, "items");

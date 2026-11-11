@@ -35,6 +35,7 @@ use rls2fga::types::{
     ConditionName, Record, RecordContextValue, RecordDerivation, RecordDescription, RelationName,
 };
 use subql::backend::{Postgres, Value};
+use subql::testing::actor::Actor;
 use subql::testing::deployment;
 use subql::testing::relation_pool::{relation_fed_by, RelationPool};
 use subql::testing::TestEvent;
@@ -660,45 +661,6 @@ async fn a_second_subject_name_grants_only_its_watcher() {
         [Verdict::Allow, Verdict::Deny],
         "Alice's second name grants only Alice and Bob's decoy names another team"
     );
-}
-
-/// A watcher that names itself and the role its request acts as, `None` for a
-/// request that does not state one.
-#[derive(Clone, Debug)]
-struct Actor {
-    name: String,
-    role: Option<&'static str>,
-}
-
-impl Actor {
-    /// Acting as the deployment's own role.
-    fn app_user(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            role: Some(deployment::ROLE),
-        }
-    }
-}
-
-impl Subject for Actor {
-    fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
-        core::iter::once(Cow::Borrowed(self.name.as_str()))
-    }
-
-    fn acting_role(&self) -> Option<&str> {
-        self.role
-    }
-
-    fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
-        if parameter != "app_user_id" {
-            return false;
-        }
-        let Some(identity) = self.name.rsplit_once(':').map(|(_, id)| id) else {
-            return false;
-        };
-        out.push(identity);
-        true
-    }
 }
 
 /// Direct writes are idempotent and preserve the chunk beyond the service limit.
