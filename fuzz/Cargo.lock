@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "ar_archive_writer"
-version = "0.5.3"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73cd58deff2140a0a8eae87e417bd01db68a33e148aa93d1e8cd837e55e312b6"
+checksum = "523e5e187fff36fcb8d1d19ccf0ca4ca43ec3d158316057f66dc6f72716bc5ec"
 dependencies = [
  "object",
 ]
@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "diesel"
 version = "2.3.14"
-source = "git+https://github.com/diesel-rs/diesel#c4c840419e1e5d27186c1fd4bce35e44f398fe8e"
+source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -404,7 +404,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel#c4c840419e1e5d27186c1fd4bce35e44f398fe8e"
+source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -414,7 +414,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.3.10"
-source = "git+https://github.com/diesel-rs/diesel#c4c840419e1e5d27186c1fd4bce35e44f398fe8e"
+source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -427,7 +427,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#c4c840419e1e5d27186c1fd4bce35e44f398fe8e"
+source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
 dependencies = [
  "syn 3.0.10",
 ]
@@ -451,7 +451,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#c4c840419e1e5d27186c1fd4bce35e44f398fe8e"
+source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
 dependencies = [
  "darling",
  "either",
@@ -1141,7 +1141,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#4fdc9f83a7648ca2143f609596ec606c4b50df11"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#a504f1e5199214d70c97c64a763fec27149df18e"
 dependencies = [
  "rls2fga-types",
  "serde",
@@ -1155,7 +1155,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#4fdc9f83a7648ca2143f609596ec606c4b50df11"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#a504f1e5199214d70c97c64a763fec27149df18e"
 dependencies = [
  "serde",
  "sql-values 0.5.1",
@@ -1316,7 +1316,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#fb137c97c8129fa52694118c36af323a0dd41502"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#fb373ef60a272672d59fd776a0b3df60894dea46"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -1418,7 +1418,7 @@ dependencies = [
 [[package]]
 name = "sqlstate"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#c4c840419e1e5d27186c1fd4bce35e44f398fe8e"
+source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
 
 [[package]]
 name = "stable_try_trait_v2"
