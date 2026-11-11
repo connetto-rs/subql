@@ -56,6 +56,9 @@ pub struct SubscriptionRequest<I: IdTypes, B: Backend = crate::backend::Postgres
     ///
     /// An empty set admits no rows.
     pub(crate) subjects: alloc::vec::Vec<Value<B>>,
+    /// The database role this subscriber reads as, which settles the read
+    /// rules of a membership table a term reads through.
+    pub(crate) acting_role: Option<String>,
     /// The value rows this caller's subjects currently match, grouped by the
     /// columns each membership subquery compares, each row carrying the subject
     /// that grants it.
@@ -87,6 +90,7 @@ impl<I: IdTypes, B: Backend> Clone for SubscriptionRequest<I, B> {
             binds: self.binds.clone(),
             subscriber: self.subscriber.clone(),
             subjects: self.subjects.clone(),
+            acting_role: self.acting_role.clone(),
             term_values: self.term_values.clone(),
         }
     }
@@ -112,6 +116,7 @@ impl<I: IdTypes, B: Backend> SubscriptionRequest<I, B> {
             binds: alloc::vec::Vec::new(),
             subscriber: None,
             subjects: alloc::vec::Vec::new(),
+            acting_role: None,
             term_values: alloc::vec::Vec::new(),
         }
     }
@@ -178,6 +183,24 @@ impl<I: IdTypes, B: Backend> SubscriptionRequest<I, B> {
     #[must_use]
     pub fn subjects(mut self, subjects: impl IntoIterator<Item = Value<B>>) -> Self {
         self.subjects.extend(subjects);
+        self
+    }
+
+    /// State the database role this subscriber reads as (default: none).
+    ///
+    /// A membership subquery reads its membership table under that table's own
+    /// read rules. Without a role SubQL cannot tell whom those rules narrow, so
+    /// a term reading through a table with row-level security is refused. With
+    /// one, the term is served when no policy narrows the role on that table,
+    /// and refused naming the role when one does.
+    ///
+    /// State the role a connection reading for this subscriber would
+    /// `SET ROLE` to. It is taken on trust, as
+    /// [`subscriber`](Self::subscriber) is, and visibility gates every delivery
+    /// afterwards.
+    #[must_use]
+    pub fn acting_role(mut self, role: impl Into<String>) -> Self {
+        self.acting_role = Some(role.into());
         self
     }
 

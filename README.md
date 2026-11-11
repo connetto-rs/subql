@@ -68,6 +68,8 @@ The fold admits no rows when the table has row security and no permissive read p
 
 Identity and subject-set comparisons use separate term slots, including when they compare one column. Empty subject sets admit nobody through the set comparison. `describe_terms` exposes seed reads for membership-table rules, whose current admissions, granting subjects, and membership watches persist in durable shards.
 
+A membership term reading through a table with row-level security is planned for the role the subscriber states with `SubscriptionRequest::acting_role`, and is served when no policy on that table narrows the role.
+
 `unregister_query` accepts the original query interest, and complete owner transfers report both audiences. Missing old-image cells remain `unanswered` and require a read before a transition can be settled.
 
 ## Streaming Aggregates
