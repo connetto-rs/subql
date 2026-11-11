@@ -12,31 +12,58 @@ use crate::TableId;
 /// # Examples
 ///
 /// ```
+/// # extern crate alloc;
 /// # use core::convert::Infallible;
 /// # use core::future::Future;
 /// use rls2fga_types::ConfidenceLevel;
-/// use rls2fga::translator::TranslatorBuilder;
-/// use sqlparser::dialect::PostgreSqlDialect;
+/// # use rls2fga::translator::TranslatorBuilder;
+/// use sqlparser::{ast::DataType, dialect::PostgreSqlDialect};
+/// use sql_traits::structs::{Deployment, SessionSetting, SettingValue};
 /// use subql::backend::{Postgres, Value};
 /// use subql::testing::TestEvent;
-/// use std::sync::Arc;
+/// use alloc::sync::Arc;
 /// use rls2fga_types::ActionStatement;
-/// use subql::visibility::policy::RowPolicy;
+/// use subql::visibility::policy::{RequestValues, RowPolicy, Subject};
 /// use subql::visibility::shapes::Shapes;
 /// use subql::visibility::store::Enumeration;
 /// use subql::visibility::{EventRow, RowView, RowWrite, Verdict, VisibilityPolicy};
 /// use subql::{catalog_helpers, ParserDB};
+/// use alloc::borrow::Cow;
+///
+/// #[derive(Clone)]
+/// struct Watcher {
+///     subject: &'static str,
+///     caller: &'static str,
+/// }
+///
+/// impl Subject for Watcher {
+///     fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
+///         core::iter::once(Cow::Borrowed(self.subject))
+///     }
+///
+///     fn acting_role(&self) -> Option<&str> {
+///         Some("app_user")
+///     }
+///
+///     fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
+///         if parameter != "app_user_id" {
+///             return false;
+///         }
+///         out.push(self.caller);
+///         true
+///     }
+/// }
 ///
 /// // The delegate answers whatever the row cannot. This one is never asked.
 /// struct Backend;
 /// impl VisibilityPolicy for Backend {
-///     type Watcher = String;
+///     type Watcher = Watcher;
 ///     type Error = Infallible;
 ///     type Backend = Postgres;
 ///     fn may_see<R>(
 ///         &self,
 ///         _row: &R,
-///         _watchers: &[String],
+///         _watchers: &[Watcher],
 ///         _verdicts: &mut [Verdict],
 ///     ) -> impl Future<Output = Result<(), Infallible>> + Send
 ///     where
@@ -47,7 +74,7 @@ use crate::TableId;
 ///     fn may_write<R>(
 ///         &self,
 ///         _write: RowWrite<'_, R>,
-///         _watcher: &String,
+///         _watcher: &Watcher,
 ///     ) -> impl Future<Output = Result<Verdict, Infallible>> + Send
 ///     where
 ///         R: RowView<Backend = Postgres> + Sync + ?Sized,
@@ -57,14 +84,19 @@ use crate::TableId;
 /// }
 ///
 /// let db = ParserDB::parse::<PostgreSqlDialect>(
-///     "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
+///     "CREATE ROLE app_user LOGIN;
+///      CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
 ///      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-///      CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);",
+///      CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));",
 /// )?;
 /// let docs = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "docs").expect("docs is in the catalog");
 ///
-/// // `can_select: owner`, and one row decides it.
-/// let translator = TranslatorBuilder::new()
+/// let deployment = Deployment::new(
+///     "app_user",
+///     ["app_user"],
+///     [SessionSetting::value("app.user_id", SettingValue::Caller(DataType::Text))?],
+/// )?;
+/// let translator = TranslatorBuilder::new(deployment)
 ///     .with_min_confidence(ConfidenceLevel::B)
 ///     .build();
 /// let outputs = translator.translate(&db)?.outputs_accepting_gaps();
@@ -94,7 +126,10 @@ use crate::TableId;
 ///     .with_pk_columns([0u16]);
 /// let row = EventRow::current(&event, policy.catalog()).expect("an insert carries a post-image");
 ///
-/// let watchers = ["user:alice".to_string(), "user:bob".to_string()];
+/// let watchers = [
+///     Watcher { subject: "user:alice", caller: "alice" },
+///     Watcher { subject: "user:bob", caller: "bob" },
+/// ];
 /// let mut verdicts = Vec::new();
 /// Verdict::reset(&mut verdicts, watchers.len());
 ///

@@ -22,14 +22,13 @@ use crate::common;
 use diesel::prelude::*;
 use diesel::sql_types::{Integer, Text};
 use diesel::{sql_query, PgConnection, QueryableByName};
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, ScalarFamily, Value};
 use subql::term::{MembershipTermDescription, TermCaller, TermDescription};
-use subql::testing::TestEvent;
+use subql::testing::{deployment, TestEvent};
 use subql::{catalog_helpers, DefaultIds, SubscriptionEngine, SubscriptionRequest, TableId};
 
 /// One string for the catalog and for the database, so a name the engine
@@ -86,13 +85,13 @@ struct SeedValue {
 type Engine = SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB>;
 
 fn translator() -> Translator {
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment::callers())
         .with_min_confidence(ConfidenceLevel::B)
         .build()
 }
 
 fn engine() -> (Engine, TableId) {
-    let db = ParserDB::parse::<PostgreSqlDialect>(SCHEMA).unwrap();
+    let db = deployment::db(SCHEMA);
     let docs = catalog_helpers::table_id::<Postgres, _>(&db, "docs").unwrap();
     (
         SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator()),
@@ -323,14 +322,11 @@ fn the_set_spelled_seed_read_returns_every_held_subjects_rows() {
         .execute(&mut pg)
         .unwrap();
 
-    let db = ParserDB::parse::<PostgreSqlDialect>(SCHEMA).unwrap();
-    let translator = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )])
-        .build();
+    let db = deployment::db(SCHEMA);
+    let translator =
+        TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
+            .with_min_confidence(ConfidenceLevel::B)
+            .build();
     let engine: Engine =
         SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator);
     let described = engine

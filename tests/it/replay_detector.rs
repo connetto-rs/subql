@@ -752,28 +752,25 @@ fn nan_totals_report_no_change_for_irrelevant_and_noop_transactions() {
 #[cfg(feature = "membership-term")]
 #[test]
 fn an_unfolded_read_policy_refuses_replay_admission() {
-    use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
     use rls2fga::translator::TranslatorBuilder;
     use rls2fga::types::ConfidenceLevel;
+    use subql::testing::deployment;
     // Unregistered `app.tenant_id` prevents the read rule from folding.
     const DDL: &str = "CREATE TABLE rls_items (id INT PRIMARY KEY, owner TEXT, price DOUBLE PRECISION);
         ALTER TABLE rls_items ENABLE ROW LEVEL SECURITY;
         CREATE POLICY rls_items_p ON rls_items FOR ALL USING (owner = current_setting('app.tenant_id', true));";
 
-    let translator = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )])
-        .build();
+    let translator =
+        TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
+            .with_min_confidence(ConfidenceLevel::B)
+            .build();
     let rows = vec![vec![
         Value::Int(1),
         Value::String("one".into()),
         Value::Float(2.5),
     ]];
 
-    let db = parse(DDL);
+    let db = deployment::db(DDL);
     let table = table_of(&db, "rls_items");
     let engine = engine_of(db).with_translator(translator);
 
@@ -1417,10 +1414,12 @@ fn truncate_discards_pending_deltas_and_replays_later_rows() {
 fn self_referential_membership_is_refused_before_replay() {
     use rls2fga::translator::TranslatorBuilder;
     use rls2fga::types::ConfidenceLevel;
-    let db = parse("CREATE TABLE members (id INT PRIMARY KEY, project_id INT, user_id TEXT);");
+    use subql::testing::deployment;
+    let db =
+        deployment::db("CREATE TABLE members (id INT PRIMARY KEY, project_id INT, user_id TEXT);");
     let table = table_of(&db, "members");
     let engine = engine_of(db).with_translator(
-        TranslatorBuilder::new()
+        TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build(),
     );

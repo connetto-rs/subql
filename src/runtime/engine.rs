@@ -6822,10 +6822,12 @@ mod tests {
     #[test]
     fn one_membership_event_publishes_one_partition_snapshot() {
         use crate::backend::Value;
+        use crate::testing::deployment;
         use rls2fga::translator::TranslatorBuilder;
         use rls2fga::types::ConfidenceLevel;
 
-        let ddl = "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
+        let ddl = "CREATE ROLE app_user LOGIN;
+             CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
              CREATE TABLE project_members(project_id INTEGER REFERENCES projects(id), user_id TEXT, PRIMARY KEY(project_id, user_id));
              CREATE TABLE docs(id INTEGER PRIMARY KEY, project_id INTEGER, title TEXT);";
         let db = ParserDB::parse::<PostgreSqlDialect>(ddl).expect("DDL parses");
@@ -6834,7 +6836,7 @@ mod tests {
         let members =
             crate::catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "project_members")
                 .expect("members");
-        let translator = TranslatorBuilder::new()
+        let translator = TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build();
         let mut engine: Engine =

@@ -283,6 +283,7 @@ fn compares(comparison: RequestComparison, values: &RequestValues, value: &str) 
         // policy compares a single value has not satisfied it, and reading any
         // element as a match is a wrong allow.
         RequestComparison::CallerValueEquals => values.len() == 1 && values.holds(value),
+        RequestComparison::CallerValueUnequals => values.len() == 1 && !values.holds(value),
     }
 }
 
@@ -329,6 +330,11 @@ fn holds<S: Subject + ?Sized>(
     values: &mut RequestValues,
 ) -> Local {
     match predicate {
+        RequestPredicate::ActsAs { role } => match watcher.acting_role() {
+            Some(acting) if acting == role => Local::Allow,
+            Some(_) => Local::Deny,
+            None => Local::Unresolved,
+        },
         RequestPredicate::Holds(atom) => {
             values.reset();
             // A watcher that cannot say what it sent loses speed and never

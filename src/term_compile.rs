@@ -48,6 +48,8 @@ pub fn plan_term<B: crate::backend::Backend, DB: DatabaseLike>(
         &registry,
         table_name,
         translator.min_confidence(),
+        // Membership plans are shared across acting roles.
+        None,
     )
     .map_err(|refusal| RegisterError::MembershipTermRefused(refusal.reason))?;
     let caller = match &shapes.caller {

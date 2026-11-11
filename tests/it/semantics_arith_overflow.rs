@@ -352,6 +352,7 @@ fn an_update_refused_on_one_version_reports_no_transition() {
 fn a_term_that_short_circuits_the_overflow_keeps_its_subscriber_answered() {
     use rls2fga::translator::TranslatorBuilder;
     use rls2fga::types::ConfidenceLevel;
+    use subql::testing::deployment;
 
     const DDL_TERM: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
          CREATE TABLE project_members(project_id INTEGER REFERENCES projects(id), \
@@ -362,12 +363,12 @@ fn a_term_that_short_circuits_the_overflow_keeps_its_subscriber_answered() {
           WHERE user_id = current_setting('app.user_id', true)) \
          OR qty + 9223372036854775807 > 0";
 
-    let db = ParserDB::parse::<PostgreSqlDialect>(DDL_TERM).expect("DDL parses");
+    let db = deployment::db(DDL_TERM);
     let docs = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "docs")
         .expect("docs is in the catalog");
     let mut engine: SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB> =
         SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(
-            TranslatorBuilder::new()
+            TranslatorBuilder::new(deployment::callers())
                 .with_min_confidence(ConfidenceLevel::B)
                 .build(),
         );

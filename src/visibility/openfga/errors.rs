@@ -70,6 +70,13 @@ pub enum OpenFgaError {
     /// [`Shapes::with_required_parameters`](crate::visibility::shapes::Shapes::with_required_parameters).
     #[error("the index carries a request-gated recipe and no required parameters were reported")]
     MissingRequiredParameters,
+    /// The model the questions would run against states no ID, and a check
+    /// stating no ID asks the store's latest rather than the model the
+    /// questions were built for.
+    ///
+    /// Reached when the installed model's ID was not supplied at construction.
+    #[error("the authorization model states no ID to ask against")]
+    MissingAuthorizationModelId,
 }
 
 impl OpenFgaError {

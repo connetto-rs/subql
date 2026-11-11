@@ -514,6 +514,7 @@ fn a_null_operand_the_missing_cell_can_outweigh_is_reported() {
 fn an_absent_membership_term_column_is_reported() {
     use rls2fga::translator::TranslatorBuilder;
     use rls2fga::types::ConfidenceLevel;
+    use subql::testing::deployment;
 
     const DDL_TERM: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
          CREATE TABLE project_members(project_id INTEGER REFERENCES projects(id), \
@@ -523,13 +524,13 @@ fn an_absent_membership_term_column_is_reported() {
          (SELECT project_id FROM project_members \
           WHERE user_id = current_setting('app.user_id', true))";
 
-    let db = ParserDB::parse::<PostgreSqlDialect>(DDL_TERM).expect("DDL parses");
+    let db = deployment::db(DDL_TERM);
     let notes = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "notes")
         .expect("notes is in the catalog");
     let project_id = catalog_helpers::column_id::<Postgres, _>(&db, notes, "project_id")
         .expect("project_id resolves");
     let mut engine: Engine = SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(
-        TranslatorBuilder::new()
+        TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build(),
     );

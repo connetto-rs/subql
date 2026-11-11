@@ -51,8 +51,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::future::Future;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::LazyLock;
 
-    use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
     use rls2fga::generator::well_known::can_select_relation;
     use rls2fga::translator::TranslatorBuilder;
     use rls2fga_types::ConfidenceLevel;
@@ -63,11 +63,11 @@ mod tests {
         ValueSource,
     };
     use rls2fga_types::{RelationShapes, RowDecision};
-    use sqlparser::dialect::PostgreSqlDialect;
+    use sql_traits::structs::Deployment;
 
     use super::{image_of, RequestValues, RowPolicy, Subject};
     use crate::backend::{Postgres, Value};
-    use crate::testing::{block_on, TestEvent, YieldOnce};
+    use crate::testing::{block_on, deployment as deployments, TestEvent, YieldOnce};
     use crate::visibility::shapes::{Shapes, SharedShapes};
     use crate::visibility::{EventRow, RowView, RowWrite, Verdict, VisibilityPolicy};
     use crate::{catalog_helpers, ColumnId, ParserDB, TableId, ValueError};
@@ -254,14 +254,26 @@ mod tests {
         fn may_write<R>(
             &self,
             _write: RowWrite<'_, R>,
-            _watcher: &W,
+            watcher: &W,
         ) -> impl Future<Output = Result<Verdict, Unreachable>> + Send
         where
             R: RowView<Backend = Postgres> + Sync + ?Sized,
         {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.seen.fetch_add(1, Ordering::Relaxed);
-            async { Ok(Verdict::Deny) }
+            let allowed = self.grant.as_ref().is_some_and(|name| {
+                watcher
+                    .subjects()
+                    .any(|held| held.as_ref() == name.as_str())
+            });
+            async move {
+                YieldOnce(false).await;
+                Ok(if allowed {
+                    Verdict::Allow
+                } else {
+                    Verdict::Deny
+                })
+            }
         }
     }
 
@@ -271,22 +283,24 @@ mod tests {
     const OWNERSHIP: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";
 
     /// `can_select: owner or editor`.
     const UNION: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user OR editor_id = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (
+  owner_id = current_setting('app.user_id', true)
+  OR editor_id = current_setting('app.user_id', true));
 ";
 
     /// `can_select: owner and editor`, through a restrictive barrier.
     const INTERSECTION: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p1 ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY p2 ON docs AS RESTRICTIVE FOR SELECT USING (editor_id = current_user);
+CREATE POLICY p1 ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY p2 ON docs AS RESTRICTIVE FOR SELECT USING (editor_id = current_setting('app.user_id', true));
 ";
 
     /// `can_select: member from teams`, a tuple-to-userset, never decidable.
@@ -297,7 +311,8 @@ CREATE TABLE docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES teams(id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user));
+          WHERE team_members.team_id = docs.team_id
+            AND team_members.user_id = current_setting('app.user_id', true)));
 ";
 
     /// Row-level security on with no policy at all, which `PostgreSQL` reads as
@@ -309,8 +324,14 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
 ";
 
     fn translated(sql: &str) -> (ParserDB, Vec<RelationShapes>) {
-        let db = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
-        let relations = TranslatorBuilder::new()
+        translated_for(sql, deployments::callers())
+    }
+
+    /// The same, read for `deployment`, so a fixture whose policies read a
+    /// setting the default deployment does not carry names it explicitly.
+    fn translated_for(sql: &str, deployment: Deployment) -> (ParserDB, Vec<RelationShapes>) {
+        let db = deployments::db(sql);
+        let relations = TranslatorBuilder::new(deployment)
             .with_min_confidence(ConfidenceLevel::B)
             .build()
             .translate(&db)
@@ -320,14 +341,6 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
         (db, relations)
     }
 
-    /// The two session attributes almost every fixture here declares.
-    fn common_attributes() -> [SessionAttribute; 2] {
-        [
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.subjects", SessionAttributeKind::SetAttribute),
-        ]
-    }
-
     /// The index both readers share, built the way a real caller builds it.
     ///
     /// The naming and the statement answers come from translating the catalog,
@@ -335,25 +348,24 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     /// shape a real schema does not produce. Which relation answers a statement
     /// is the model's either way.
     fn shared(db: ParserDB, relations: &[RelationShapes]) -> SharedShapes<ParserDB> {
-        shared_declaring(db, relations, common_attributes())
+        shared_for(db, relations, deployments::callers())
     }
 
-    /// The same, for a fixture whose policies read a session attribute
-    /// [`common_attributes`] does not carry.
+    /// The same, read for `deployment`, for a fixture whose policies read a
+    /// setting the default deployment does not carry.
     ///
     /// **The answers have to come from a translator that reads the policy the
     /// same way the recipes did.** One that cannot read it drops the policy, and
     /// a table with row-level security on and no policy left grants nobody, so
     /// the report says the statement is refused rather than describing the rule
     /// the fixture actually wrote.
-    fn shared_declaring(
+    fn shared_for(
         db: ParserDB,
         relations: &[RelationShapes],
-        attributes: impl IntoIterator<Item = SessionAttribute>,
+        deployment: Deployment,
     ) -> SharedShapes<ParserDB> {
-        let translator = TranslatorBuilder::new()
+        let translator = TranslatorBuilder::new(deployment)
             .with_min_confidence(ConfidenceLevel::B)
-            .with_session_attributes(attributes)
             .build();
         let (naming, answers, notes) = {
             let translation = translator.translate(&db).unwrap();
@@ -392,11 +404,15 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     }
 
     /// Ask `policy` about `event`'s post-image and read the verdicts back.
-    fn see(
-        policy: &RowPolicy<ParserDB, Delegate>,
+    fn see<B, W>(
+        policy: &RowPolicy<ParserDB, B>,
         event: &TestEvent<Postgres>,
-        watchers: &[String],
-    ) -> Result<Vec<Verdict>, Unreachable> {
+        watchers: &[W],
+    ) -> Result<Vec<Verdict>, B::Error>
+    where
+        B: VisibilityPolicy<Watcher = W, Backend = Postgres>,
+        W: Subject + Clone,
+    {
         let view = EventRow::current(event, policy.catalog()).unwrap();
         let mut verdicts = Vec::new();
         Verdict::reset(&mut verdicts, watchers.len());
@@ -416,12 +432,12 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     fn a_row_naming_the_watcher_is_allowed_without_a_round_trip() {
         let (db, relations) = translated(OWNERSHIP);
         let event = insert(docs_id(&db), docs_row(text("alice"), Value::Null));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::default());
+        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
 
-        let got = see(&policy, &event, &watchers(&["user:alice"])).unwrap();
+        let got = see(&policy, &event, &[Principal::identity("user:alice")]).unwrap();
 
         assert_eq!(got, [Verdict::Allow]);
-        assert_eq!(policy.inner().see_calls(), 0, "answered from the row");
+        assert_eq!(policy.inner().calls(), 0, "answered from the row");
     }
 
     /// A watcher the row does not name is denied locally, not delegated.
@@ -430,12 +446,15 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     fn a_row_naming_somebody_else_is_denied_without_a_round_trip() {
         let (db, relations) = translated(OWNERSHIP);
         let event = insert(docs_id(&db), docs_row(text("alice"), Value::Null));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:bob"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:bob"),
+        );
 
-        let got = see(&policy, &event, &watchers(&["user:bob"])).unwrap();
+        let got = see(&policy, &event, &[Principal::identity("user:bob")]).unwrap();
 
         assert_eq!(got, [Verdict::Deny]);
-        assert_eq!(policy.inner().see_calls(), 0);
+        assert_eq!(policy.inner().calls(), 0);
     }
 
     /// The half that matters: a relation the schema does not decide from one
@@ -508,12 +527,15 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
         let (db, relations) = translated(OWNERSHIP);
         let docs = docs_id(&db);
         let event = insert(docs, docs_row(text("alice"), Value::Null));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:alice"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:alice"),
+        );
         let view = EventRow::current(&event, policy.catalog()).unwrap();
+        let watcher = Principal::identity("user:alice");
 
-        let read = see(&policy, &event, &watchers(&["user:alice"])).unwrap();
-        let removal =
-            block_on(policy.may_write(RowWrite::Delete { old: &view }, &"user:alice".to_string()));
+        let removal = block_on(policy.may_write(RowWrite::Delete { old: &view }, &watcher));
+        let read = see(&policy, &event, &[watcher]).unwrap();
 
         assert_eq!(
             read,
@@ -526,8 +548,8 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
             "and no policy admits a delete, whoever asks"
         );
         assert_eq!(
-            (policy.inner().see_calls(), policy.inner().write_calls()),
-            (0, 0),
+            policy.inner().calls(),
+            0,
             "neither answer needed the service"
         );
     }
@@ -538,12 +560,15 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     fn a_row_whose_grant_column_is_null_is_denied_without_a_round_trip() {
         let (db, relations) = translated(OWNERSHIP);
         let event = insert(docs_id(&db), docs_row(Value::Null, Value::Null));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:alice"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:alice"),
+        );
 
-        let got = see(&policy, &event, &watchers(&["user:alice"])).unwrap();
+        let got = see(&policy, &event, &[Principal::identity("user:alice")]).unwrap();
 
         assert_eq!(got, [Verdict::Deny]);
-        assert_eq!(policy.inner().see_calls(), 0);
+        assert_eq!(policy.inner().calls(), 0);
     }
 
     // Composition
@@ -553,17 +578,21 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     fn a_union_recipe_allows_a_watcher_named_by_either_leaf() {
         let (db, relations) = translated(UNION);
         let event = insert(docs_id(&db), docs_row(text("alice"), text("bob")));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::default());
+        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
 
         let got = see(
             &policy,
             &event,
-            &watchers(&["user:alice", "user:bob", "user:carol"]),
+            &[
+                Principal::identity("user:alice"),
+                Principal::identity("user:bob"),
+                Principal::identity("user:carol"),
+            ],
         )
         .unwrap();
 
         assert_eq!(got, [Verdict::Allow, Verdict::Allow, Verdict::Deny]);
-        assert_eq!(policy.inner().see_calls(), 0);
+        assert_eq!(policy.inner().calls(), 0);
     }
 
     /// `owner and editor`: naming only one side grants nothing. Flattening
@@ -573,12 +602,20 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     fn an_intersection_recipe_denies_a_watcher_named_by_only_one_leaf() {
         let (db, relations) = translated(INTERSECTION);
         let event = insert(docs_id(&db), docs_row(text("alice"), text("bob")));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::default());
+        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
 
-        let got = see(&policy, &event, &watchers(&["user:alice", "user:bob"])).unwrap();
+        let got = see(
+            &policy,
+            &event,
+            &[
+                Principal::identity("user:alice"),
+                Principal::identity("user:bob"),
+            ],
+        )
+        .unwrap();
 
         assert_eq!(got, [Verdict::Deny, Verdict::Deny]);
-        assert_eq!(policy.inner().see_calls(), 0);
+        assert_eq!(policy.inner().calls(), 0);
     }
 
     /// The same row naming one user on both sides satisfies the intersection.
@@ -586,12 +623,12 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     fn an_intersection_recipe_allows_a_watcher_named_by_every_leaf() {
         let (db, relations) = translated(INTERSECTION);
         let event = insert(docs_id(&db), docs_row(text("alice"), text("alice")));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::default());
+        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
 
-        let got = see(&policy, &event, &watchers(&["user:alice"])).unwrap();
+        let got = see(&policy, &event, &[Principal::identity("user:alice")]).unwrap();
 
         assert_eq!(got, [Verdict::Allow]);
-        assert_eq!(policy.inner().see_calls(), 0);
+        assert_eq!(policy.inner().calls(), 0);
     }
 
     /// An intersection over nothing is "everybody" if you fold it, so it is
@@ -647,14 +684,19 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
         for size in [10usize, 1000] {
             let (db, relations) = translated(OWNERSHIP);
             let event = insert(docs_id(&db), docs_row(text("7"), Value::Null));
-            let policy = RowPolicy::new(shared(db, &relations), Delegate::default());
-            let audience: Vec<String> = (0..size).map(|i| alloc::format!("user:{i}")).collect();
+            let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
+            let audience: Vec<Principal> = (0..size)
+                .map(|i| {
+                    let name = alloc::format!("user:{i}");
+                    Principal::identity(&name)
+                })
+                .collect();
 
             let got = see(&policy, &event, &audience).unwrap();
 
             assert_eq!(got[7], Verdict::Allow);
             assert_eq!(got[8], Verdict::Deny);
-            counts.push(policy.inner().see_calls());
+            counts.push(policy.inner().calls());
         }
         assert_eq!(counts, [0, 0]);
     }
@@ -669,33 +711,37 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
         let (db, relations) = translated(OWNERSHIP);
         let docs = docs_id(&db);
         let event = insert(docs, docs_row(text("alice"), Value::Null));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:alice"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:alice"),
+        );
 
         assert!(policy.answers_locally(docs, ActionStatement::Select));
         assert!(policy.answers_locally(docs, ActionStatement::Delete));
 
         let view = EventRow::current(&event, policy.catalog()).unwrap();
-        let got =
-            block_on(policy.may_write(RowWrite::Delete { old: &view }, &"user:alice".to_string()))
-                .unwrap();
+        let got = block_on(policy.may_write(
+            RowWrite::Delete { old: &view },
+            &Principal::identity("user:alice"),
+        ))
+        .unwrap();
 
         assert_eq!(
             got,
             Verdict::Deny,
             "alice reads the row she owns and still deletes nothing"
         );
-        assert_eq!(policy.inner().write_calls(), 0);
+        assert_eq!(policy.inner().calls(), 0);
     }
 
     /// A table no recipe covers is delegated whole.
     #[test]
     fn a_table_outside_every_recipe_is_delegated() {
         let (_, relations) = translated(OWNERSHIP);
-        let catalog = ParserDB::parse::<PostgreSqlDialect>(
+        let catalog = deployments::db(
             "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT);
              CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);",
-        )
-        .unwrap();
+        );
         let notes =
             catalog_helpers::table_id::<crate::backend::Postgres, _>(&catalog, "notes").unwrap();
         let event = insert(notes, vec![Value::Int(1), text("hi")]);
@@ -800,12 +846,16 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     fn the_same_watcher_twice_gets_the_same_answer_twice() {
         let (db, relations) = translated(OWNERSHIP);
         let event = insert(docs_id(&db), docs_row(text("alice"), Value::Null));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::default());
+        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
 
         let got = see(
             &policy,
             &event,
-            &watchers(&["user:alice", "user:bob", "user:alice"]),
+            &[
+                Principal::identity("user:alice"),
+                Principal::identity("user:bob"),
+                Principal::identity("user:alice"),
+            ],
         )
         .unwrap();
 
@@ -829,8 +879,8 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
         assert_eq!(verdicts, [Verdict::Deny, Verdict::Deny]);
     }
 
-    fn event_view<'a>(
-        policy: &'a RowPolicy<ParserDB, Delegate>,
+    fn event_view<'a, B>(
+        policy: &'a RowPolicy<ParserDB, B>,
         event: &'a TestEvent<Postgres>,
     ) -> EventRow<'a, TestEvent<Postgres>, ParserDB> {
         EventRow::current(event, policy.catalog()).unwrap()
@@ -858,8 +908,8 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     const DELETE_GATED: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY pd ON docs FOR DELETE USING (editor_id = current_user);
+CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY pd ON docs FOR DELETE USING (editor_id = current_setting('app.user_id', true));
 ";
 
     /// A write the schema decides costs no round trip either, and it is the
@@ -869,15 +919,22 @@ CREATE POLICY pd ON docs FOR DELETE USING (editor_id = current_user);
         let (db, relations) = translated(DELETE_GATED);
         let docs = docs_id(&db);
         let event = insert(docs, docs_row(text("alice"), text("alice")));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:bob"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:bob"),
+        );
 
         assert!(policy.answers_locally(docs, ActionStatement::Delete));
         let view = event_view(&policy, &event);
 
-        let allowed =
-            block_on(policy.may_write(RowWrite::Delete { old: &view }, &"user:alice".to_string()));
-        let denied =
-            block_on(policy.may_write(RowWrite::Delete { old: &view }, &"user:bob".to_string()));
+        let allowed = block_on(policy.may_write(
+            RowWrite::Delete { old: &view },
+            &Principal::identity("user:alice"),
+        ));
+        let denied = block_on(policy.may_write(
+            RowWrite::Delete { old: &view },
+            &Principal::identity("user:bob"),
+        ));
 
         assert_eq!(allowed, Ok(Verdict::Allow));
         assert_eq!(
@@ -885,7 +942,7 @@ CREATE POLICY pd ON docs FOR DELETE USING (editor_id = current_user);
             Ok(Verdict::Deny),
             "the delegate would have allowed bob"
         );
-        assert_eq!(policy.inner().write_calls(), 0);
+        assert_eq!(policy.inner().calls(), 0);
     }
 
     /// Only the editor may delete, even though the owner may read. Reading
@@ -895,15 +952,17 @@ CREATE POLICY pd ON docs FOR DELETE USING (editor_id = current_user);
         let (db, relations) = translated(DELETE_GATED);
         let docs = docs_id(&db);
         let event = insert(docs, docs_row(text("alice"), text("bob")));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::default());
+        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
         let view = event_view(&policy, &event);
 
+        let watcher = Principal::identity("user:alice");
+        let removal = block_on(policy.may_write(RowWrite::Delete { old: &view }, &watcher));
         let mut verdicts = vec![Verdict::Deny];
-        block_on(policy.may_see(&view, &watchers(&["user:alice"]), &mut verdicts)).unwrap();
+        block_on(policy.may_see(&view, &[watcher], &mut verdicts)).unwrap();
 
         assert_eq!(verdicts, [Verdict::Allow], "alice owns it, so she reads it");
         assert_eq!(
-            block_on(policy.may_write(RowWrite::Delete { old: &view }, &"user:alice".to_string())),
+            removal,
             Ok(Verdict::Deny),
             "she is not the editor, so she does not delete it"
         );
@@ -917,9 +976,10 @@ CREATE POLICY pd ON docs FOR DELETE USING (editor_id = current_user);
     const UPDATE_TWO_SIDED: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY pu ON docs FOR UPDATE
-  USING (owner_id = current_user) WITH CHECK (editor_id = current_user);
+  USING (owner_id = current_setting('app.user_id', true))
+  WITH CHECK (editor_id = current_setting('app.user_id', true));
 ";
 
     /// Only `can_update_using` is decidable. The `SELECT` policy is what makes
@@ -932,10 +992,11 @@ CREATE TABLE team_members(team_id INTEGER REFERENCES teams(id), user_id TEXT);
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT,
                   team_id INTEGER REFERENCES teams(id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY pu ON docs FOR UPDATE USING (owner_id = current_user)
+CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY pu ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id', true))
   WITH CHECK (EXISTS (SELECT 1 FROM team_members
-    WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user));
+    WHERE team_members.team_id = docs.team_id
+      AND team_members.user_id = current_setting('app.user_id', true)));
 ";
 
     /// The mirror: only `can_update_check` is decidable, because the clause
@@ -946,10 +1007,11 @@ CREATE TABLE team_members(team_id INTEGER REFERENCES teams(id), user_id TEXT);
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT,
                   team_id INTEGER REFERENCES teams(id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
-    WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user))
-  WITH CHECK (editor_id = current_user);
+    WHERE team_members.team_id = docs.team_id
+      AND team_members.user_id = current_setting('app.user_id', true)))
+  WITH CHECK (editor_id = current_setting('app.user_id', true));
 ";
 
     /// A `docs` row of the two fixtures above: id 4, in team 3.
@@ -974,7 +1036,10 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             docs_row(text("bob"), text("bob")),
         )
         .with_pk_columns([0u16]);
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:bob"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:bob"),
+        );
 
         assert!(policy.answers_locally(docs, ActionStatement::SelectForUpdate));
         assert!(policy.answers_locally(docs, ActionStatement::Update));
@@ -987,7 +1052,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
                 old: &old,
                 new: &new,
             },
-            &"user:bob".to_string(),
+            &Principal::identity("user:bob"),
         ));
 
         assert_eq!(
@@ -996,7 +1061,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             "bob does not hold the row as it is, so he cannot replace it"
         );
         assert_eq!(
-            policy.inner().write_calls(),
+            policy.inner().calls(),
             0,
             "and the schema settled it with no round trip, though the \
              delegate would have granted bob"
@@ -1018,7 +1083,10 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             docs_row(text("alice"), text("bob")),
         )
         .with_pk_columns([0u16]);
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:alice"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:alice"),
+        );
 
         let old = EventRow::previous(&event, policy.catalog()).unwrap();
         let new = EventRow::current(&event, policy.catalog()).unwrap();
@@ -1027,7 +1095,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
                 old: &old,
                 new: &new,
             },
-            &"user:alice".to_string(),
+            &Principal::identity("user:alice"),
         ));
 
         assert_eq!(
@@ -1035,7 +1103,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             Ok(Verdict::Deny),
             "she holds it now and would not be its editor after"
         );
-        assert_eq!(policy.inner().write_calls(), 0);
+        assert_eq!(policy.inner().calls(), 0);
     }
 
     /// The half that judges the row as it stands answers on its own, which is
@@ -1044,16 +1112,19 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
     fn the_row_as_it_stands_answers_a_replacement_question_alone() {
         let (db, relations) = translated(UPDATE_TWO_SIDED);
         let event = insert(docs_id(&db), docs_row(text("alice"), text("bob")));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:bob"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:bob"),
+        );
         let view = event_view(&policy, &event);
 
         let alice = block_on(policy.may_write(
             RowWrite::UpdateUsing { old: &view },
-            &"user:alice".to_string(),
+            &Principal::identity("user:alice"),
         ));
         let bob = block_on(policy.may_write(
             RowWrite::UpdateUsing { old: &view },
-            &"user:bob".to_string(),
+            &Principal::identity("user:bob"),
         ));
 
         assert_eq!(alice, Ok(Verdict::Allow), "alice owns it");
@@ -1062,7 +1133,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             Ok(Verdict::Deny),
             "bob is only the editor, and the delegate would have granted him"
         );
-        assert_eq!(policy.inner().write_calls(), 0);
+        assert_eq!(policy.inner().calls(), 0);
     }
 
     /// A replacement whose first half refuses is a definite refusal, so the
@@ -1081,7 +1152,10 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             docs_row(text("alice"), text("bob")),
         )
         .with_pk_columns([0u16]);
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:bob"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:bob"),
+        );
 
         assert!(policy.answers_locally(docs, ActionStatement::SelectForUpdate));
         assert!(policy.answers_locally(docs, ActionStatement::Update));
@@ -1093,7 +1167,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
                 old: &old,
                 new: &new,
             },
-            &"user:bob".to_string(),
+            &Principal::identity("user:bob"),
         ));
 
         assert_eq!(
@@ -1102,7 +1176,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             "bob does not own the row as it stands, whatever he writes into it"
         );
         assert_eq!(
-            policy.inner().write_calls(),
+            policy.inner().calls(),
             0,
             "a refused first half settles the conjunction"
         );
@@ -1120,7 +1194,10 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             docs_team_row(text("alice"), text("alice")),
         )
         .with_pk_columns([0u16]);
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:alice"));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:alice"),
+        );
 
         assert!(
             policy.answers_locally(docs, ActionStatement::SelectForUpdate),
@@ -1138,11 +1215,11 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
                 old: &old,
                 new: &new,
             },
-            &"user:alice".to_string(),
+            &Principal::identity("user:alice"),
         ));
 
         assert_eq!(got, Ok(Verdict::Allow), "the delegate answered");
-        assert_eq!(policy.inner().write_calls(), 1);
+        assert_eq!(policy.inner().calls(), 1);
     }
 
     /// A replacement whose first half is undecidable delegates, even though the
@@ -1203,14 +1280,14 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         struct Borrowed(AtomicUsize);
 
         impl VisibilityPolicy for Borrowed {
-            type Watcher = &'static str;
+            type Watcher = &'static Principal;
             type Error = Unreachable;
             type Backend = Postgres;
 
             fn may_see<R>(
                 &self,
                 _row: &R,
-                _watchers: &[&'static str],
+                _watchers: &[&'static Principal],
                 _verdicts: &mut [Verdict],
             ) -> impl Future<Output = Result<(), Unreachable>> + Send
             where
@@ -1223,7 +1300,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             fn may_write<R>(
                 &self,
                 _write: RowWrite<'_, R>,
-                _watcher: &&'static str,
+                _watcher: &&'static Principal,
             ) -> impl Future<Output = Result<Verdict, Unreachable>> + Send
             where
                 R: RowView<Backend = Postgres> + Sync + ?Sized,
@@ -1233,13 +1310,18 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             }
         }
 
+        // The backend demands a `'static` watcher, so the two names live in
+        // statics rather than on the stack.
+        static ALICE: LazyLock<Principal> = LazyLock::new(|| Principal::identity("user:alice"));
+        static BOB: LazyLock<Principal> = LazyLock::new(|| Principal::identity("user:bob"));
+
         let (db, relations) = translated(OWNERSHIP);
         let event = insert(docs_id(&db), docs_row(text("alice"), Value::Null));
         let policy = RowPolicy::new(shared(db, &relations), Borrowed::default());
         let view = EventRow::current(&event, policy.catalog()).unwrap();
         let mut verdicts = vec![Verdict::Deny; 2];
 
-        block_on(policy.may_see(&view, &["user:alice", "user:bob"], &mut verdicts)).unwrap();
+        block_on(policy.may_see(&view, &[&*ALICE, &*BOB], &mut verdicts)).unwrap();
 
         assert_eq!(verdicts, [Verdict::Allow, Verdict::Deny]);
         assert_eq!(policy.inner().0.load(Ordering::Relaxed), 0);
@@ -1259,6 +1341,10 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         impl Subject for Typed {
             fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
                 core::iter::once(Cow::Owned(alloc::format!("user:{}", self.0)))
+            }
+
+            fn acting_role(&self) -> Option<&str> {
+                Some(deployments::ROLE)
             }
         }
 
@@ -1322,14 +1408,14 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         struct Shared(AtomicUsize);
 
         impl VisibilityPolicy for Shared {
-            type Watcher = Arc<String>;
+            type Watcher = Arc<Principal>;
             type Error = Unreachable;
             type Backend = Postgres;
 
             fn may_see<R>(
                 &self,
                 _row: &R,
-                _watchers: &[Arc<String>],
+                _watchers: &[Arc<Principal>],
                 _verdicts: &mut [Verdict],
             ) -> impl Future<Output = Result<(), Unreachable>> + Send
             where
@@ -1342,7 +1428,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             fn may_write<R>(
                 &self,
                 _write: RowWrite<'_, R>,
-                _watcher: &Arc<String>,
+                _watcher: &Arc<Principal>,
             ) -> impl Future<Output = Result<Verdict, Unreachable>> + Send
             where
                 R: RowView<Backend = Postgres> + Sync + ?Sized,
@@ -1357,8 +1443,8 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         let policy = RowPolicy::new(shared(db, &relations), Shared::default());
         let view = EventRow::current(&event, policy.catalog()).unwrap();
         let audience = [
-            Arc::new("user:alice".to_string()),
-            Arc::new("user:bob".to_string()),
+            Arc::new(Principal::identity("user:alice")),
+            Arc::new(Principal::identity("user:bob")),
         ];
         let mut verdicts = vec![Verdict::Deny; 2];
 
@@ -1370,20 +1456,26 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
 
     // What a watcher exposes: names, and the values it sent
 
-    /// A watcher authenticating as several names is granted when the row
+    /// A watcher authenticating as several names is admitted when the row
     /// names any one of them.
     ///
     /// A real consumer's principal carries an identity and zero or more
-    /// further subjects, so naming only the first would deny a holder the
-    /// model grants.
+    /// further subjects, so naming only the identity would deny a holder the
+    /// model admits.
     #[test]
-    fn a_watcher_with_several_names_is_granted_by_any_of_them() {
+    fn a_watcher_with_several_names_is_admitted_by_any_of_them() {
         #[derive(Clone)]
-        struct Several(Vec<String>);
+        struct Several {
+            names: Vec<String>,
+        }
 
         impl Subject for Several {
             fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
-                self.0.iter().map(|name| Cow::Borrowed(name.as_str()))
+                self.names.iter().map(|name| Cow::Borrowed(name.as_str()))
+            }
+
+            fn acting_role(&self) -> Option<&str> {
+                Some(deployments::ROLE)
             }
         }
 
@@ -1392,8 +1484,12 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         let policy = RowPolicy::new(shared(db, &relations), Named::<Several>::default());
         let view = EventRow::current(&event, policy.catalog()).unwrap();
         let watchers = [
-            Several(vec!["user:bob".to_string(), "user:alice".to_string()]),
-            Several(vec!["user:bob".to_string()]),
+            Several {
+                names: vec!["group:g#member".to_string(), "user:alice".to_string()],
+            },
+            Several {
+                names: vec!["user:bob".to_string()],
+            },
         ];
         let mut verdicts = vec![Verdict::Deny; 2];
 
@@ -1402,7 +1498,7 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         assert_eq!(
             verdicts,
             [Verdict::Allow, Verdict::Deny],
-            "the second name is what grants the first watcher"
+            "the second name is what admits the first watcher"
         );
         assert_eq!(policy.inner().calls(), 0);
     }
@@ -1483,46 +1579,6 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         assert_eq!(values.capacity(), capacity, "the buffer was reused");
     }
 
-    /// A watcher reached through a wrapper is asked for its values too.
-    ///
-    /// Forgetting to forward this is silent: the wrapper would report that it
-    /// cannot answer, and every request-gated grant would delegate instead of
-    /// being decided locally.
-    ///
-    /// Asked through a generic bound, because that is the only way to reach
-    /// the wrapper's own impl. Calling `(&watcher).request_value(..)` directly
-    /// resolves to the inner type's impl instead, since the method takes
-    /// `&self` and the receiver already has that shape, so a test written that
-    /// way passes with the forwarding deleted.
-    #[test]
-    fn a_wrapped_watcher_forwards_the_values_it_holds() {
-        struct Keyed;
-
-        impl Subject for Keyed {
-            fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
-                core::iter::empty()
-            }
-
-            fn request_value(&self, _parameter: &str, out: &mut RequestValues) -> bool {
-                out.push("abc");
-                true
-            }
-        }
-
-        /// Reaches the watcher exactly as the policy does.
-        fn ask<S: Subject>(watcher: S, out: &mut RequestValues) -> bool {
-            watcher.request_value("app_subjects", out)
-        }
-
-        let mut values = RequestValues::new();
-        assert!(ask(Arc::new(Keyed), &mut values));
-        assert!(values.holds("abc"), "the shared handle forwarded it");
-
-        values.reset();
-        assert!(ask(&Keyed, &mut values));
-        assert!(values.holds("abc"), "the reference forwarded it");
-    }
-
     // Recipes this does not recognise
 
     /// The shape every connetto table has: one policy whose `USING` is an `OR`
@@ -1538,47 +1594,62 @@ CREATE POLICY notes_p ON notes USING (
   OR owner = ANY(string_to_array(current_setting('app.subjects', true), ',')));
 ";
 
-    /// Translate with the request-scoped values declared, which is what makes
-    /// the held-keys arm classify at all. Without the declarations rls2fga
-    /// refuses that arm and the model keeps only the owner.
+    /// Translate with the held keys declared, which is what makes the
+    /// held-keys arm classify at all. Without the declaration rls2fga refuses
+    /// that arm and the model keeps only the owner.
     fn translated_with_keys(sql: &str) -> (ParserDB, Vec<RelationShapes>) {
-        let db = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
-        let relations = TranslatorBuilder::new()
-            .with_min_confidence(ConfidenceLevel::B)
-            .with_session_attributes([
-                SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-                SessionAttribute::setting("app.subjects", SessionAttributeKind::SetAttribute),
-            ])
-            .build()
-            .translate(&db)
-            .unwrap()
-            .relations()
-            .to_vec();
-        (db, relations)
+        translated_for(
+            sql,
+            deployments::with_settings([deployments::set("app.subjects")]),
+        )
     }
 
-    /// A watcher with a name and, when it can say so, the keys it sent.
+    /// A watcher with a name, the values it sent for the parameters it can
+    /// state, and the role the request acts as.
     #[derive(Clone)]
     struct Principal {
         name: String,
-        keys: Option<Vec<String>>,
+        values: Vec<(&'static str, Vec<String>)>,
+        role: Option<&'static str>,
     }
 
     impl Principal {
-        /// Holds keys and can say which.
-        fn holding(name: &str, keys: &[&str]) -> Self {
+        /// Authenticates as the role the fixture acts as, with the identity
+        /// its name carries.
+        fn identity(name: &str) -> Self {
+            let key = name.split_once(':').map_or(name, |(_, key)| key);
             Self {
                 name: name.to_string(),
-                keys: Some(keys.iter().map(|key| (*key).to_string()).collect()),
+                values: vec![("app_user_id", vec![key.to_string()])],
+                role: Some(deployments::ROLE),
             }
         }
 
-        /// Cannot say what it sent, which delegates.
-        fn silent(name: &str) -> Self {
-            Self {
-                name: name.to_string(),
-                keys: None,
-            }
+        /// The same, also holding the keys it sent under `app.subjects`.
+        fn holding(name: &str, keys: &[&str]) -> Self {
+            let mut principal = Self::identity(name);
+            principal.values.push((
+                "app_subjects",
+                keys.iter().map(|key| (*key).to_string()).collect(),
+            ));
+            principal
+        }
+
+        /// States the values it sent for `parameter` too. An empty list is
+        /// still an answer: it states that nothing was sent, and a caller
+        /// sending nothing is granted by nothing.
+        fn answering(mut self, parameter: &'static str, sent: &[&str]) -> Self {
+            self.values.push((
+                parameter,
+                sent.iter().map(|value| (*value).to_string()).collect(),
+            ));
+            self
+        }
+
+        /// Acts as `role` instead of the fixture's.
+        fn acting(mut self, role: Option<&'static str>) -> Self {
+            self.role = role;
+            self
         }
     }
 
@@ -1588,16 +1659,22 @@ CREATE POLICY notes_p ON notes USING (
         }
 
         fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
-            if parameter != "app_subjects" {
-                return false;
-            }
-            let Some(keys) = self.keys.as_ref() else {
+            let Some(sent) = self
+                .values
+                .iter()
+                .find(|(name, _)| *name == parameter)
+                .map(|(_, sent)| sent)
+            else {
                 return false;
             };
-            for key in keys {
-                out.push(key);
+            for value in sent {
+                out.push(value);
             }
             true
+        }
+
+        fn acting_role(&self) -> Option<&str> {
+            self.role
         }
     }
 
@@ -1651,9 +1728,9 @@ CREATE POLICY notes_p ON notes USING (
     fn the_identity_arm_answers_without_any_keys() {
         let (db, relations) = translated_with_keys(HELD_KEYS);
         let notes = notes_id(&db);
-        // The column holds the bare id, which is what the record names as
-        // `user:alice`. A column already carrying the prefix would encode the
-        // colon and name somebody else.
+        // The column holds the bare id, which is what the watcher
+        // authenticates as. A column already carrying the prefix would encode
+        // the colon and match nobody.
         let event = insert(notes, notes_row("alice"));
         let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
         let view = EventRow::current(&event, policy.catalog()).unwrap();
@@ -1681,7 +1758,7 @@ CREATE POLICY notes_p ON notes USING (
         let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
         let view = EventRow::current(&event, policy.catalog()).unwrap();
 
-        let watchers = [Principal::silent("user:alice")];
+        let watchers = [Principal::identity("user:alice")];
         let mut verdicts = vec![Verdict::Deny];
         block_on(policy.may_see(&view, &watchers, &mut verdicts)).unwrap();
 
@@ -1707,23 +1784,12 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
 
     #[test]
     fn a_single_value_comparison_refuses_a_watcher_that_sent_several() {
-        let db = ParserDB::parse::<PostgreSqlDialect>(SCALAR_GATE).unwrap();
-        let department =
-            SessionAttribute::setting("app.department", SessionAttributeKind::ScalarAttribute)
-                .with_parameter("app_subjects")
-                .expect("a valid CEL parameter name");
-        let relations = TranslatorBuilder::new()
-            .with_min_confidence(ConfidenceLevel::B)
-            .with_session_attributes([department.clone()])
-            .build()
-            .translate(&db)
-            .unwrap()
-            .relations()
-            .to_vec();
+        let department = deployments::with_settings([deployments::scalar("app.department")]);
+        let (db, relations) = translated_for(SCALAR_GATE, department.clone());
         let notes = notes_id(&db);
         let event = insert(notes, notes_row("physics"));
         let policy = RowPolicy::new(
-            shared_declaring(db, &relations, [department]),
+            shared_for(db, &relations, department),
             Named::<Principal>::default(),
         );
         let view = EventRow::current(&event, policy.catalog()).unwrap();
@@ -1731,8 +1797,8 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
         assert!(policy.answers_locally(notes, ActionStatement::Select));
 
         let watchers = [
-            Principal::holding("user:one", &["physics"]),
-            Principal::holding("user:many", &["physics", "chemistry"]),
+            Principal::identity("user:one").answering("app_department", &["physics"]),
+            Principal::identity("user:many").answering("app_department", &["physics", "chemistry"]),
         ];
         let mut verdicts = vec![Verdict::Deny; 2];
         block_on(policy.may_see(&view, &watchers, &mut verdicts)).unwrap();
@@ -1865,7 +1931,7 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
         assert!(policy.answers_locally(teams, ActionStatement::Insert));
         let got = block_on(policy.may_write(
             RowWrite::Insert { new: &view },
-            &Principal::silent("user:nobody"),
+            &Principal::identity("user:nobody"),
         ));
 
         assert_eq!(
@@ -1886,7 +1952,7 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
         let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
         let view = EventRow::current(&event, policy.catalog()).unwrap();
 
-        let watchers = [Principal::silent("user:bob")];
+        let watchers = [Principal::identity("user:bob")];
         let mut verdicts = vec![Verdict::Deny];
         block_on(policy.may_see(&view, &watchers, &mut verdicts)).unwrap();
 
@@ -1906,7 +1972,7 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
 
         let watchers = [
             Principal::holding("user:bob", &["share-key-7"]),
-            Principal::silent("user:eve"),
+            Principal::identity("user:eve"),
             Principal::holding("user:dan", &["share-key-9"]),
         ];
         let mut verdicts = vec![Verdict::Deny; 3];
@@ -1937,8 +2003,8 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
 
         let watchers = [
             Principal::holding("user:bob", &["share-key-9"]),
-            Principal::silent("user:eve"),
-            Principal::silent("user:dan"),
+            Principal::identity("user:eve"),
+            Principal::identity("user:dan"),
         ];
         let mut verdicts = vec![Verdict::Deny; 3];
         block_on(policy.may_see(&view, &watchers, &mut verdicts)).unwrap();
@@ -2110,6 +2176,7 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
             request_parameter: "app_subjects".to_string(),
             comparison,
             value: value.to_string(),
+            fallback: Vec::new(),
         })
     }
 
@@ -2133,10 +2200,19 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
             .iter_mut()
             .find(|entry| entry.relation == can_select_relation())
             .and_then(|entry| entry.decision.as_mut());
-        let predicate = match gate {
-            Some(RowDecision::Request { predicate, .. }) => predicate,
-            other => panic!("a policy reading only the request is a request gate: {other:?}"),
+        let Some(RowDecision::All(parts)) = gate else {
+            panic!("the value gate is restricted by the acting role");
         };
+        let predicate = parts
+            .iter_mut()
+            .find_map(|part| match part {
+                RowDecision::Request {
+                    predicate: predicate @ RequestPredicate::Holds(_),
+                    ..
+                } => Some(predicate),
+                _ => None,
+            })
+            .expect("the caller's value gate");
         *predicate = RequestPredicate::All(vec![
             atom(RequestComparison::CallerSetHolds, "a"),
             RequestPredicate::Any(vec![
@@ -2145,7 +2221,14 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
             ]),
         ]);
         let event = insert(docs, docs_row(text("alice"), Value::Null));
-        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
+        let policy = RowPolicy::new(
+            shared_for(
+                db,
+                &relations,
+                deployments::with_settings([deployments::set("app.subjects")]),
+            ),
+            Named::<Principal>::default(),
+        );
         let view = EventRow::current(&event, policy.catalog()).unwrap();
 
         let watchers = [
@@ -2156,7 +2239,7 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
             Principal::holding("user:five", &[]),
             Principal::holding("group:g#member", &["a"]),
             Principal::holding("bot:x", &["a"]),
-            Principal::silent("user:six"),
+            Principal::identity("user:six"),
         ];
         let mut verdicts = vec![Verdict::Deny; watchers.len()];
         block_on(policy.may_see(&view, &watchers, &mut verdicts)).unwrap();
@@ -2179,6 +2262,207 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
             policy.inner().seen(),
             1,
             "only the watcher that cannot state its values is delegated"
+        );
+    }
+
+    /// A request gate comparing the caller's value with the row's side by
+    /// inequality is decided by one value that differs, and by nothing else.
+    #[test]
+    fn a_unequal_single_value_grants_and_nothing_else_does() {
+        let (db, _) = translated(OWNERSHIP);
+        let docs = docs_id(&db);
+        let relations = can_select(RowDecision::RequestGated {
+            relation: test_names::relation("owner"),
+            shapes: vec![gated_shape_on("docs", "row_owner", "owner_id")],
+            context_key: "row_owner".to_string(),
+            request_parameter: "app_department".to_string(),
+            comparison: RequestComparison::CallerValueUnequals,
+        });
+        let event = insert(docs, docs_row(text("alice"), Value::Null));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:five"),
+        );
+        let view = EventRow::current(&event, policy.catalog()).unwrap();
+
+        let watchers = [
+            Principal::identity("user:bob").answering("app_department", &["bob"]),
+            Principal::identity("user:alice").answering("app_department", &["alice"]),
+            Principal::identity("user:none").answering("app_department", &[]),
+            Principal::identity("user:many").answering("app_department", &["bob", "carol"]),
+            Principal::identity("user:five"),
+        ];
+        let mut verdicts = vec![Verdict::Deny; watchers.len()];
+        block_on(policy.may_see(&view, &watchers, &mut verdicts)).unwrap();
+
+        assert_eq!(
+            verdicts,
+            [
+                Verdict::Allow,
+                Verdict::Deny,
+                Verdict::Deny,
+                Verdict::Deny,
+                Verdict::Allow,
+            ],
+            "one differing value admits, equality refuses, an empty or \
+             several-valued answer is no single value, and the one that \
+             cannot state its value is the backend's"
+        );
+        assert_eq!(policy.inner().calls(), 1);
+        assert_eq!(
+            policy.inner().seen(),
+            1,
+            "only the watcher that cannot state its values is delegated"
+        );
+    }
+
+    /// A request gate whose row's side is missing refuses the comparison
+    /// rather than delegating it, for the inequality as for the equality.
+    #[test]
+    fn a_unequal_comparison_on_a_row_without_its_side_is_denied() {
+        let (db, _) = translated(OWNERSHIP);
+        let docs = docs_id(&db);
+        let relations = can_select(RowDecision::RequestGated {
+            relation: test_names::relation("owner"),
+            shapes: vec![gated_shape_on("docs", "row_owner", "owner_id")],
+            context_key: "row_owner".to_string(),
+            request_parameter: "app_department".to_string(),
+            comparison: RequestComparison::CallerValueUnequals,
+        });
+        let event = insert(docs, docs_row(Value::Null, Value::Null));
+        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
+        let view = EventRow::current(&event, policy.catalog()).unwrap();
+
+        let watchers = [Principal::identity("user:bob").answering("app_department", &["bob"])];
+        let mut verdicts = vec![Verdict::Deny];
+        block_on(policy.may_see(&view, &watchers, &mut verdicts)).unwrap();
+
+        assert_eq!(verdicts, [Verdict::Deny]);
+        assert_eq!(
+            policy.inner().calls(),
+            0,
+            "a missing row's side is a refusal, not an open door"
+        );
+    }
+
+    /// The one real policy comparing the caller's value against a constant
+    /// rather than against the row.
+    const UNEQUALS_GATE: &str = "
+CREATE TABLE notes(id INTEGER PRIMARY KEY, owner TEXT, body TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_p ON notes USING (
+  current_setting('app.department', true) <> 'physics');
+";
+
+    #[test]
+    fn a_unequal_caller_value_is_answered_from_the_request_alone() {
+        let department = deployments::with_settings([deployments::scalar("app.department")]);
+        let (db, relations) = translated_for(UNEQUALS_GATE, department.clone());
+        let notes = notes_id(&db);
+        let policy = RowPolicy::new(
+            shared_for(db, &relations, department),
+            Named::<Principal>::default(),
+        );
+
+        assert!(
+            policy.answers_locally(notes, ActionStatement::Select),
+            "the gate reads no row, so nothing about the row can stop it"
+        );
+
+        let event = insert(notes, notes_row("alice"));
+        let view = EventRow::current(&event, policy.catalog()).unwrap();
+
+        let watchers = [
+            Principal::identity("user:one").answering("app_department", &["chemistry"]),
+            Principal::identity("user:two").answering("app_department", &["physics"]),
+            Principal::identity("user:three").answering("app_department", &[]),
+            Principal::identity("user:four").answering("app_department", &["chemistry", "physics"]),
+            Principal::identity("user:five"),
+        ];
+        let mut verdicts = vec![Verdict::Deny; watchers.len()];
+        block_on(policy.may_see(&view, &watchers, &mut verdicts)).unwrap();
+
+        assert_eq!(
+            verdicts,
+            [
+                Verdict::Allow,
+                Verdict::Deny,
+                Verdict::Deny,
+                Verdict::Deny,
+                Verdict::Deny,
+            ],
+            "one differing value admits, equality and every other answer \
+             refuse, and the one that cannot state its value is refused by \
+             the backend"
+        );
+        assert_eq!(
+            policy.inner().calls(),
+            1,
+            "only the watcher that cannot state its values is delegated"
+        );
+        assert_eq!(policy.inner().seen(), 1);
+    }
+
+    /// The role the request acts as is compared exactly against the role the
+    /// recipe demands: a different role refuses, and one the watcher cannot
+    /// state is delegated rather than guessed.
+    #[test]
+    fn the_role_the_request_acts_as_is_compared_exactly() {
+        let (db, relations) = translated(OWNERSHIP);
+        let event = insert(docs_id(&db), docs_row(text("alice"), Value::Null));
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:alice"),
+        );
+
+        let got = see(
+            &policy,
+            &event,
+            &[
+                Principal::identity("user:alice"),
+                Principal::identity("user:alice").acting(Some("other_role")),
+                Principal::identity("user:alice").acting(Some("APP_USER")),
+                Principal::identity("user:bob"),
+                Principal::identity("user:alice").acting(None),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            got,
+            [
+                Verdict::Allow,
+                Verdict::Deny,
+                Verdict::Deny,
+                Verdict::Deny,
+                Verdict::Allow,
+            ],
+            "the role is compared exactly, the watcher naming the row but \
+             acting as somebody else is refused, and the one stating no \
+             role is the backend's"
+        );
+        assert_eq!(
+            policy.inner().calls(),
+            1,
+            "only the watcher that cannot state its role is delegated"
+        );
+    }
+
+    /// The production watcher states neither role nor values, so the gate
+    /// delegates it rather than reading its silence as a match.
+    #[test]
+    fn a_watcher_that_states_nothing_is_delegated_not_answered() {
+        let (db, relations) = translated(OWNERSHIP);
+        let event = insert(docs_id(&db), docs_row(text("alice"), Value::Null));
+        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:alice"));
+
+        let got = see(&policy, &event, &watchers(&["user:alice"])).unwrap();
+
+        assert_eq!(got, [Verdict::Allow], "the backend answered");
+        assert_eq!(
+            policy.inner().see_calls(),
+            1,
+            "nothing was answerable from the row alone"
         );
     }
 

@@ -4,12 +4,14 @@ use alloc::vec::Vec;
 
 use core::ops::Not;
 use hashbrown::{HashMap, HashSet};
+#[cfg(feature = "visibility-openfga")]
+use rls2fga_types::identity::encode_part;
 use rls2fga_types::RowNaming;
 use rls2fga_types::TranslationNote;
 use rls2fga_types::UnrestrictedTable;
 use rls2fga_types::{ActionAnswer, ActionRelations, ActionStatement};
 use rls2fga_types::{Record, RecordDerivation, RecordDescription};
-use rls2fga_types::{RelationShapes, RowDecision};
+use rls2fga_types::{RelationShapes, RequestPredicate, RowDecision};
 
 use rls2fga_types::{ColumnName, RelationName, TableId as ContractTableId};
 use sql_traits::prelude::DatabaseLike;
@@ -41,20 +43,27 @@ static UNRESTRICTED: ActionAnswer = ActionAnswer::Unrestricted;
 /// use subql::backend::Postgres;
 /// use rls2fga_types::ConfidenceLevel;
 /// use rls2fga::translator::TranslatorBuilder;
-/// use sqlparser::dialect::PostgreSqlDialect;
+/// use sqlparser::{ast::DataType, dialect::PostgreSqlDialect};
+/// use sql_traits::structs::{Deployment, SessionSetting, SettingValue};
 /// use rls2fga_types::ActionStatement;
 /// use subql::visibility::shapes::Shapes;
 /// use subql::visibility::store::Enumeration;
 /// use subql::{catalog_helpers, ParserDB};
 ///
 /// let db = ParserDB::parse::<PostgreSqlDialect>(
-///     "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
+///     "CREATE ROLE app_user LOGIN;
+///      CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
 ///      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-///      CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);",
+///      CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));",
 /// )?;
 /// let docs = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "docs").expect("docs is in the catalog");
 ///
-/// let translator = TranslatorBuilder::new()
+/// let deployment = Deployment::new(
+///     "app_user",
+///     ["app_user"],
+///     [SessionSetting::value("app.user_id", SettingValue::Caller(DataType::Text))?],
+/// )?;
+/// let translator = TranslatorBuilder::new(deployment)
 ///     .with_min_confidence(ConfidenceLevel::B)
 ///     .build();
 /// let outputs = translator.translate(&db)?.outputs_accepting_gaps();
@@ -123,6 +132,9 @@ pub struct Shapes<DB> {
     unrestricted: HashSet<TableId>,
     /// Parameters every question's context has to carry.
     parameters: Vec<RequiredParameter>,
+    /// Role objects for request-local OpenFGA tuples, keyed by encoded role.
+    #[cfg(feature = "visibility-openfga")]
+    acting: HashMap<String, String>,
 }
 
 impl<DB: DatabaseLike> Shapes<DB> {
@@ -162,6 +174,27 @@ impl<DB: DatabaseLike> Shapes<DB> {
         for entry in relations {
             index_recipe::<B, DB>(&db, entry, &mut recipes);
         }
+        #[cfg(feature = "visibility-openfga")]
+        let acting = {
+            let mut acting = HashMap::new();
+            for enumeration in enumerations {
+                let RecordDerivation::Constant { record } = &enumeration.description.derivation
+                else {
+                    continue;
+                };
+                // Other constant producers name wildcards instead of role usersets.
+                let Some(object) = record.subject.strip_suffix("#usage") else {
+                    continue;
+                };
+                let Some((_, encoded_role)) = object.split_once(':') else {
+                    continue;
+                };
+                if !acting.contains_key(encoded_role) {
+                    acting.insert(encoded_role.to_string(), object.to_string());
+                }
+            }
+            acting
+        };
         for (position, producer) in producers.iter().enumerate() {
             index_shape::<B, DB>(
                 &db,
@@ -194,6 +227,8 @@ impl<DB: DatabaseLike> Shapes<DB> {
             naming: HashMap::new(),
             unrestricted: HashSet::new(),
             parameters: Vec::new(),
+            #[cfg(feature = "visibility-openfga")]
+            acting,
         }
     }
 
@@ -215,7 +250,8 @@ impl<DB: DatabaseLike> Shapes<DB> {
     }
 
     /// Take the parameters every question's context has to carry, read out of
-    /// [`Translation::notes`](rls2fga::translator::Translation::notes).
+    /// [`Translation::notes`](rls2fga::translator::Translation::notes). The note's
+    /// own list report carries `list`, because a JSON-array set names no separator.
     #[must_use]
     pub fn with_required_parameters(mut self, notes: &[TranslationNote]) -> Self {
         self.parameters = notes
@@ -224,11 +260,15 @@ impl<DB: DatabaseLike> Shapes<DB> {
                 TranslationNote::CallerSuppliesConditionParameter {
                     parameter,
                     setting_key,
-                    separator,
+                    is_list,
+                    // The separator spells the Postgres join and the deployment owns it,
+                    // so the index leaves it to the deployment and names the list by the
+                    // report.
+                    separator: _,
                 } => Some(RequiredParameter {
                     parameter: parameter.clone(),
                     setting_key: setting_key.clone(),
-                    list: separator.is_some(),
+                    list: *is_list,
                 }),
                 _ => None,
             })
@@ -286,19 +326,28 @@ impl<DB: DatabaseLike> Shapes<DB> {
     /// use rls2fga_types::ConfidenceLevel;
     /// use rls2fga_types::ActionStatement;
     /// use rls2fga::translator::TranslatorBuilder;
-    /// use sqlparser::dialect::PostgreSqlDialect;
+    /// use sqlparser::{ast::DataType, dialect::PostgreSqlDialect};
+    /// use sql_traits::structs::{Deployment, SessionSetting, SettingValue};
     /// use subql::backend::Postgres;
     /// use subql::visibility::shapes::Shapes;
     /// use subql::visibility::store::Enumeration;
     /// use subql::{catalog_helpers, ParserDB};
     ///
     /// let db = ParserDB::parse::<PostgreSqlDialect>(
-    ///     "CREATE TABLE orders (id INT PRIMARY KEY, quantity BIGINT NOT NULL);",
+    ///     "CREATE ROLE app_user LOGIN;
+    ///      CREATE TABLE orders (id INT PRIMARY KEY, quantity BIGINT NOT NULL);",
     /// )
     /// .expect("the schema parses");
     /// let orders = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "orders").expect("orders is in the catalog");
     ///
-    /// let translator = TranslatorBuilder::new()
+    /// let deployment = Deployment::new(
+    ///     "app_user",
+    ///     ["app_user"],
+    ///     [SessionSetting::value("app.user_id", SettingValue::Caller(DataType::Text))
+    ///         .expect("a caller setting")],
+    /// )
+    /// .expect("one acting role");
+    /// let translator = TranslatorBuilder::new(deployment)
     ///     .with_min_confidence(ConfidenceLevel::B)
     ///     .build();
     /// let outputs = translator
@@ -409,13 +458,22 @@ impl<DB: DatabaseLike> Shapes<DB> {
         &self.parameters
     }
 
-    /// Whether any recipe grants through a comparison the caller's own request
-    /// value completes.
+    /// The configured role object for a request-local OpenFGA tuple.
+    #[cfg(feature = "visibility-openfga")]
+    #[must_use]
+    pub(crate) fn acting_object(&self, role: &str) -> Option<&str> {
+        let encoded = encode_part(role);
+        self.acting.get(encoded.as_ref()).map(String::as_str)
+    }
+
+    /// Whether any recipe needs a condition parameter the caller's context must
+    /// carry. A recipe the request decides by its acting role alone asks the
+    /// caller nothing, since the check states the kind in every call.
     ///
-    /// A reader asking the service has to carry those values, so one that finds
-    /// this true and [`required_parameters`](Self::required_parameters) empty
-    /// was built without the report and refuses rather than sending contexts
-    /// that are silently incomplete.
+    /// A reader that finds this true and
+    /// [`required_parameters`](Self::required_parameters) empty was built
+    /// without the report and refuses rather than sending contexts that are
+    /// silently incomplete.
     #[must_use]
     pub fn has_request_gated_recipe(&self) -> bool {
         self.recipes.values().any(is_request_gated)
@@ -480,17 +538,37 @@ impl<DB: DatabaseLike> Shapes<DB> {
     }
 }
 
-/// Whether `decision` grants anywhere through a value the caller's request
-/// carries.
+/// Whether `decision` needs a condition parameter the caller's context must
+/// carry. The acting role does not count, since the check states it in every
+/// call and no parameter rides with it.
 fn is_request_gated(decision: &RowDecision) -> bool {
     match decision {
-        RowDecision::RequestGated { .. } | RowDecision::Request { .. } => true,
+        // The row settles one side of a comparison the caller's value completes.
+        RowDecision::RequestGated { .. } => true,
+        // The request alone decides the predicate, which may test a value the
+        // caller supplies or only the role it acts as.
+        RowDecision::Request { predicate, .. } => predicate_needs_a_parameter(predicate),
         RowDecision::Any(children) | RowDecision::All(children) => {
             children.iter().any(is_request_gated)
         }
         // A leaf grants names and the everyone arm every user, neither through
-        // the request.
+        // a parameter.
         RowDecision::Leaf { .. } | RowDecision::Everyone { .. } => false,
+    }
+}
+
+/// Whether `predicate` tests a value the caller supplies in every check
+/// context. The acting role does not count, since the service states the
+/// check's kind rather than the caller supplying it.
+fn predicate_needs_a_parameter(predicate: &RequestPredicate) -> bool {
+    match predicate {
+        // A value the caller supplies, tested against a constant the policy names.
+        RequestPredicate::Holds(_) => true,
+        // The role the request acts as, stated by the check's kind.
+        RequestPredicate::ActsAs { .. } => false,
+        RequestPredicate::Any(children) | RequestPredicate::All(children) => {
+            children.iter().any(predicate_needs_a_parameter)
+        }
     }
 }
 
@@ -1115,17 +1193,20 @@ mod tests {
 
     use core::ops::Not;
 
-    use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
     use rls2fga::translator::{Outputs, TranslatorBuilder};
     use rls2fga_types::ConfidenceLevel;
+    use rls2fga_types::TranslationNote;
     use rls2fga_types::TypeName;
     use rls2fga_types::{ActionAnswer, ActionStatement};
     use rls2fga_types::{
         ConditionName, RecordDerivation, RecordDescription, RelationName, RelationShapes,
+        RequestPredicate, RowDecision,
     };
-    use sqlparser::dialect::PostgreSqlDialect;
+    use sql_traits::structs::{Deployment, SessionSetting, SetPacking, SettingValue};
+    use sqlparser::ast::DataType;
 
     use super::{Enumeration, Materialisation, Region, Shapes};
+    use crate::testing::deployment;
     use crate::visibility::{test_names, test_pooling};
     use crate::{catalog_helpers, ParserDB, TableId};
 
@@ -1143,17 +1224,13 @@ mod tests {
     ];
 
     fn translated(sql: &str) -> (ParserDB, Outputs) {
-        translated_declaring(sql, [])
+        translated_declaring(sql, deployment::callers())
     }
 
-    fn translated_declaring(
-        sql: &str,
-        attributes: impl IntoIterator<Item = SessionAttribute>,
-    ) -> (ParserDB, Outputs) {
-        let db = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
-        let outputs = TranslatorBuilder::new()
+    fn translated_declaring(sql: &str, declared: Deployment) -> (ParserDB, Outputs) {
+        let db = deployment::db(sql);
+        let outputs = TranslatorBuilder::new(declared)
             .with_min_confidence(ConfidenceLevel::B)
-            .with_session_attributes(attributes)
             .build()
             .translate(&db)
             .unwrap()
@@ -1179,14 +1256,11 @@ mod tests {
 
     /// Build the index the way a real caller does, from all three reports.
     fn shapes(sql: &str) -> Shapes<ParserDB> {
-        shapes_declaring(sql, [])
+        shapes_declaring(sql, deployment::callers())
     }
 
-    fn shapes_declaring(
-        sql: &str,
-        attributes: impl IntoIterator<Item = SessionAttribute>,
-    ) -> Shapes<ParserDB> {
-        let (db, outputs) = translated_declaring(sql, attributes);
+    fn shapes_declaring(sql: &str, declared: Deployment) -> Shapes<ParserDB> {
+        let (db, outputs) = translated_declaring(sql, declared);
         let translation = outputs.translation();
         let enumerations = enumerations(&outputs);
         let naming = alloc::borrow::Cow::from(translation.row_naming()).into_owned();
@@ -1196,6 +1270,7 @@ mod tests {
             .with_row_naming(&naming)
             .with_action_relations(&answers)
             .with_unrestricted_tables(&unrestricted)
+            .with_required_parameters(translation.notes())
     }
 
     fn table(shapes: &Shapes<ParserDB>, name: &str) -> TableId {
@@ -1231,7 +1306,7 @@ mod tests {
             "CREATE TABLE orders (id INT PRIMARY KEY, quantity BIGINT NOT NULL);
              CREATE TABLE docs (id INT PRIMARY KEY, owner TEXT);
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY d ON docs USING (owner = current_user);",
+             CREATE POLICY d ON docs USING (owner = current_setting('app.user_id', true));",
         );
         let docs = table(&shapes, "docs");
         assert_ne!(
@@ -1295,7 +1370,7 @@ mod tests {
         let shapes = shapes(
             "CREATE TABLE docs (id INT PRIMARY KEY, owner_id TEXT);
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);",
+             CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));",
         );
         let docs = table(&shapes, "docs");
         assert!(
@@ -1355,10 +1430,7 @@ mod tests {
         );
         shapes_declaring(
             &sql,
-            [
-                SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-                SessionAttribute::setting("app.bot_list", SessionAttributeKind::SetAttribute),
-            ],
+            deployment::with_settings([deployment::set("app.bot_list")]),
         )
     }
 
@@ -1412,10 +1484,7 @@ mod tests {
                      ALTER TABLE {name} ENABLE ROW LEVEL SECURITY;
                      CREATE POLICY {name}_p ON {name} FOR SELECT USING ({using});"
                 ),
-                [
-                    SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-                    SessionAttribute::setting("app.bot_list", SessionAttributeKind::SetAttribute),
-                ],
+                deployment::with_settings([deployment::set("app.bot_list")]),
             );
             let id = table(&shapes, name);
             assert!(
@@ -1425,6 +1494,243 @@ mod tests {
             );
             assert!(shapes.has_request_gated_recipe(), "{name}");
         }
+    }
+
+    /// The role the request acts as asks the caller nothing. A recipe the
+    /// request decides by its role alone needs no condition parameter, while
+    /// one the caller's own value completes needs exactly the values it reads,
+    /// and the index says so for each.
+    #[test]
+    fn a_role_only_recipe_needs_no_parameter_and_a_value_gate_does() {
+        let role_only = shapes(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, status TEXT);
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY d ON docs FOR SELECT USING (status = 'active');",
+        );
+        let docs = table(&role_only, "docs");
+        assert!(
+            role_only
+                .recipe(docs, &test_names::relation("can_select"))
+                .is_some(),
+            "missing role-only recipe {role_only:?}"
+        );
+        assert!(
+            !role_only.has_request_gated_recipe(),
+            "role-only recipe requests a value {role_only:?}"
+        );
+        assert!(
+            role_only.required_parameters().is_empty(),
+            "role-only recipe declares parameters {role_only:?}"
+        );
+
+        let value_gated = shapes_declaring(
+            "CREATE TABLE notes(id INTEGER PRIMARY KEY, department TEXT);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY n ON notes FOR SELECT USING (department = current_setting('app.department', true));",
+            deployment::with_settings([deployment::scalar("app.department")]),
+        );
+        assert!(
+            value_gated.has_request_gated_recipe(),
+            "missing caller value gate {value_gated:?}"
+        );
+        let [parameter] = value_gated.required_parameters() else {
+            panic!("missing caller parameter {value_gated:?}");
+        };
+        assert_eq!(parameter.parameter, "app_department");
+        assert_eq!(parameter.setting_key.as_deref(), Some("app.department"));
+        assert!(!parameter.list, "one value, not a set");
+    }
+
+    /// Nested request predicates require parameters exactly when a leaf reads a caller value.
+    #[test]
+    fn nested_request_predicates_distinguish_roles_from_values() {
+        for value_bearing in [false, true] {
+            for any_first in [false, true] {
+                let (db, outputs) = translated_declaring(
+                    "CREATE TABLE docs(id INTEGER PRIMARY KEY);
+                     ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+                     CREATE POLICY d ON docs FOR SELECT USING (
+                       '*' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));",
+                    deployment::with_settings([deployment::set("app.bot_list")]),
+                );
+                let translation = outputs.translation();
+                let mut entry = translation
+                    .relations()
+                    .iter()
+                    .find(|entry| entry.relation == test_names::relation("can_select"))
+                    .expect("the select relation")
+                    .clone();
+                let Some(RowDecision::All(parts)) = entry.decision.as_mut() else {
+                    panic!("the request gate includes the acting role");
+                };
+                let predicate = parts
+                    .iter_mut()
+                    .find_map(|part| match part {
+                        RowDecision::Request {
+                            predicate: predicate @ RequestPredicate::Holds(_),
+                            ..
+                        } => Some(predicate),
+                        _ => None,
+                    })
+                    .expect("the caller value predicate");
+                let role = || RequestPredicate::ActsAs {
+                    role: deployment::ROLE.into(),
+                };
+                let leaf = if value_bearing {
+                    core::mem::replace(predicate, role())
+                } else {
+                    role()
+                };
+                *predicate = if any_first {
+                    RequestPredicate::Any(alloc::vec![
+                        role(),
+                        RequestPredicate::All(alloc::vec![role(), leaf]),
+                    ])
+                } else {
+                    RequestPredicate::All(alloc::vec![
+                        role(),
+                        RequestPredicate::Any(alloc::vec![role(), leaf]),
+                    ])
+                };
+                let naming = alloc::borrow::Cow::from(translation.row_naming()).into_owned();
+                let shapes = Shapes::new::<Postgres>(
+                    db,
+                    core::slice::from_ref(&entry),
+                    &enumerations(&outputs),
+                )
+                .with_row_naming(&naming)
+                .with_action_relations(translation.action_relations());
+                let docs = table(&shapes, "docs");
+
+                assert!(shapes.answers_locally(docs, ActionStatement::Select));
+                assert_eq!(
+                    shapes.has_request_gated_recipe(),
+                    value_bearing,
+                    "value_bearing={value_bearing}, any_first={any_first}"
+                );
+            }
+        }
+    }
+
+    /// A set the deployment packs as a JSON array names no separator, and the
+    /// note's own list report is what names it a list, so the index carries it
+    /// as one.
+    #[test]
+    fn a_json_array_setting_is_a_list_with_no_separator() {
+        let subjects = SessionSetting::value(
+            "app.subjects",
+            SettingValue::Set {
+                element: DataType::Text,
+                packing: SetPacking::JsonArray,
+            },
+        )
+        .expect("a set declaration");
+        let (db, outputs) = translated_declaring(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner TEXT);
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY d ON docs FOR SELECT USING (
+               owner IN (SELECT jsonb_array_elements_text(current_setting('app.subjects')::jsonb)))",
+            deployment::with_settings([subjects]),
+        );
+        // The emitted note says the list with no separator, which is what the
+        // index reads off it.
+        let note = outputs
+            .translation()
+            .notes()
+            .iter()
+            .find_map(|note| match note {
+                TranslationNote::CallerSuppliesConditionParameter {
+                    parameter,
+                    setting_key,
+                    separator,
+                    is_list,
+                } => Some((parameter, setting_key, separator, *is_list)),
+                _ => None,
+            })
+            .expect("the set is a caller contract");
+        assert_eq!(note.0, "app_subjects");
+        assert_eq!(note.1.as_deref(), Some("app.subjects"));
+        assert!(note.2.is_none(), "the array names no separator: {note:?}");
+        assert!(note.3, "the note still reports the list");
+
+        let shapes = Shapes::new::<Postgres>(
+            db,
+            outputs.translation().relations(),
+            &enumerations(&outputs),
+        )
+        .with_required_parameters(outputs.translation().notes());
+        let [parameter] = shapes.required_parameters() else {
+            panic!("missing caller set parameter {shapes:?}");
+        };
+        assert!(
+            parameter.list,
+            "the index names the list by the report, and the separator is none"
+        );
+    }
+
+    /// The acting kind the check states is read off the constant facts, named
+    /// by the role the deployment spells it as.
+    #[cfg(feature = "visibility-openfga")]
+    #[test]
+    fn the_acting_kind_is_named_by_the_role_it_states() {
+        let shapes = shapes(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, status TEXT);
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY d ON docs FOR SELECT USING (status = 'active');",
+        );
+        assert_eq!(
+            shapes.acting_object(deployment::ROLE),
+            Some("pg_role:app_user"),
+            "the fact names the role's usage object"
+        );
+        assert_eq!(
+            shapes.acting_object("nobody"),
+            None,
+            "a role the model admits no branch for maps nothing"
+        );
+    }
+
+    /// A constant subject without a type separator cannot name an acting role.
+    #[cfg(feature = "visibility-openfga")]
+    #[test]
+    fn an_untyped_constant_subject_does_not_name_an_acting_role() {
+        let (db, outputs) = translated(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, status TEXT);
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY d ON docs FOR SELECT USING (status = 'active');",
+        );
+        let mut enumerations = enumerations(&outputs);
+        let (record, sql) = enumerations
+            .iter()
+            .find_map(|entry| match &entry.description.derivation {
+                RecordDerivation::Constant { record } if record.subject.ends_with("#usage") => {
+                    Some((record.clone(), entry.sql))
+                }
+                _ => None,
+            })
+            .expect("a constant role grant");
+        let malformed = RecordDescription {
+            tables: Vec::new(),
+            derivation: RecordDerivation::Constant {
+                record: rls2fga_types::Record {
+                    subject: "nobody#usage".into(),
+                    ..record
+                },
+            },
+        };
+        enumerations.push(Enumeration {
+            description: &malformed,
+            sql,
+            condition: None,
+        });
+
+        let shapes = Shapes::new::<Postgres>(db, outputs.translation().relations(), &enumerations);
+
+        assert_eq!(shapes.acting_object("nobody"), None);
+        assert_eq!(
+            shapes.acting_object(deployment::ROLE),
+            Some("pg_role:app_user")
+        );
     }
 
     /// Two tables a guarded policy reaches, which the database itself filters
@@ -1461,13 +1767,14 @@ mod tests {
         let shapes = shapes(
             "CREATE TABLE snaps (score DOUBLE PRECISION PRIMARY KEY, owner TEXT);
              ALTER TABLE snaps ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY s ON snaps USING (owner = current_user);",
+             CREATE POLICY s ON snaps USING (owner = current_setting('app.user_id', true));",
         );
         assert!(
             shapes
                 .uncovered()
                 .iter()
-                .any(|gap| gap.table == "snaps" && gap.reason == UncoveredReason::UnreadableColumn),
+                .any(|gap| gap.table == "public.snaps"
+                    && gap.reason == UncoveredReason::UnreadableColumn),
             "the unsupported key must be named: {:?}",
             shapes.uncovered()
         );
@@ -1481,7 +1788,7 @@ mod tests {
             "CREATE TABLE readings (device_id INT, recorded_at TIMESTAMPTZ, owner TEXT, \
              PRIMARY KEY (device_id, recorded_at));
              ALTER TABLE readings ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY r ON readings USING (owner = current_user);",
+             CREATE POLICY r ON readings USING (owner = current_setting('app.user_id', true));",
         );
         assert!(
             !shapes
@@ -1505,7 +1812,7 @@ mod tests {
         CREATE POLICY p ON docs FOR SELECT USING (
           EXISTS (SELECT 1 FROM team_members
                   WHERE team_members.team_id = docs.team_id
-                    AND team_members.user_id = current_user
+                    AND team_members.user_id = current_setting('app.user_id', true)
                     AND team_members.expires_at > now()));";
 
     /// The load owns the regions of row-settled and keyed shapes alike, and no
@@ -1557,12 +1864,12 @@ mod tests {
              CREATE POLICY t ON teams FOR SELECT USING (
                EXISTS (SELECT 1 FROM team_members
                        WHERE team_members.team_id = teams.id
-                         AND team_members.user_id = current_user)
+                         AND team_members.user_id = current_setting('app.user_id', true))
                OR EXISTS (SELECT 1 FROM team_guests
                        WHERE team_guests.team_id = teams.id
-                         AND team_guests.user_id = current_user
+                         AND team_guests.user_id = current_setting('app.user_id', true)
                          AND team_guests.expires_at > now()));
-             CREATE POLICY d ON docs FOR SELECT USING (owner_id = current_user);";
+             CREATE POLICY d ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));";
         let shapes =
             test_pooling::shapes(sql, "team_guests", "team_members", |shapes, translation| {
                 let naming = alloc::borrow::Cow::from(translation.row_naming()).into_owned();

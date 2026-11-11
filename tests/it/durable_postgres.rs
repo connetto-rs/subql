@@ -23,7 +23,7 @@ use subql::backend::{CdcEvent, Postgres, Value};
 use subql::reexec::ReExecutionRead;
 #[cfg(feature = "membership-term")]
 use subql::term::TermDescription;
-use subql::testing::TestEvent;
+use subql::testing::{deployment, TestEvent};
 use subql::{
     catalog_helpers, AggValue, Checkpoint, DefaultIds, DurableAuthorizationError, DurableCommit,
     DurableContext, DurableEngine, DurableError, DurableFailure, DurableOperation,
@@ -396,7 +396,7 @@ fn context() -> DurableContext {
 }
 
 fn catalog() -> ParserDB {
-    ParserDB::parse::<PostgreSqlDialect>(SCHEMA).expect("the catalog parses")
+    deployment::db(SCHEMA)
 }
 
 fn table_id(name: &str) -> TableId {
@@ -410,7 +410,7 @@ fn compiler() -> Compiler {
 #[cfg(feature = "membership-term")]
 fn membership_compiler() -> Compiler {
     compiler().with_translator(
-        TranslatorBuilder::new()
+        TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build(),
     )

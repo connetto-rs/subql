@@ -2,13 +2,15 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 use hashbrown::{HashMap, HashSet};
 use rls2fga::classifier::patterns::{
     ClassifiedExpr, ClassifiedPolicy, Composite, PatternClass, PolicyMode,
 };
+use rls2fga::parser::names::role_keyword;
 use rls2fga::translator::Translator;
 use rls2fga_types::{ConfidenceLevel, PolicyCommand};
-use sql_traits::prelude::{DatabaseLike, TableLike};
+use sql_traits::prelude::{DatabaseLike, PolicyLike, TableLike};
 use sqlparser::ast::{BinaryOperator, Expr, Value as SqlValue};
 
 use crate::catalog_helpers::{contract_table_id, table_has_rls};
@@ -21,6 +23,29 @@ pub fn read_rules<DB: DatabaseLike>(
 ) -> HashMap<TableId, Expr> {
     let min_confidence = translator.min_confidence();
     let classified = translator.classify(database);
+
+    let mut refused = HashSet::new();
+    for policy in database.policies() {
+        if policy.applies_to_public()
+            || !matches!(
+                policy.command(),
+                sqlparser::ast::CreatePolicyCommand::Select
+                    | sqlparser::ast::CreatePolicyCommand::All
+            )
+        {
+            continue;
+        }
+        let Ok(table) = policy.table(database) else {
+            return HashMap::new();
+        };
+        if let Some(id) = table
+            .table_id(database)
+            .and_then(|id| u32::try_from(id).ok())
+        {
+            refused.insert(id);
+        }
+    }
+
     let mut by_table: HashMap<&rls2fga_types::TableId, Vec<&ClassifiedPolicy>> = HashMap::new();
     for policy in &classified {
         let Some(target) = policy.resolved_table() else {
@@ -33,11 +58,13 @@ pub fn read_rules<DB: DatabaseLike>(
     }
 
     let mut rules: HashMap<TableId, Expr> = HashMap::new();
-    let mut refused: HashSet<TableId> = HashSet::new();
     for (target, reads) in by_table {
         let Some(table) = contract_table_id(database, target) else {
             continue;
         };
+        if refused.contains(&table) {
+            continue;
+        }
         let Ok(true) = table_has_rls(database, table) else {
             continue;
         };
@@ -76,15 +103,15 @@ fn public_read_rule(reads: &[&ClassifiedPolicy], min_confidence: ConfidenceLevel
     let mut permissive: Vec<Expr> = Vec::new();
     let mut restrictive: Vec<Expr> = Vec::new();
     for policy in reads {
-        // Role-specific grants require a database role the request does not state.
-        if !policy.scoped_roles().is_empty() || !policy.ddl_time_roles().is_empty() {
-            return None;
-        }
         // Missing clauses have no classified rule to fold.
         let (Some(clause), Some(classification)) = (policy.using(), policy.using_classification())
         else {
             return None;
         };
+        // A person's identity cannot answer the request's database role.
+        if role_keyworded(clause) {
+            return None;
+        }
         if !complete(classification, min_confidence) {
             return None;
         }
@@ -114,6 +141,19 @@ fn complete(classification: &ClassifiedExpr, min_confidence: ConfidenceLevel) ->
         // Other patterns contain no nested classifications.
         _ => true,
     }
+}
+
+/// Whether the clause reads the request's database role.
+fn role_keyworded(clause: &Expr) -> bool {
+    sqlparser::ast::visit_expressions(clause, |node| match node {
+        Expr::Identifier(ident)
+            if ident.quote_style.is_none() && role_keyword(&ident.value).is_some() =>
+        {
+            ControlFlow::Break(())
+        }
+        _ => ControlFlow::Continue(()),
+    })
+    .is_break()
 }
 
 /// Intersect restrictive clauses with the permissive union.

@@ -21,7 +21,14 @@ use sql_traits::prelude::DatabaseLike;
 pub mod dispatch_fixtures;
 
 #[cfg(all(any(test, feature = "testing"), feature = "visibility-records"))]
+pub mod actor;
+
+#[cfg(all(any(test, feature = "testing"), feature = "visibility-records"))]
 pub mod relation_pool;
+
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+pub mod deployment;
 
 /// Concrete [`CdcEvent`] fixture for tests.
 ///

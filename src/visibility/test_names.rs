@@ -7,26 +7,24 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga_types::ConfidenceLevel;
 use rls2fga_types::RelationShapes;
 use rls2fga_types::TableId;
 use rls2fga_types::{ColumnKind, ColumnRead, RecordDerivation};
 use rls2fga_types::{ColumnName, ConditionName, RelationName, TypeName};
-use sqlparser::dialect::PostgreSqlDialect;
 
+use crate::testing::deployment;
 use crate::testing::relation_pool::relation_fed_by;
-use crate::ParserDB;
 
 /// A table owned by a column, which is the smallest schema that mints all three kinds.
 const OWNED: &str = "CREATE TABLE docs (id INTEGER PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs USING (owner_id = current_user);";
+CREATE POLICY docs_owner ON docs USING (owner_id = current_setting('app.user_id', true));";
 
 fn translated(sql: &str) -> Vec<RelationShapes> {
-    let db = ParserDB::parse::<PostgreSqlDialect>(sql).expect("the fixture parses");
-    TranslatorBuilder::new()
+    let db = deployment::db(sql);
+    TranslatorBuilder::new(deployment::callers())
         .with_min_confidence(ConfidenceLevel::B)
         .build()
         .translate(&db)
@@ -99,13 +97,9 @@ CREATE POLICY notes_p ON notes USING (
 /// so neither can be spelled here.
 #[must_use]
 pub fn gated_relation() -> (RelationName, ConditionName) {
-    let db = ParserDB::parse::<PostgreSqlDialect>(HELD_KEYS).expect("the fixture parses");
-    TranslatorBuilder::new()
+    let db = deployment::db(HELD_KEYS);
+    TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
         .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.subjects", SessionAttributeKind::SetAttribute),
-        ])
         .build()
         .translate(&db)
         .expect("the held-keys fixture translates")

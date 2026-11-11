@@ -5,6 +5,11 @@
 //! what the rest goes to, so the composition terminates in an answer rather
 //! than in another delegation.
 //!
+//! # One installed model
+//!
+//! [`OpenFgaPolicy::new`] borrows an [`AuthorizationModel`](openfga_client::client::AuthorizationModel) carrying its installed ID and rejects an empty ID.
+//! The caller supplies model contents matching that ID, and construction makes no network requests.
+//!
 //! # One question per watcher, batched
 //!
 //! Every answer here is exact, so there is nothing to detect: a question is
@@ -58,6 +63,9 @@
 //! when asked, not a fact it stores, so a question that omits the value is
 //! **refused** rather than answered no. Each question therefore carries what
 //! its watcher sent, read out of the parameters rls2fga says are required.
+//!
+//! Role grants from [`Subject::acting_role`](crate::visibility::policy::Subject::acting_role) stay within one question and obey the bound model's direct-subject restrictions.
+//! Unknown roles contribute no role tuple.
 //!
 //! # A failure is never a refusal
 //!

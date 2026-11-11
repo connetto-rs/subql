@@ -1,15 +1,17 @@
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use std::collections::HashMap as StructFields;
 
 use openfga_client::client::batch_check_single_result::CheckResult;
+use openfga_client::client::relation_reference::RelationOrWildcard;
 use openfga_client::client::{
-    BatchCheckItem, BatchCheckRequest, CheckRequestTupleKey, ConsistencyPreference,
-    ContextualTupleKeys, OpenFgaServiceClient, ReadRequest, ReadRequestTupleKey,
-    RelationshipCondition, TupleKey, TupleKeyWithoutCondition, WriteRequest, WriteRequestDeletes,
-    WriteRequestWrites,
+    AuthorizationModel, BatchCheckItem, BatchCheckRequest, CheckRequestTupleKey,
+    ConsistencyPreference, ContextualTupleKeys, OpenFgaServiceClient, ReadRequest,
+    ReadRequestTupleKey, RelationshipCondition, TupleKey, TupleKeyWithoutCondition, WriteRequest,
+    WriteRequestDeletes, WriteRequestWrites,
 };
 use openfga_client::prost_wkt_types::{value::Kind, ListValue, Struct, Value as ProstValue};
 use openfga_client::tonic::body::Body;
@@ -43,6 +45,9 @@ const DEFAULT_MAX_CHECKS_PER_BATCH: usize = 50;
 /// How many times a transport failure is retried before giving up.
 const DEFAULT_CONNECT_RETRIES: u32 = 2;
 
+/// The relation a request's acting role stands under.
+const ROLE_USAGE: &str = "usage";
+
 /// Answers by asking an OpenFGA server.
 ///
 /// `T` is the transport the caller built, so TLS, bearer tokens and
@@ -55,7 +60,9 @@ pub struct OpenFgaPolicy<DB, T, W, B> {
     shapes: SharedShapes<DB>,
     client: OpenFgaServiceClient<T>,
     store_id: String,
-    authorization_model_id: String,
+    /// The model the questions ask against, with the subject admission it
+    /// states, shared by every clone.
+    model: Arc<BoundModel>,
     max_checks_per_batch: usize,
     connect_retries: u32,
     read_consistency: ConsistencyPreference,
@@ -68,10 +75,15 @@ where
     DB: DatabaseLike,
 {
     /// Ask `client` about the store `store_id`, reading `shapes` for what the
-    /// questions have to name.
+    /// questions have to name, and asking against `model`, whose installed ID
+    /// every delegated check states.
     ///
     /// The index is shared with the wrapper in front of this one, so both read
-    /// one catalog and one set of descriptions.
+    /// one catalog and one set of descriptions. The caller supplies model
+    /// contents matching the ID, and construction makes no network requests,
+    /// so local authorization stays available offline. A contextual role tuple
+    /// travels only where the model's typed relation metadata admits its
+    /// subject as a direct one.
     ///
     /// # Errors
     ///
@@ -84,31 +96,27 @@ where
     /// The check exists because the parameters arrive in a report whose type is
     /// `#[non_exhaustive]`, so a variant renamed upstream would be read as "no
     /// parameters required" rather than failing to compile.
+    ///
+    /// [`OpenFgaError::MissingAuthorizationModelId`] when the model states no
+    /// ID, which no delegated check could state.
     pub fn new(
         shapes: SharedShapes<DB>,
         client: OpenFgaServiceClient<T>,
         store_id: impl Into<String>,
+        model: &AuthorizationModel,
     ) -> Result<Self, OpenFgaError> {
         usable_index(&shapes)?;
         Ok(Self {
             shapes,
             client,
             store_id: store_id.into(),
-            authorization_model_id: String::new(),
+            model: Arc::new(BoundModel::bind(model)?),
             max_checks_per_batch: DEFAULT_MAX_CHECKS_PER_BATCH,
             connect_retries: DEFAULT_CONNECT_RETRIES,
             read_consistency: ConsistencyPreference::MinimizeLatency,
             watcher: PhantomData,
             backend: PhantomData,
         })
-    }
-
-    /// Pin the authorization model to ask against. Unset asks the store's
-    /// latest, which is what the server does with an empty id.
-    #[must_use]
-    pub fn authorization_model_id(mut self, id: impl Into<String>) -> Self {
-        self.authorization_model_id = id.into();
-        self
     }
 
     /// How many questions travel in one call, defaulting to OpenFGA's own
@@ -169,6 +177,94 @@ where
     }
 }
 
+/// The installed model's ID and unconditional role-subject restrictions.
+#[derive(Debug)]
+struct BoundModel {
+    /// The ID every delegated check states.
+    id: String,
+    /// Unconditional `usage` subjects, by object type and subject type.
+    admission: BTreeMap<String, BTreeMap<String, Admitted>>,
+}
+
+/// The subject spellings one relation admits on one object type, for one
+/// subject type.
+#[derive(Debug, Default)]
+struct Admitted {
+    /// A plain `type:id` subject.
+    direct: bool,
+    /// A `type:*` subject.
+    wildcard: bool,
+    /// A `type:id#relation` subject, by the relation it names.
+    usersets: BTreeSet<String>,
+}
+
+impl BoundModel {
+    /// Bind `model` to the questions, or [`OpenFgaError::MissingAuthorizationModelId`]
+    /// where it states no ID.
+    fn bind(model: &AuthorizationModel) -> Result<Self, OpenFgaError> {
+        if model.id.is_empty() {
+            return Err(OpenFgaError::MissingAuthorizationModelId);
+        }
+        let mut admission: BTreeMap<String, BTreeMap<String, Admitted>> = BTreeMap::new();
+        for definition in &model.type_definitions {
+            let Some(rules) = definition
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.relations.get(ROLE_USAGE))
+            else {
+                continue;
+            };
+            for reference in &rules.directly_related_user_types {
+                if !reference.condition.is_empty() {
+                    continue;
+                }
+                let kinds = admission
+                    .entry(definition.r#type.clone())
+                    .or_default()
+                    .entry(reference.r#type.clone())
+                    .or_default();
+                match &reference.relation_or_wildcard {
+                    None => kinds.direct = true,
+                    Some(RelationOrWildcard::Wildcard(_)) => kinds.wildcard = true,
+                    Some(RelationOrWildcard::Relation(name)) => {
+                        kinds.usersets.insert(name.clone());
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            id: model.id.clone(),
+            admission,
+        })
+    }
+
+    /// Whether the model admits the unconditional role tuple of `subject` on
+    /// `object`.
+    fn admits(&self, object: &str, subject: &str) -> bool {
+        let object_type = object
+            .split_once(':')
+            .map_or(object, |(type_name, _)| type_name);
+        let Some((subject_type, rest)) = subject.split_once(':') else {
+            return false;
+        };
+        let Some(kinds) = self
+            .admission
+            .get(object_type)
+            .and_then(|by_subject| by_subject.get(subject_type))
+        else {
+            return false;
+        };
+        match rest {
+            "" => false,
+            "*" => kinds.wildcard,
+            _ => match rest.rsplit_once('#') {
+                Some((id, userset)) => !id.is_empty() && kinds.usersets.contains(userset),
+                None => kinds.direct,
+            },
+        }
+    }
+}
+
 /// Whether `shapes` carries what the questions will need.
 ///
 /// A recipe granting through a comparison the caller's request completes needs
@@ -184,19 +280,15 @@ fn usable_index<DB: DatabaseLike>(shapes: &Shapes<DB>) -> Result<(), OpenFgaErro
     Ok(())
 }
 
-/// The context one watcher's question carries: every required parameter it can
-/// answer, rendered as the condition expects.
-///
-/// A parameter no watcher supplies is left out, and so is one this watcher
-/// cannot answer. Leaving it out is what makes the server refuse the question
-/// rather than answer it wrongly, which is the right direction: the alternative
-/// is inventing a value the caller never sent.
+/// Render request values, with scalar settings nested under `settings`.
 fn context_for<W: Subject + ?Sized>(
     required: &[RequiredParameter],
     watcher: &W,
     values: &mut RequestValues,
 ) -> Option<Struct> {
     let mut fields = StructFields::new();
+    let mut settings = StructFields::new();
+    let mut settings_answered = false;
     for parameter in required {
         if !parameter.watcher_supplied() {
             continue;
@@ -205,30 +297,44 @@ fn context_for<W: Subject + ?Sized>(
         if !watcher.request_value(&parameter.parameter, values) {
             continue;
         }
-        let value = if parameter.list {
-            ProstValue {
-                kind: Some(Kind::ListValue(ListValue {
-                    values: values
-                        .values()
-                        .map(|held| ProstValue {
-                            kind: Some(Kind::StringValue(held.to_string())),
-                        })
-                        .collect(),
-                })),
-            }
-        } else {
-            // One value, and a watcher that sent several has not answered a
-            // parameter declared to hold one. Picking the first would put a
-            // value the policy never compared against into the context.
-            let mut held = values.values();
-            let (Some(one), None) = (held.next(), held.next()) else {
-                continue;
-            };
+        if parameter.list {
+            fields.insert(
+                parameter.parameter.clone(),
+                ProstValue {
+                    kind: Some(Kind::ListValue(ListValue {
+                        values: values
+                            .values()
+                            .map(|held| ProstValue {
+                                kind: Some(Kind::StringValue(held.to_string())),
+                            })
+                            .collect(),
+                    })),
+                },
+            );
+            continue;
+        }
+        // Several values have not answered a parameter declared to hold one.
+        if values.len() > 1 {
+            continue;
+        }
+        settings_answered = true;
+        let Some(one) = values.values().next() else {
+            continue;
+        };
+        settings.insert(
+            parameter.parameter.clone(),
             ProstValue {
                 kind: Some(Kind::StringValue(one.to_string())),
-            }
-        };
-        fields.insert(parameter.parameter.clone(), value);
+            },
+        );
+    }
+    if settings_answered {
+        fields.insert(
+            "settings".to_string(),
+            ProstValue {
+                kind: Some(Kind::StructValue(Struct { fields: settings })),
+            },
+        );
     }
     if fields.is_empty() {
         None
@@ -321,12 +427,7 @@ where
         consistency: ConsistencyPreference,
     ) -> Result<(), OpenFgaError> {
         for chunk in questions.chunks(self.max_checks_per_batch) {
-            let request = batch_request(
-                &self.store_id,
-                &self.authorization_model_id,
-                chunk,
-                consistency,
-            );
+            let request = batch_request(&self.store_id, &self.model.id, chunk, consistency);
             let answers = self.batch_check(request).await?;
 
             let mut unanswered = 0;
@@ -420,20 +521,41 @@ where
         let mut questions = Vec::new();
         for (place, watcher) in watchers.iter().enumerate() {
             let context = context_for(self.shapes.required_parameters(), watcher, &mut values);
+            // The role the request acts as travels with each question, stated only
+            // where the model admits it.
+            let role = watcher.acting_role();
             // A watcher may authenticate as several names, and any of them
             // granting grants the watcher, so each is its own question.
             for (nth, name) in watcher.subjects().enumerate() {
+                let user = name.into_owned();
+                let mut tuple_keys = Vec::new();
+                if !contextual.is_empty() {
+                    tuple_keys.extend_from_slice(contextual);
+                }
+                if let Some(role) = role {
+                    if let Some(object) = self.shapes.acting_object(role) {
+                        // The fact names the role's usage object, and the model
+                        // states which subject may stand for it.
+                        if self.model.admits(object, &user) {
+                            tuple_keys.push(TupleKey {
+                                user: user.clone(),
+                                relation: ROLE_USAGE.to_string(),
+                                object: object.to_string(),
+                                condition: None,
+                            });
+                        }
+                    }
+                }
                 questions.push(Question {
                     place,
                     item: BatchCheckItem {
                         tuple_key: Some(CheckRequestTupleKey {
-                            user: name.into_owned(),
+                            user,
                             relation: relation.to_string(),
                             object: object.clone(),
                         }),
-                        contextual_tuples: (!contextual.is_empty()).then(|| ContextualTupleKeys {
-                            tuple_keys: contextual.to_vec(),
-                        }),
+                        contextual_tuples: (!tuple_keys.is_empty())
+                            .then_some(ContextualTupleKeys { tuple_keys }),
                         context: context.clone(),
                         correlation_id: alloc::format!("w{place}n{nth}"),
                     },
@@ -1092,7 +1214,7 @@ where
             store_id: self.store_id.clone(),
             writes,
             deletes,
-            authorization_model_id: self.authorization_model_id.clone(),
+            authorization_model_id: self.model.id.clone(),
         };
         self.with_transport_retry(|mut client| {
             let request = request.clone();
@@ -1526,9 +1648,11 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
+    use rls2fga::generator::well_known::WellKnownTypes;
     use rls2fga::translator::TranslatorBuilder;
     use rls2fga_types::ConfidenceLevel;
+    use sql_traits::structs::{Deployment, SessionSetting, SettingValue};
+    use sqlparser::ast::DataType;
     use sqlparser::dialect::PostgreSqlDialect;
 
     use super::{
@@ -1537,11 +1661,11 @@ mod tests {
         BatchCheckRequest, CheckRequestTupleKey, ConditionName, ConsistencyPreference, Kind,
         OpenFgaError, OpenFgaPolicy, OpenFgaServiceClient, ProstValue, Question, ReconcileError,
         Record, RecordContextValue, RelationName, RelationshipCondition, RequestValues,
-        RequiredParameter, RowWrite, Struct, Subject, TupleKeyWithoutCondition, WriteRequest,
-        MAX_TUPLES_PER_WRITE,
+        RequiredParameter, RowWrite, Struct, Subject, TupleKey, TupleKeyWithoutCondition,
+        WriteRequest, MAX_TUPLES_PER_WRITE, ROLE_USAGE,
     };
     use crate::backend::{Postgres, Value};
-    use crate::testing::{block_on, TestEvent};
+    use crate::testing::{actor::Actor, block_on, deployment, TestEvent};
     use crate::visibility::shapes::Shapes;
     use crate::visibility::store::{Enumeration, Replay, Replayer, Requeries, Requery, StoreDiff};
     use crate::visibility::{test_names, test_pooling, EventRow, Verdict, VisibilityPolicy};
@@ -1551,9 +1675,10 @@ mod tests {
     use core::future::Future;
     use core::pin::Pin;
     use core::task::{Context as CoreContext, Poll};
+    use openfga_client::client::relation_reference::RelationOrWildcard;
     use openfga_client::client::{
-        batch_check_single_result::CheckResult, BatchCheckResponse, BatchCheckSingleResult,
-        ReadResponse, Tuple, WriteResponse,
+        batch_check_single_result::CheckResult, AuthorizationModel, BatchCheckResponse,
+        BatchCheckSingleResult, ReadResponse, RelationReference, Tuple, Wildcard, WriteResponse,
     };
     use openfga_client::tonic::client::GrpcService;
     use openfga_client::tonic::codec::{Codec, EncodeBody, SingleMessageCompressionOverride};
@@ -1838,18 +1963,23 @@ mod tests {
         assert_eq!(list.values.len(), 2);
     }
 
-    /// A single-value parameter travels as one string, and a watcher that sent
-    /// several has not answered it.
-    ///
-    /// Sending the first would put a value the policy never compared against
-    /// into the context, which the server would then evaluate as a match.
+    /// A single-value parameter travels in the `settings` map, and a watcher
+    /// that sent several has not answered it.
     #[test]
-    fn a_single_value_parameter_refuses_a_watcher_that_sent_several() {
+    fn a_single_value_parameter_travels_in_the_settings_map() {
         let mut values = RequestValues::new();
         let one = context_for(&required(false), &Holder { values: vec!["a"] }, &mut values)
             .expect("one value answers");
+        assert!(
+            !one.fields.contains_key("app_subjects"),
+            "no top-level scalar"
+        );
+        let Some(Kind::StructValue(settings)) = one.fields.get("settings").unwrap().kind.as_ref()
+        else {
+            panic!("the scalar travels under settings");
+        };
         assert!(matches!(
-            one.fields.get("app_subjects").unwrap().kind.as_ref(),
+            settings.fields.get("app_subjects").unwrap().kind.as_ref(),
             Some(Kind::StringValue(value)) if value == "a"
         ));
 
@@ -1861,6 +1991,24 @@ mod tests {
             &mut values,
         );
         assert!(many.is_none(), "several values answer nothing here");
+    }
+
+    /// A parameter answered with no values keeps the `settings` map and drops
+    /// its key, since the absent key is what reads as `NULL`.
+    #[test]
+    fn an_empty_scalar_answer_keeps_the_map_without_the_key() {
+        let mut values = RequestValues::new();
+        let empty = context_for(
+            &required(false),
+            &Holder { values: Vec::new() },
+            &mut values,
+        )
+        .expect("the empty answer is an answer");
+        let Some(Kind::StructValue(settings)) = empty.fields.get("settings").unwrap().kind.as_ref()
+        else {
+            panic!("the map stands even when the key does not");
+        };
+        assert!(!settings.fields.contains_key("app_subjects"));
     }
 
     /// A watcher answering whatever it is asked, which is what makes the test
@@ -1903,6 +2051,533 @@ mod tests {
         );
     }
 
+    /// A policy over a table whose read reaches only the deployment's role.
+    const ROLE_SCOPED: &str = "
+CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON docs FOR SELECT TO app_user
+  USING (owner_id = current_setting('app.user_id', true));
+";
+
+    fn role_policy<W>() -> OpenFgaPolicy<ParserDB, NeverAsked, W, Postgres> {
+        let (shapes, model) = translation_over(ROLE_SCOPED);
+        OpenFgaPolicy::new(
+            shapes,
+            OpenFgaServiceClient::new(NeverAsked),
+            "store",
+            &model,
+        )
+        .expect("a role-scoped read needs no request parameters")
+    }
+
+    /// The role the request acts as travels with each question, and a role no
+    /// acting fact names stays out of them.
+    #[test]
+    fn a_known_role_travels_with_the_questions_that_ask_it() {
+        fn tuples(question: &Question) -> Option<&[TupleKey]> {
+            question
+                .item
+                .contextual_tuples
+                .as_ref()
+                .map(|held| held.tuple_keys.as_slice())
+        }
+        let policy = role_policy();
+        assert_eq!(
+            policy.shapes().acting_object("app_user"),
+            Some("pg_role:app_user"),
+            "the fact spells the object as rls2fga wrote it"
+        );
+        assert!(
+            policy.shapes().acting_object("auditor").is_none(),
+            "a role no branch admits is not in the map"
+        );
+
+        let docs = catalog_helpers::table_id::<crate::backend::Postgres, _>(
+            policy.shapes().catalog(),
+            "docs",
+        )
+        .unwrap();
+        let event =
+            TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::String("alice".into())])
+                .with_pk_columns([0]);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let contextual = [TupleKey {
+            user: "teams:1".to_owned(),
+            relation: "teams".to_owned(),
+            object: "docs:4".to_owned(),
+            condition: None,
+        }];
+        let watchers = [
+            Actor {
+                name: "user:alice",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "user:alice",
+                role: Some("auditor"),
+            },
+            Actor {
+                name: "user:bob",
+                role: None,
+            },
+        ];
+
+        let questions = policy
+            .questions(&row, "can_select", &watchers, &contextual)
+            .unwrap();
+        assert_eq!(questions.len(), 3, "one question per subject name");
+
+        let [granted, refused, unstated] = questions.as_slice() else {
+            panic!("three questions");
+        };
+        let [row_fact, role_fact] = tuples(granted).unwrap() else {
+            panic!("the row fact and the request role");
+        };
+        assert_eq!(row_fact, &contextual[0]);
+        assert_eq!(
+            role_fact,
+            &TupleKey {
+                user: "user:alice".to_owned(),
+                relation: "usage".to_owned(),
+                object: "pg_role:app_user".to_owned(),
+                condition: None,
+            }
+        );
+        assert_eq!(tuples(refused), Some(contextual.as_slice()));
+        assert_eq!(tuples(unstated), Some(contextual.as_slice()));
+    }
+
+    /// Whether `question` carries the tuple that states its watcher's role.
+    fn carries_role_tuple(question: &Question) -> bool {
+        question
+            .item
+            .contextual_tuples
+            .as_ref()
+            .is_some_and(|held| {
+                held.tuple_keys
+                    .iter()
+                    .any(|tuple| tuple.relation == ROLE_USAGE)
+            })
+    }
+
+    /// The direct-subject references the model states for the fixture's
+    /// `pg_role` usage relation.
+    fn usage_references(model: &mut AuthorizationModel) -> &mut Vec<RelationReference> {
+        let definition = model
+            .type_definitions
+            .iter_mut()
+            .find(|definition| definition.r#type == "pg_role")
+            .unwrap();
+        &mut definition
+            .metadata
+            .as_mut()
+            .unwrap()
+            .relations
+            .get_mut("usage")
+            .unwrap()
+            .directly_related_user_types
+    }
+
+    /// The event a role-scoped read is asked about.
+    fn role_scoped_event(
+        policy: &OpenFgaPolicy<ParserDB, NeverAsked, Actor<&'static str>, Postgres>,
+    ) -> TestEvent<Postgres> {
+        let docs = catalog_helpers::table_id::<crate::backend::Postgres, _>(
+            policy.shapes().catalog(),
+            "docs",
+        )
+        .unwrap();
+        TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::String("alice".into())])
+            .with_pk_columns([0])
+    }
+
+    /// The model's direct-subject restrictions decide the role tuple, so the
+    /// configured type's plain subject travels and a subject of another type,
+    /// a userset, or a wildcard stands for nothing.
+    #[test]
+    fn inadmissible_subject_spellings_stand_for_no_role_tuple() {
+        let policy = role_policy::<Actor<&str>>();
+        let event = role_scoped_event(&policy);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let watchers = [
+            Actor {
+                name: "user:alice",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "team:alice",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "user:alice#member",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "user:*",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "alice",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "user:",
+                role: Some("app_user"),
+            },
+        ];
+
+        let questions = policy
+            .questions(&row, "can_select", &watchers, &[])
+            .unwrap();
+        let [plain, other_type, userset, wildcard, untyped, empty] = questions.as_slice() else {
+            panic!("one question per subject name");
+        };
+        assert!(
+            carries_role_tuple(plain),
+            "the configured type's plain subject is admitted"
+        );
+        assert!(
+            !carries_role_tuple(other_type),
+            "a subject of another type is not"
+        );
+        assert!(!carries_role_tuple(userset), "a userset subject is not");
+        assert!(!carries_role_tuple(wildcard), "a wildcard is not");
+        assert!(!carries_role_tuple(untyped), "an untyped subject is not");
+        assert!(!carries_role_tuple(empty), "an empty identity is not");
+    }
+
+    /// The admission reads the model's own typed relation metadata, so a model
+    /// that also admits a userset and a wildcard subject admits exactly those
+    /// role tuples.
+    #[test]
+    fn a_model_that_admits_the_spelling_admits_the_tuple() {
+        let (shapes, mut model) = translation_over(ROLE_SCOPED);
+        for reference in [
+            RelationReference {
+                r#type: "user".to_string(),
+                condition: String::new(),
+                relation_or_wildcard: Some(RelationOrWildcard::Relation("member".to_string())),
+            },
+            RelationReference {
+                r#type: "user".to_string(),
+                condition: String::new(),
+                relation_or_wildcard: Some(RelationOrWildcard::Wildcard(Wildcard {})),
+            },
+        ] {
+            usage_references(&mut model).push(reference);
+        }
+        let policy = OpenFgaPolicy::new(
+            shapes,
+            OpenFgaServiceClient::new(NeverAsked),
+            "store",
+            &model,
+        )
+        .expect("the widened model states its ID");
+        let event = role_scoped_event(&policy);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let watchers = [
+            Actor {
+                name: "user:alice",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "user:alice#member",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "user:*",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "team:alice",
+                role: Some("app_user"),
+            },
+        ];
+
+        let questions = policy
+            .questions(&row, "can_select", &watchers, &[])
+            .unwrap();
+        let [plain, userset, wildcard, other_type] = questions.as_slice() else {
+            panic!("one question per subject name");
+        };
+        assert!(
+            carries_role_tuple(plain),
+            "the direct subject stays admitted"
+        );
+        assert!(
+            carries_role_tuple(userset),
+            "the userset subject the model admits travels"
+        );
+        assert!(
+            carries_role_tuple(wildcard),
+            "the wildcard the model admits travels"
+        );
+        assert!(
+            !carries_role_tuple(other_type),
+            "a type the model never admits stands for nothing"
+        );
+    }
+
+    /// A reference the model puts under a condition admits no tuple that
+    /// carries no condition, so the role tuple stands for nothing.
+    #[test]
+    fn a_conditional_reference_admits_no_unconditional_tuple() {
+        let (shapes, mut model) = translation_over(ROLE_SCOPED);
+        for reference in usage_references(&mut model) {
+            reference.condition = "when_role_granted".to_string();
+        }
+        let policy = OpenFgaPolicy::new(
+            shapes,
+            OpenFgaServiceClient::new(NeverAsked),
+            "store",
+            &model,
+        )
+        .expect("a conditional model still states its ID");
+        let event = role_scoped_event(&policy);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let watcher = Actor {
+            name: "user:alice",
+            role: Some("app_user"),
+        };
+
+        let questions = policy
+            .questions(&row, "can_select", &[watcher], &[])
+            .unwrap();
+        let [question] = questions.as_slice() else {
+            panic!("one subject name raises one question");
+        };
+        assert!(
+            question.item.contextual_tuples.is_none(),
+            "the condition refuses the unconditional tuple"
+        );
+    }
+
+    /// A model that states no ID refuses to bind.
+    #[test]
+    fn a_model_with_no_id_refuses_to_bind() {
+        let (shapes, mut model) = translation_over(ROLE_SCOPED);
+        model.id.clear();
+        let got = OpenFgaPolicy::<_, NeverAsked, String, Postgres>::new(
+            shapes,
+            OpenFgaServiceClient::new(NeverAsked),
+            "store",
+            &model,
+        );
+        assert!(
+            matches!(got, Err(OpenFgaError::MissingAuthorizationModelId)),
+            "a model without an ID refuses to bind"
+        );
+    }
+
+    /// Every delegated check states the bound model's ID.
+    #[test]
+    fn the_bound_id_reaches_the_transport() {
+        let transport = Scripted::new([ScriptedReply::message(batch_response([(
+            "w0n0".to_string(),
+            true,
+        )]))]);
+        let policy = scripted_policy_over(OWNED, transport.clone());
+        let docs = catalog_helpers::table_id::<crate::backend::Postgres, _>(
+            policy.shapes().catalog(),
+            "docs",
+        )
+        .unwrap();
+        let event =
+            TestEvent::<Postgres>::insert(docs, vec![Value::Int(1), Value::String("0".into())])
+                .with_pk_columns([0u16]);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let mut verdicts = [Verdict::Deny];
+
+        block_on(policy.may_see(&row, &["user:0".to_string()], &mut verdicts)).unwrap();
+
+        let calls = transport.calls();
+        let [call] = calls.as_slice() else {
+            panic!("one question travels in one call");
+        };
+        let request = decode_request::<BatchCheckRequest>(call);
+        assert_eq!(request.authorization_model_id, TEST_MODEL_ID);
+    }
+
+    /// Two watchers sharing one subject name keep their roles apart, since the
+    /// question is per subject name and the tuple is per question.
+    #[test]
+    fn a_shared_subject_name_keeps_each_watchers_role_apart() {
+        let policy = role_policy();
+        let docs = catalog_helpers::table_id::<crate::backend::Postgres, _>(
+            policy.shapes().catalog(),
+            "docs",
+        )
+        .unwrap();
+        let event =
+            TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::String("alice".into())])
+                .with_pk_columns([0]);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let watchers = [
+            Actor {
+                name: "user:alice",
+                role: Some("app_user"),
+            },
+            Actor {
+                name: "user:alice",
+                role: None,
+            },
+        ];
+
+        let questions = policy
+            .questions(&row, "can_select", &watchers, &[])
+            .unwrap();
+        let role_tuples = |question: &Question| {
+            question
+                .item
+                .contextual_tuples
+                .as_ref()
+                .is_some_and(|held| {
+                    held.tuple_keys
+                        .iter()
+                        .any(|tuple| tuple.relation == "usage")
+                })
+        };
+        assert!(role_tuples(&questions[0]));
+        assert!(!role_tuples(&questions[1]));
+    }
+
+    /// A role name the DDL quotes travels with the question under the role type
+    /// the deployment configured and the name `encode_part` spells, never under
+    /// the DDL's spelling.
+    #[test]
+    fn a_quoted_role_travels_with_its_encoded_name() {
+        let (shapes, model) = translation_over_quoted_role();
+        let policy: OpenFgaPolicy<ParserDB, NeverAsked, Actor<&str>, Postgres> =
+            OpenFgaPolicy::new(
+                shapes,
+                OpenFgaServiceClient::new(NeverAsked),
+                "store",
+                &model,
+            )
+            .expect("a role-scoped read needs no request parameters");
+        assert_eq!(
+            policy.shapes().acting_object("reader:west"),
+            Some("database_role:~7265616465723a77657374"),
+            "the configured type names the fact and the marker spells the name"
+        );
+        assert_eq!(
+            policy.shapes().acting_object("reader west"),
+            None,
+            "a different unquoted name encodes differently and stands for nothing"
+        );
+
+        let docs = catalog_helpers::table_id::<crate::backend::Postgres, _>(
+            policy.shapes().catalog(),
+            "docs",
+        )
+        .unwrap();
+        let event =
+            TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::String("alice".into())])
+                .with_pk_columns([0]);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let watcher = Actor {
+            name: "user:alice",
+            role: Some("reader:west"),
+        };
+
+        let questions = policy
+            .questions(&row, "can_select", &[watcher], &[])
+            .unwrap();
+        let [question] = questions.as_slice() else {
+            panic!("one subject name raises one question");
+        };
+        let [tuple] = question
+            .item
+            .contextual_tuples
+            .as_ref()
+            .unwrap()
+            .tuple_keys
+            .as_slice()
+        else {
+            panic!("the question states its role and nothing else");
+        };
+        assert_eq!(tuple.user, "user:alice");
+        assert_eq!(tuple.relation, "usage");
+        assert_eq!(
+            tuple.object, "database_role:~7265616465723a77657374",
+            "the transport tuple is what the load stored under"
+        );
+    }
+
+    /// A watcher holding two subject names states its own role on each of its
+    /// questions, and no contextual tuple ever names another question's subject.
+    #[test]
+    fn an_aliasing_watcher_states_its_role_on_each_of_its_questions() {
+        struct Aliased {
+            first: &'static str,
+            second: &'static str,
+            role: Option<&'static str>,
+        }
+
+        impl Subject for Aliased {
+            fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
+                core::iter::once(Cow::Borrowed(self.first))
+                    .chain(core::iter::once(Cow::Borrowed(self.second)))
+            }
+
+            fn acting_role(&self) -> Option<&str> {
+                self.role
+            }
+        }
+
+        let policy = role_policy();
+        let docs = catalog_helpers::table_id::<crate::backend::Postgres, _>(
+            policy.shapes().catalog(),
+            "docs",
+        )
+        .unwrap();
+        let event =
+            TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::String("alice".into())])
+                .with_pk_columns([0]);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let watchers = [
+            Aliased {
+                first: "user:alice",
+                second: "user:alice-two",
+                role: Some("app_user"),
+            },
+            Aliased {
+                first: "user:alice",
+                second: "user:alice-two",
+                role: None,
+            },
+        ];
+
+        let questions = policy
+            .questions(&row, "can_select", &watchers, &[])
+            .unwrap();
+        assert_eq!(questions.len(), 4, "two subject names per watcher");
+        let role_tuples = |question: &Question| {
+            question.item.contextual_tuples.as_ref().map(|held| {
+                held.tuple_keys
+                    .iter()
+                    .filter(|tuple| tuple.relation == "usage")
+                    .count()
+            })
+        };
+        assert_eq!(role_tuples(&questions[0]), Some(1));
+        assert_eq!(role_tuples(&questions[1]), Some(1));
+        assert_eq!(role_tuples(&questions[2]), None);
+        assert_eq!(role_tuples(&questions[3]), None);
+
+        for question in &questions {
+            let subject = question.item.tuple_key.as_ref().unwrap().user.clone();
+            if let Some(held) = &question.item.contextual_tuples {
+                for tuple in &held.tuple_keys {
+                    assert_eq!(
+                        tuple.user, subject,
+                        "a question carries only its own subject's facts"
+                    );
+                }
+            }
+        }
+    }
+
     /// Only a call that went unanswered is worth trying again. A question the
     /// server rejected gives the same answer however often it is asked, and
     /// retrying holds the change stream for nothing.
@@ -1935,17 +2610,14 @@ ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY notes_p ON notes USING (
   owner = ANY(string_to_array(current_setting('app.subjects', true), ',')));
 ";
-        let db = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
-        let outputs = TranslatorBuilder::new()
-            .with_min_confidence(ConfidenceLevel::B)
-            .with_session_attributes([SessionAttribute::setting(
-                "app.subjects",
-                SessionAttributeKind::SetAttribute,
-            )])
-            .build()
-            .translate(&db)
-            .unwrap()
-            .outputs_accepting_gaps();
+        let db = deployment::db(sql);
+        let outputs =
+            TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
+                .with_min_confidence(ConfidenceLevel::B)
+                .build()
+                .translate(&db)
+                .unwrap()
+                .outputs_accepting_gaps();
         let translation = outputs.translation();
         let notes = translation.notes().to_vec();
         let enumerations = enumerations_of(&outputs);
@@ -1968,7 +2640,7 @@ CREATE POLICY notes_p ON notes USING (
         );
 
         let told = Shapes::new::<crate::backend::Postgres>(
-            ParserDB::parse::<PostgreSqlDialect>(sql).unwrap(),
+            deployment::db(sql),
             translation.relations(),
             &enumerations,
         )
@@ -2134,47 +2806,115 @@ CREATE POLICY notes_p ON notes USING (
         M::decode(&call.body[5..]).expect("decode the framed request")
     }
 
-    fn shapes_over(sql: &str) -> Arc<Shapes<ParserDB>> {
-        let db = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
-        let outputs = TranslatorBuilder::new()
+    /// The ID the fixture model is installed under.
+    const TEST_MODEL_ID: &str = "model-1";
+
+    /// The fixture's model in the client's wire form, installed under the
+    /// tests' ID.
+    fn installed_model(
+        model: &rls2fga::generator::json_model::AuthorizationModel,
+    ) -> AuthorizationModel {
+        let mut model: AuthorizationModel =
+            serde_json::from_value(serde_json::to_value(model).unwrap()).unwrap();
+        model.id = TEST_MODEL_ID.to_string();
+        model
+    }
+
+    /// One translation over `sql`, with the shapes the questions read and the
+    /// model they ask against from the same output.
+    fn translation_over(sql: &str) -> (Arc<Shapes<ParserDB>>, AuthorizationModel) {
+        let db = deployment::db(sql);
+        let outputs = TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build()
             .translate(&db)
             .unwrap()
             .outputs_accepting_gaps();
+        let model = installed_model(&outputs.json_model());
         let translation = outputs.translation();
         let naming = Cow::from(translation.row_naming()).into_owned();
         let answers = translation.action_relations().to_vec();
         let enumerations = enumerations_of(&outputs);
-        Arc::new(
-            Shapes::new::<crate::backend::Postgres>(db, translation.relations(), &enumerations)
-                .with_row_naming(&naming)
-                .with_action_relations(&answers),
+        (
+            Arc::new(
+                Shapes::new::<crate::backend::Postgres>(db, translation.relations(), &enumerations)
+                    .with_row_naming(&naming)
+                    .with_action_relations(&answers),
+            ),
+            model,
         )
     }
 
-    fn shapes_over_without_naming(sql: &str) -> Arc<Shapes<ParserDB>> {
-        let db = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
-        let outputs = TranslatorBuilder::new()
+    /// One translation over `sql` whose naming report the shapes do not read.
+    fn translation_over_without_naming(sql: &str) -> (Arc<Shapes<ParserDB>>, AuthorizationModel) {
+        let db = deployment::db(sql);
+        let outputs = TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build()
             .translate(&db)
             .unwrap()
             .outputs_accepting_gaps();
+        let model = installed_model(&outputs.json_model());
         let translation = outputs.translation();
         let answers = translation.action_relations().to_vec();
         let enumerations = enumerations_of(&outputs);
-        Arc::new(
-            Shapes::new::<crate::backend::Postgres>(db, translation.relations(), &enumerations)
-                .with_action_relations(&answers),
+        (
+            Arc::new(
+                Shapes::new::<crate::backend::Postgres>(db, translation.relations(), &enumerations)
+                    .with_action_relations(&answers),
+            ),
+            model,
+        )
+    }
+
+    /// One translation over a table readable only by a quoted role whose name
+    /// must be encoded, under a role type the deployment configured itself.
+    fn translation_over_quoted_role() -> (Arc<Shapes<ParserDB>>, AuthorizationModel) {
+        const SQL: &str = "
+CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON docs FOR SELECT TO \"reader:west\"
+  USING (owner_id = current_setting('app.user_id', true));
+";
+        let db = ParserDB::parse::<PostgreSqlDialect>(&format!(
+            "CREATE ROLE \"reader:west\" LOGIN;\n{SQL}"
+        ))
+        .unwrap();
+        let setting =
+            SessionSetting::value("app.user_id", SettingValue::Caller(DataType::Text)).unwrap();
+        let deployment = Deployment::new("reader:west", ["reader:west"], [setting]).unwrap();
+        let outputs = TranslatorBuilder::new(deployment)
+            .with_well_known_types(
+                WellKnownTypes::new("user", "team", "database_role", "request_gate", "nobody")
+                    .unwrap(),
+            )
+            .with_min_confidence(ConfidenceLevel::B)
+            .build()
+            .translate(&db)
+            .unwrap()
+            .outputs_accepting_gaps();
+        let model = installed_model(&outputs.json_model());
+        let translation = outputs.translation();
+        let naming = Cow::from(translation.row_naming()).into_owned();
+        let answers = translation.action_relations().to_vec();
+        let enumerations = enumerations_of(&outputs);
+        (
+            Arc::new(
+                Shapes::new::<crate::backend::Postgres>(db, translation.relations(), &enumerations)
+                    .with_row_naming(&naming)
+                    .with_action_relations(&answers),
+            ),
+            model,
         )
     }
 
     fn policy_over(sql: &str) -> OpenFgaPolicy<ParserDB, NeverAsked, String, Postgres> {
+        let (shapes, model) = translation_over(sql);
         OpenFgaPolicy::new(
-            shapes_over(sql),
+            shapes,
             OpenFgaServiceClient::new(NeverAsked),
             "store",
+            &model,
         )
         .unwrap()
     }
@@ -2183,10 +2923,12 @@ CREATE POLICY notes_p ON notes USING (
         sql: &str,
         transport: Scripted,
     ) -> OpenFgaPolicy<ParserDB, Scripted, String, Postgres> {
+        let (shapes, model) = translation_over(sql);
         OpenFgaPolicy::new(
-            shapes_over(sql),
+            shapes,
             OpenFgaServiceClient::new(transport),
             "store",
+            &model,
         )
         .unwrap()
     }
@@ -2200,15 +2942,15 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
     const OWNED: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";
 
     const UPDATE_TWO_SIDED: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY pu ON docs FOR UPDATE
-  USING (owner_id = current_user) WITH CHECK (editor_id = current_user);
+  USING (owner_id = current_setting('app.user_id', true)) WITH CHECK (editor_id = current_setting('app.user_id', true));
 ";
 
     const EXPIRING: &str = "
@@ -2219,7 +2961,7 @@ CREATE TABLE docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES teams(id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_user
+          WHERE team_members.team_id = docs.team_id AND team_members.user_id = current_setting('app.user_id', true)
             AND team_members.expires_at > now()));
 ";
 
@@ -2415,12 +3157,13 @@ CREATE POLICY p ON docs FOR SELECT USING (
     /// A row absent from the naming report causes no service call.
     #[test]
     fn a_row_without_naming_returns_before_the_transport() {
-        let shapes = shapes_over_without_naming(OWNED);
+        let (shapes, model) = translation_over_without_naming(OWNED);
         let transport = Scripted::new([]);
         let policy = OpenFgaPolicy::<_, _, String, Postgres>::new(
             shapes,
             OpenFgaServiceClient::new(transport.clone()),
             "store",
+            &model,
         )
         .unwrap();
         let docs =
@@ -2517,7 +3260,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
             ScriptedReply::Status(Status::unavailable("read offline")),
             ScriptedReply::Status(Status::unavailable("read offline")),
         ]);
-        let shapes = shapes_over(EXPIRING);
+        let (shapes, model) = translation_over(EXPIRING);
         let (_, requeries) = expiring_diff(&shapes);
         let [Requery::Keyed(requery)] = requeries.as_slice() else {
             panic!("the fixture produces one keyed requery");
@@ -2526,6 +3269,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
             Arc::clone(&shapes),
             OpenFgaServiceClient::new(transport.clone()),
             "store",
+            &model,
         )
         .unwrap()
         .connect_retries(2);
@@ -2553,7 +3297,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
         let transport = Scripted::new([ScriptedReply::Status(Status::permission_denied(
             "read denied",
         ))]);
-        let shapes = shapes_over(EXPIRING);
+        let (shapes, model) = translation_over(EXPIRING);
         let (_, requeries) = expiring_diff(&shapes);
         let [Requery::Keyed(requery)] = requeries.as_slice() else {
             panic!("the fixture produces one keyed requery");
@@ -2562,6 +3306,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
             Arc::clone(&shapes),
             OpenFgaServiceClient::new(transport.clone()),
             "store",
+            &model,
         )
         .unwrap();
 
@@ -2724,7 +3469,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
         let policy = policy_over(
             "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);",
+             CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));",
         );
         let docs = catalog_helpers::table_id::<crate::backend::Postgres, _>(
             policy.shapes().catalog(),
@@ -2901,11 +3646,11 @@ ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY t ON teams FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
-          WHERE team_members.team_id = teams.id AND team_members.user_id = current_user)
+          WHERE team_members.team_id = teams.id AND team_members.user_id = current_setting('app.user_id', true))
   OR EXISTS (SELECT 1 FROM team_guests
-          WHERE team_guests.team_id = teams.id AND team_guests.user_id = current_user
+          WHERE team_guests.team_id = teams.id AND team_guests.user_id = current_setting('app.user_id', true)
             AND team_guests.expires_at > now()));
-CREATE POLICY d ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY d ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";
 
     /// `SWEEP` with its two membership sources stating one relation, so the region is shared.
@@ -2940,6 +3685,11 @@ CREATE POLICY d ON docs FOR SELECT USING (owner_id = current_user);
                 .unwrap_or_else(|| panic!("no canned rows for {}", member.sql()));
             core::future::ready(Ok(rows.clone()))
         }
+    }
+
+    /// The model the sweep's reconcile tests ask against.
+    fn sweep_model() -> AuthorizationModel {
+        translation_over(SWEEP).1
     }
 
     fn fact(object: &str, relation: &RelationName, subject: &str) -> Record {
@@ -2988,6 +3738,7 @@ CREATE POLICY d ON docs FOR SELECT USING (owner_id = current_user);
             Arc::clone(&shapes),
             OpenFgaServiceClient::new(transport.clone()),
             "store",
+            &sweep_model(),
         )
         .unwrap();
         let replay = Canned(vec![
@@ -3014,6 +3765,7 @@ CREATE POLICY d ON docs FOR SELECT USING (owner_id = current_user);
             Arc::clone(&shapes),
             OpenFgaServiceClient::new(transport.clone()),
             "store",
+            &sweep_model(),
         )
         .unwrap();
         let gated = Record {
@@ -3062,6 +3814,7 @@ CREATE POLICY d ON docs FOR SELECT USING (owner_id = current_user);
             Arc::clone(&shapes),
             OpenFgaServiceClient::new(transport.clone()),
             "store",
+            &sweep_model(),
         )
         .unwrap();
 
@@ -3085,6 +3838,7 @@ CREATE POLICY d ON docs FOR SELECT USING (owner_id = current_user);
             Arc::clone(&shapes),
             OpenFgaServiceClient::new(transport.clone()),
             "store",
+            &sweep_model(),
         )
         .unwrap();
         let replay = Canned(vec![

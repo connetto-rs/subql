@@ -5,9 +5,9 @@ use alloc::vec::Vec;
 
 use rls2fga::translator::{Translation, TranslatorBuilder};
 use rls2fga_types::{ConditionName, ConfidenceLevel, RecordDescription};
-use sqlparser::dialect::PostgreSqlDialect;
 
 use crate::backend::Postgres;
+use crate::testing::deployment;
 use crate::testing::relation_pool::RelationPool;
 use crate::visibility::shapes::Shapes;
 use crate::visibility::store::Enumeration;
@@ -22,8 +22,8 @@ pub fn shapes(
     onto: &str,
     finish: impl FnOnce(Shapes<ParserDB>, &Translation) -> Shapes<ParserDB>,
 ) -> Shapes<ParserDB> {
-    let db = ParserDB::parse::<PostgreSqlDialect>(sql).expect("the fixture parses");
-    let outputs = TranslatorBuilder::new()
+    let db = deployment::db(sql);
+    let outputs = TranslatorBuilder::new(deployment::callers())
         .with_min_confidence(ConfidenceLevel::B)
         .build()
         .translate(&db)

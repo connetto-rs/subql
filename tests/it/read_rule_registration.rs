@@ -1,6 +1,5 @@
 //! Caller-bound query interest intersected with the table's read rule.
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use sql_traits::structs::ParserDB;
@@ -8,7 +7,7 @@ use sqlparser::dialect::PostgreSqlDialect;
 use std::time::{Duration, Instant};
 use subql::backend::{Postgres, ScalarFamily, Value};
 use subql::term::{TermCaller, TermDescription};
-use subql::testing::TestEvent;
+use subql::testing::{deployment, TestEvent};
 use subql::{
     catalog_helpers, DefaultIds, QueryProjection, SubscriptionEngine, SubscriptionRequest, TableId,
     TierKind,
@@ -49,6 +48,38 @@ const ROLE_DDL: &str = "CREATE ROLE auditor;
      CREATE POLICY items_p ON items FOR SELECT TO auditor USING (
        owner = current_setting('app.user_id', true)
        OR owner = ANY(string_to_array(current_setting('app.subjects', true), ',')));";
+
+const PUBLIC_PLUS_ROLE_DDL: &str = "CREATE ROLE auditor;
+     CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
+     ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY items_p ON items FOR ALL USING (
+       owner = current_setting('app.user_id', true));
+     CREATE POLICY items_auditor ON items FOR ALL TO auditor USING (title = 'audit');";
+
+const TO_PUBLIC_DDL: &str =
+    "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
+     ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY items_p ON items FOR ALL TO PUBLIC USING (
+       owner = current_setting('app.user_id', true));";
+
+const DDL_TIME_ROLE_DDL: &str =
+    "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
+     ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY items_p ON items FOR SELECT TO CURRENT_USER USING (
+       owner = current_setting('app.user_id', true));";
+
+const ROLE_WRITE_ONLY_DDL: &str = "CREATE ROLE auditor;
+     CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
+     ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY items_p ON items FOR ALL USING (
+       owner = current_setting('app.user_id', true));
+     CREATE POLICY items_ins ON items FOR INSERT TO auditor WITH CHECK (
+       owner = current_setting('app.user_id', true));";
+
+const ROLE_KEYWORD_DDL: &str =
+    "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
+     ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY items_p ON items FOR ALL USING (owner = current_user);";
 
 const MEMBERSHIP_DDL: &str =
     "CREATE TABLE team_members(team_id INTEGER, user_id TEXT, PRIMARY KEY(team_id, user_id));
@@ -131,12 +162,8 @@ const MEMBERS_QUERY: &str = "SELECT * FROM docs";
 type Engine = SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB>;
 
 fn translator_at(min: ConfidenceLevel) -> Translator {
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment::with_settings([deployment::set("app.subjects")]))
         .with_min_confidence(min)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )])
         .build()
 }
 
@@ -145,7 +172,7 @@ fn translator() -> Translator {
 }
 
 fn parse(ddl: &str) -> ParserDB {
-    ParserDB::parse::<PostgreSqlDialect>(ddl).expect("DDL parses")
+    deployment::db(ddl)
 }
 
 fn table_id(db: &ParserDB, name: &str) -> TableId {
@@ -619,6 +646,218 @@ fn a_role_scoped_rule_keeps_query_only_matching() {
         &[1, 2],
         "the query-only predicate admits the row to every caller"
     );
+}
+
+#[test]
+fn a_public_and_a_role_scoped_rule_keep_query_only_matching() {
+    let (mut engine, items) = engine_with(PUBLIC_PLUS_ROLE_DDL);
+    let registered = engine
+        .register(for_user(1, "alice", &[]))
+        .expect("the registration falls back to the query");
+    assert!(
+        !registered
+            .served()
+            .expect("an in-process answer")
+            .read_rule_folded,
+        "the role-limited arm keeps the whole table out of the fold"
+    );
+    engine
+        .register(for_user(2, "bob", &[]))
+        .expect("the second caller registers");
+
+    let notifs = engine
+        .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+        .expect("dispatch runs");
+    assert_eq!(
+        notifs.inserted(),
+        &[1, 2],
+        "the query-only predicate admits the row to every caller"
+    );
+}
+
+#[test]
+fn a_rule_written_to_public_folds_its_public_rule() {
+    let (mut engine, items) = engine_with(TO_PUBLIC_DDL);
+    let registered = engine
+        .register(for_user(1, "alice", &[]))
+        .expect("the rule folds into the registration");
+    assert!(
+        registered
+            .served()
+            .expect("an in-process answer")
+            .read_rule_folded,
+        "a TO PUBLIC rule grants every role and folds in"
+    );
+    engine
+        .register(for_user(2, "bob", &[]))
+        .expect("the second caller registers");
+
+    let notifs = engine
+        .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+        .expect("dispatch runs");
+    assert_eq!(notifs.inserted(), &[1], "the row names alice's identity");
+
+    let notifs = engine
+        .consumers(&TestEvent::insert(items, item(2, "carol", 7)))
+        .expect("dispatch runs");
+    assert!(
+        notifs.inserted().is_empty(),
+        "the row admits no registered caller and reaches nobody"
+    );
+}
+
+#[test]
+fn a_ddl_time_role_rule_keeps_query_only_matching() {
+    let (mut engine, items) = engine_with(DDL_TIME_ROLE_DDL);
+    let registered = engine
+        .register(for_user(1, "alice", &[]))
+        .expect("the registration falls back to the query");
+    assert!(
+        !registered
+            .served()
+            .expect("an in-process answer")
+            .read_rule_folded,
+        "a role the DDL runs cannot name is not folded in"
+    );
+    engine
+        .register(for_user(2, "bob", &[]))
+        .expect("the second caller registers");
+
+    let notifs = engine
+        .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+        .expect("dispatch runs");
+    assert_eq!(
+        notifs.inserted(),
+        &[1, 2],
+        "the query-only predicate admits the row to every caller"
+    );
+}
+
+#[test]
+fn a_role_scoped_write_policy_keeps_the_public_read_fold() {
+    let (mut engine, items) = engine_with(ROLE_WRITE_ONLY_DDL);
+    let registered = engine
+        .register(for_user(1, "alice", &[]))
+        .expect("the rule folds into the registration");
+    assert!(
+        registered
+            .served()
+            .expect("an in-process answer")
+            .read_rule_folded,
+        "the role-limited write arm does not reach the read fold"
+    );
+    engine
+        .register(for_user(2, "bob", &[]))
+        .expect("the second caller registers");
+
+    let notifs = engine
+        .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+        .expect("dispatch runs");
+    assert_eq!(notifs.inserted(), &[1], "the row names alice's identity");
+}
+
+#[test]
+fn a_public_rule_reading_the_acting_role_keeps_query_only_matching() {
+    let (mut engine, items) = engine_with(ROLE_KEYWORD_DDL);
+    let registered = engine
+        .register(for_user(1, "alice", &[]))
+        .expect("the registration falls back to the query");
+    assert!(
+        !registered
+            .served()
+            .expect("an in-process answer")
+            .read_rule_folded,
+        "a role keyword has no person identity to answer for"
+    );
+    engine
+        .register(for_user(2, "bob", &[]))
+        .expect("the second caller registers");
+
+    let notifs = engine
+        .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+        .expect("dispatch runs");
+    assert_eq!(
+        notifs.inserted(),
+        &[1, 2],
+        "the query-only predicate admits the row to every caller"
+    );
+}
+
+#[test]
+fn public_role_keywords_never_fold_a_same_named_column() {
+    for keyword in [
+        "current_role",
+        "CURRENT_ROLE",
+        "current_user",
+        "user",
+        "session_user",
+    ] {
+        for clause in [
+            format!("{keyword} = 'app_user'"),
+            format!("owner = current_setting('app.user_id', true) AND ({keyword} = 'app_user')"),
+        ] {
+            let ddl = format!(
+                "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, \"{}\" TEXT);
+                 ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY items_p ON items FOR SELECT TO PUBLIC USING ({clause});",
+                keyword.to_ascii_lowercase(),
+            );
+            let (mut engine, items) = engine_with(&ddl);
+            for (consumer, user) in [(1, "alice"), (2, "bob")] {
+                let registered = engine
+                    .register(for_user(consumer, user, &[]))
+                    .expect("the registration falls back to the query");
+                assert!(
+                    !registered
+                        .served()
+                        .expect("an in-process answer")
+                        .read_rule_folded,
+                    "{clause}",
+                );
+            }
+
+            let notifs = engine
+                .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+                .expect("dispatch runs");
+            assert_eq!(notifs.inserted(), &[1, 2], "{clause}");
+        }
+    }
+}
+
+#[test]
+fn quoted_role_keyword_columns_fold_their_public_read_rule() {
+    for keyword in ["current_role", "current_user", "user", "session_user"] {
+        let ddl = format!(
+            "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, \"{keyword}\" TEXT);
+             ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY items_p ON items FOR SELECT TO PUBLIC USING (\"{keyword}\" = 'public');",
+        );
+        let (mut engine, items) = engine_with(&ddl);
+        for (consumer, user) in [(1, "alice"), (2, "bob")] {
+            let registered = engine
+                .register(for_user(consumer, user, &[]))
+                .expect("the column rule folds");
+            assert!(
+                registered
+                    .served()
+                    .expect("an in-process answer")
+                    .read_rule_folded,
+                "{keyword}",
+            );
+        }
+
+        let notifs = engine
+            .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+            .expect("dispatch runs");
+        assert!(notifs.inserted().is_empty(), "{keyword}");
+
+        let mut public = item(2, "carol", 7);
+        public[3] = Value::String("public".into());
+        let notifs = engine
+            .consumers(&TestEvent::insert(items, public))
+            .expect("dispatch runs");
+        assert_eq!(notifs.inserted(), &[1, 2], "{keyword}");
+    }
 }
 
 #[test]
@@ -1632,13 +1871,10 @@ fn a_rule_over_a_column_the_planner_cannot_key_keeps_query_only_matching() {
     const INTEREST: &str = "SELECT * FROM items WHERE id = $1";
     let db = parse(FLOAT_RULE_DDL);
     let items = table_id(&db, "items");
-    let translator = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.score",
-            SessionAttributeKind::ScalarAttribute,
-        )])
-        .build();
+    let translator =
+        TranslatorBuilder::new(deployment::with_settings([deployment::scalar("app.score")]))
+            .with_min_confidence(ConfidenceLevel::B)
+            .build();
     let mut engine: Engine =
         SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator);
     let registered = engine
