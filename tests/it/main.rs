@@ -518,6 +518,6 @@ mod visibility_openfga_e2e;
 // rows returns from the same Postgres. This is what stops subql's own
 // value rendering drifting from the loader's. Run with:
 // cargo nextest run -E 'test(visibility_records_parity::)' \
-// --features "visibility-records executor-diesel-postgres" --run-ignored ignored-only --no-capture
-#[cfg(all(feature = "visibility-records", feature = "executor-diesel-postgres"))]
+// --features "membership-term executor-diesel-postgres" --run-ignored ignored-only --no-capture
+#[cfg(all(feature = "membership-term", feature = "executor-diesel-postgres"))]
 mod visibility_records_parity;
