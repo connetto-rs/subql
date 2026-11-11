@@ -1831,6 +1831,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1838,9 +1847,9 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jiff"
-version = "0.2.42"
+version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fefca06093eeaed707a905795e68206da0edca4edef23d2a3997a3ddbee462aa"
+checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
 dependencies = [
  "jiff-core",
  "jiff-static",
@@ -1855,18 +1864,18 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77a24020db0ee88d1c681d677681bd31f9f4ea189a455425223d52ce4f1508aa"
+checksum = "ffe6854081f5ac0a3046a9b223729ccd7a20b1e0e8277e44dc0660eedf67dfe2"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.42"
+version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d3213549742662eea1a18e6c5af9be5dfbabeb7611ab71356a54928ec398f0"
+checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -2832,7 +2841,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f461f69b0cacd7a9c2bcac932e0f3a22cb13c29fc9023092502995a771a10491"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.15.0",
  "log",
  "multimap",
  "petgraph",
@@ -2851,7 +2860,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9a367f131d93b3395fc6207c11e67098493ab040def4ce3085adbf186687f7e"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.15.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3179,7 +3188,7 @@ dependencies = [
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#ccb7fd2ee23338ef008aa501684033d88806a698"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#29ac7711e4b66e4f8ed7efa8b3272aba37903b6f"
 dependencies = [
  "openfga-client",
  "prost",
@@ -3195,7 +3204,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#ccb7fd2ee23338ef008aa501684033d88806a698"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#29ac7711e4b66e4f8ed7efa8b3272aba37903b6f"
 dependencies = [
  "serde",
  "sql-values 0.5.1",
@@ -3646,7 +3655,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#fb373ef60a272672d59fd776a0b3df60894dea46"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#0a9a565a7e300d6fd3faaf8b90f9fcfa65c72938"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -3710,7 +3719,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#8a176d98b37b361084c11f1b466fc3746c696594"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#32a12d37d78d9a1537d7a8fa8145b06d2523454e"
 dependencies = [
  "log",
  "recursive",
@@ -3740,7 +3749,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#8a176d98b37b361084c11f1b466fc3746c696594"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#32a12d37d78d9a1537d7a8fa8145b06d2523454e"
 dependencies = [
  "proc-macro2",
  "quote",
