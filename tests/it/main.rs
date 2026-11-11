@@ -159,6 +159,14 @@ mod follow_pg_sqlite_emu;
 #[cfg(feature = "pg-sqlite-emu")]
 mod pgoutput_binary_parity;
 
+// A real server's binary and text streams read and dispatch alike.
+#[cfg(feature = "pg-streaming")]
+mod pgoutput_binary_polling_e2e;
+
+// Text against binary pgoutput, measured on the push source.
+#[cfg(feature = "pg-streaming")]
+mod pgoutput_binary_benchmark;
+
 mod extreme_filter_cells;
 
 mod follow_row_dialects;

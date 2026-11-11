@@ -46,7 +46,8 @@ use sql_traits::prelude::{ColumnLike, DataTypeLike, DatabaseLike, TableLike, Vec
 use sqlite_diff_rs::maxwell::{ConversionError as MaxwellConversionError, Maxwell};
 #[cfg(feature = "pgoutput-emit")]
 use sqlite_diff_rs::pg_walstream::{
-    ChangeEvent, ConversionError as PgConversionError, EventType, PgWalstream, RowData,
+    ChangeEvent, ConversionError as PgConversionError, EventType, PgBinaryStream, PgWalstream,
+    RowData,
 };
 use sqlite_diff_rs::wal2json::{ConversionError, Wal2Json};
 use sqlite_diff_rs::{
@@ -150,7 +151,7 @@ impl WireColumnTypes for WireTable {
         self.wire_types
             .get(column_index)
             .copied()
-            .unwrap_or(WireType::Text)
+            .unwrap_or(WireType::Opaque)
     }
 }
 
@@ -182,8 +183,8 @@ impl WireCatalog {
     /// Build a catalog over every table in `database`.
     ///
     /// Columns whose declared SQL type does not map to a [`ScalarFamily`]
-    /// fall back to [`WireType::Text`], the lossless affinity for an
-    /// unmodeled type on the SQLite side.
+    /// travel as [`WireType::Opaque`], their type's text output, which a
+    /// binary cell cannot be decoded into.
     ///
     /// # Errors
     /// [`CatalogError`](crate::CatalogError) when any table's metadata cannot
@@ -301,7 +302,7 @@ fn build_wire_table<DB: DatabaseLike>(
 ) -> Result<WireTable, crate::CatalogError> {
     let inner = catalog_helpers::simple_table(database, table_id)?;
     let wire_types = catalog_helpers::table_columns(database, table_id)?
-        .map(|column| column_wire_type(database, column).unwrap_or(WireType::Text))
+        .map(|column| column_wire_type(database, column).unwrap_or(WireType::Opaque))
         .collect();
     Ok(WireTable { inner, wire_types })
 }
@@ -608,17 +609,24 @@ where
     Ok(wal2json_changeset_builder(database, events)?.build())
 }
 
-/// The pgoutput decoder registry subql feeds to `digest`.
+/// The pgoutput decoder registry subql feeds to `digest`, for a stream in
+/// either format.
 ///
-/// Requires the `pgoutput-emit` feature. Overrides UUID to
-/// [`UuidBlob16Decoder`] and `interval` to [`IntervalPostgresDecoder`],
-/// matching [`wal2json_adapter`] and the SQLite client's storage.
+/// Requires the `pgoutput-emit` feature. Each cell decodes through the
+/// registry of its own format byte, a binary cell through
+/// [`pgbinary_adapter`] and a text cell through a pgoutput registry that
+/// overrides UUID to [`UuidBlob16Decoder`] and `interval` to
+/// [`IntervalPostgresDecoder`], matching [`wal2json_adapter`] and the SQLite
+/// client's storage.
 #[cfg(feature = "pgoutput-emit")]
 #[must_use]
-pub fn pgoutput_adapter() -> TypeMap<PgWalstream, String, Vec<u8>> {
-    TypeMap::defaults()
-        .with(WireKind::Uuid, UuidBlob16Decoder)
-        .with(WireKind::Interval, IntervalPostgresDecoder)
+pub fn pgoutput_adapter() -> PgBinaryStream<String, Vec<u8>> {
+    PgBinaryStream::new(
+        pgbinary_adapter(),
+        TypeMap::<PgWalstream, String, Vec<u8>>::defaults()
+            .with(WireKind::Uuid, UuidBlob16Decoder)
+            .with(WireKind::Interval, IntervalPostgresDecoder),
+    )
 }
 
 /// Fold a batch of pgoutput `ChangeEvent`s into one [`PatchsetFormat`]
@@ -1526,7 +1534,7 @@ mod tests {
     /// blob, and an interval is PostgreSQL's own text. An array of a scaled
     /// `NUMERIC`, of a BLOB-stored `bytea` or `uuid` or of vectors, and a
     /// `halfvec`, have no replica form, so none gets a wire type and each
-    /// keeps the text fallback.
+    /// travels as its type's text output.
     #[test]
     fn arrays_vectors_and_intervals_travel_as_their_replica_storage() {
         let db = ParserDB::parse::<PostgreSqlDialect>(ARRAY_VECTOR_INTERVAL_DDL).unwrap();
@@ -1548,16 +1556,16 @@ mod tests {
                 WireType::Array {
                     element: ArrayElement::Text
                 },
-                WireType::Text,
+                WireType::Opaque,
                 WireType::Vector {
                     dimensions: Some(3)
                 },
                 WireType::Vector { dimensions: None },
-                WireType::Text,
+                WireType::Opaque,
                 WireType::Interval,
-                WireType::Text,
-                WireType::Text,
-                WireType::Text,
+                WireType::Opaque,
+                WireType::Opaque,
+                WireType::Opaque,
             ]
         );
     }
@@ -1595,7 +1603,7 @@ mod tests {
     }
 
     /// Without `CREATE EXTENSION vector` a type named `vector` is the
-    /// schema's own, unknown type, and keeps the text fallback.
+    /// schema's own, unknown type, and travels as its type's text output.
     #[test]
     fn a_vector_needs_its_extension() {
         let db = ParserDB::parse::<PostgreSqlDialect>(
@@ -1604,7 +1612,7 @@ mod tests {
         .unwrap();
         let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
         let table = catalog.get(None, "things").expect("things resolves");
-        assert_eq!(table.column_type(1), WireType::Text);
+        assert_eq!(table.column_type(1), WireType::Opaque);
     }
 
     /// The snapshot and both CDC sources write an array, a vector and an
