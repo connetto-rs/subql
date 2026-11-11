@@ -20,7 +20,7 @@
 //!
 //! ```sh
 //! cargo test --test it visibility_records_parity:: \
-//!     --features "visibility-records executor-diesel-postgres" -- --ignored --nocapture
+//!     --features "membership-term executor-diesel-postgres" -- --ignored --nocapture
 //! ```
 
 #![allow(clippy::unwrap_used)]
