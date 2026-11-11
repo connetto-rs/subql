@@ -23,8 +23,11 @@ use sqlparser::ast::Expr;
 use crate::term::{CompiledTerm, TermCaller, TermMovement, TermPlan};
 use crate::{catalog_helpers, RegisterError, TableId};
 
-/// Settle whether `term` on `table` can be served, and how its subscriber set
-/// moves.
+/// Settle whether `term` on `table` can be served for a subscriber reading as
+/// `acting_role`, and how its subscriber set moves.
+///
+/// The role settles the read rules of the membership table the term reads
+/// through. Without one, any row-level security on that table refuses the term.
 ///
 /// # Errors
 ///
@@ -37,6 +40,7 @@ pub fn plan_term<B: crate::backend::Backend, DB: DatabaseLike>(
     table_name: &str,
     database: &DB,
     translator: &Translator,
+    acting_role: Option<&str>,
 ) -> Result<TermPlan, RegisterError> {
     // The effective registry, not the base one: a filter naming a function
     // defined in the schema is accepted inside a real read rule and would be
@@ -48,8 +52,7 @@ pub fn plan_term<B: crate::backend::Backend, DB: DatabaseLike>(
         &registry,
         table_name,
         translator.min_confidence(),
-        // Membership plans are shared across acting roles.
-        None,
+        acting_role,
     )
     .map_err(|refusal| RegisterError::MembershipTermRefused(refusal.reason))?;
     let caller = match &shapes.caller {

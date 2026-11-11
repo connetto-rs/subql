@@ -656,8 +656,13 @@ where
             });
         }
 
-        let plans =
-            self.check_membership_terms(&compiled.terms, compiled.table_id, &compiled.projection)?;
+        let acting_role = spec.acting_role.as_deref();
+        let plans = self.check_membership_terms(
+            &compiled.terms,
+            compiled.table_id,
+            &compiled.projection,
+            acting_role,
+        )?;
         #[cfg(feature = "membership-term")]
         if (spec.subscriber.is_some() || !spec.subjects.is_empty())
             && matches!(
@@ -683,6 +688,7 @@ where
                         &folded.terms,
                         folded.table_id,
                         &folded.projection,
+                        acting_role,
                     ) {
                         if plans.iter().all(|plan| {
                             plan.caller != TermCaller::Identity || spec.subscriber.is_some()
@@ -706,7 +712,9 @@ where
     /// back through [`SubscriptionRequest::term_values`], state the caller's
     /// values each term's [`TermCaller`] names through
     /// [`SubscriptionRequest::subscriber`] or [`SubscriptionRequest::subjects`],
-    /// then register that same request.
+    /// then register that same request. A request reading as a role states it
+    /// through [`SubscriptionRequest::acting_role`] before describing, since the
+    /// terms are planned for that role.
     ///
     /// Empty for a filter naming no membership subquery, which is every filter
     /// until one is written.
@@ -809,6 +817,7 @@ where
         terms: &[CompiledTerm],
         table_id: TableId,
         projection: &QueryProjection,
+        acting_role: Option<&str>,
     ) -> Result<Vec<TermPlan>, RegisterError> {
         if terms.is_empty() {
             return Ok(Vec::new());
@@ -877,7 +886,7 @@ where
             }
         }
 
-        self.plan_membership_terms(terms, table_id)
+        self.plan_membership_terms(terms, table_id, acting_role)
     }
 
     /// Turn what the subscription stated into the keys the term lookup stores,
@@ -1079,13 +1088,15 @@ where
         }
     }
 
-    /// Ask `rls2fga` whether each term's relationship can be served, and resolve
-    /// the answer to subql's ids.
+    /// Ask `rls2fga` whether each term's relationship can be served for a
+    /// subscriber reading as `acting_role`, and resolve the answer to subql's
+    /// ids.
     #[cfg(feature = "membership-term")]
     fn plan_membership_terms(
         &self,
         terms: &[CompiledTerm],
         table_id: TableId,
+        acting_role: Option<&str>,
     ) -> Result<Vec<TermPlan>, RegisterError> {
         let translator = self.translator.as_ref().ok_or_else(|| {
             RegisterError::MembershipTermRefused(
@@ -1112,6 +1123,7 @@ where
                     &table_name,
                     &self.database,
                     translator,
+                    acting_role,
                 )
             })
             .collect()
@@ -1128,6 +1140,7 @@ where
         &self,
         _terms: &[CompiledTerm],
         _table_id: TableId,
+        _acting_role: Option<&str>,
     ) -> Result<Vec<TermPlan>, RegisterError> {
         Err(RegisterError::MembershipTermRefused(
             "this build was compiled without the membership-term feature, which is what serves \

@@ -1493,3 +1493,186 @@ mod describe_terms {
         );
     }
 }
+
+/// A membership table with row-level security, read by a subscriber that states
+/// the role it reads as. The policies are the ones a deployment enabling
+/// row-level security on every table writes: one open permissive policy, and a
+/// restrictive cap on the `bot` role and the roles inheriting it.
+mod acting_role {
+    use super::{rows_of, Engine};
+    use rls2fga::translator::{Translator, TranslatorBuilder};
+    use rls2fga::types::ConfidenceLevel;
+    use sql_traits::structs::{Deployment, ParserDB};
+    use sqlparser::dialect::PostgreSqlDialect;
+    use subql::backend::{Postgres, Value};
+    use subql::term::TermDescription;
+    use subql::testing::{deployment, TestEvent};
+    use subql::{catalog_helpers, RegisterError, SubscriptionEngine, SubscriptionRequest, TableId};
+
+    const TEAMS: &str = "
+        CREATE ROLE authenticated NOLOGIN;
+        CREATE ROLE bot NOLOGIN;
+        CREATE ROLE bot_installation NOLOGIN;
+        GRANT bot TO bot_installation;
+        CREATE TABLE team_members (team_id TEXT NOT NULL, member_id TEXT NOT NULL, PRIMARY KEY (team_id, member_id));
+        CREATE TABLE team_notes (id UUID PRIMARY KEY, team_id TEXT NOT NULL, author_id TEXT NOT NULL, body TEXT NOT NULL);
+        ALTER TABLE team_notes ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY team_notes_p ON team_notes USING (
+          team_id IN (SELECT team_id FROM team_members WHERE member_id = current_setting('app.user_id', true))
+        );
+        ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY team_members_open ON team_members FOR ALL USING (true) WITH CHECK (true);
+        CREATE POLICY team_members_cap_read ON team_members AS RESTRICTIVE FOR SELECT TO bot
+          USING ('team_members:read' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));";
+
+    const TEAM_TERM: &str = "SELECT * FROM team_notes WHERE team_id IN \
+         (SELECT team_id FROM team_members WHERE member_id = current_setting('app.user_id', true))";
+
+    fn translator() -> Translator {
+        let deployment = Deployment::new(
+            "app_login",
+            ["authenticated", "bot", "bot_installation"],
+            [
+                deployment::caller("app.user_id"),
+                deployment::set("app.bot_list"),
+            ],
+        )
+        .expect("a valid deployment");
+        TranslatorBuilder::new(deployment)
+            .with_min_confidence(ConfidenceLevel::B)
+            .build()
+    }
+
+    fn engine() -> (Engine, TableId) {
+        let db = ParserDB::parse::<PostgreSqlDialect>(TEAMS).expect("the fixture parses");
+        let notes = catalog_helpers::table_id::<Postgres, _>(&db, "team_notes")
+            .expect("team_notes is in the catalog");
+        let engine =
+            SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator());
+        (engine, notes)
+    }
+
+    /// `alice`'s subscription to the notes of team `t1`, reading as `role`
+    /// when one is given.
+    fn alice(
+        consumer: u64,
+        role: Option<&str>,
+    ) -> SubscriptionRequest<subql::DefaultIds, Postgres> {
+        let request = SubscriptionRequest::new(consumer, TEAM_TERM)
+            .subscriber(Value::String("alice".into()))
+            .term_values(
+                vec!["team_id"],
+                rows_of("alice", vec![Value::String("t1".into())]),
+            );
+        match role {
+            Some(role) => request.acting_role(role),
+            None => request,
+        }
+    }
+
+    fn note(id: &str, team: &str) -> Vec<Value<Postgres>> {
+        vec![
+            Value::Uuid(id.parse().unwrap()),
+            Value::String(team.into()),
+            Value::String("bob".into()),
+            Value::String("hello".into()),
+        ]
+    }
+
+    /// The reason `describe_terms` and `register` both give for `request`,
+    /// asserting they give the same one.
+    fn refused(request: &SubscriptionRequest<subql::DefaultIds, Postgres>) -> String {
+        let (mut engine, _) = engine();
+        let Err(RegisterError::MembershipTermRefused(described)) = engine.describe_terms(request)
+        else {
+            panic!("describe_terms must refuse the term");
+        };
+        let Err(RegisterError::MembershipTermRefused(registered)) =
+            engine.register(request.clone())
+        else {
+            panic!("register must refuse the term");
+        };
+        assert_eq!(described, registered);
+        registered
+    }
+
+    /// No policy narrows `authenticated` on `team_members`, so the term is
+    /// served as it is with row-level security off there, and a note of the
+    /// subscriber's team reaches it.
+    #[test]
+    fn a_role_no_membership_policy_narrows_is_served() {
+        let (mut engine, notes) = engine();
+        let described = engine
+            .describe_terms(&alice(1, Some("authenticated")))
+            .expect("the term is describable for authenticated");
+        let [TermDescription::Membership(term)] = described.as_slice() else {
+            panic!("one membership subquery, got {described:?}");
+        };
+        assert_eq!(term.member_table, "team_members");
+        assert_eq!(term.member_subject, "member_id");
+
+        engine
+            .register(alice(1, Some("authenticated")))
+            .expect("the term registers for authenticated");
+        let notifs = engine
+            .consumers(&TestEvent::insert(
+                notes,
+                note("550e8400-e29b-41d4-a716-446655440000", "t1"),
+            ))
+            .unwrap();
+        assert_eq!(notifs.inserted(), &[1]);
+        let notifs = engine
+            .consumers(&TestEvent::insert(
+                notes,
+                note("550e8400-e29b-41d4-a716-446655440001", "t2"),
+            ))
+            .unwrap();
+        assert!(notifs.inserted().is_empty(), "alice is not a member of t2");
+    }
+
+    /// The restrictive cap narrows `bot` and `bot_installation`, which inherits
+    /// it, and the refusal names the role it was planned for.
+    #[test]
+    fn a_role_the_membership_cap_narrows_is_refused_naming_it() {
+        for role in ["bot", "bot_installation"] {
+            let reason = refused(&alice(1, Some(role)));
+            assert!(
+                reason.contains(&format!("carries read rules for role {role}")),
+                "{role}: {reason}"
+            );
+        }
+    }
+
+    /// Without a role nothing says whom the membership table's policies narrow.
+    #[test]
+    fn no_role_refuses_a_membership_table_with_row_security() {
+        let reason = refused(&alice(1, None));
+        assert!(reason.contains("carries its own read rules"), "{reason}");
+    }
+
+    /// Two subscriptions to one filter share its predicate, and the second,
+    /// reading as a role the cap narrows, is planned for its own role rather
+    /// than joining the plan made for the first.
+    #[test]
+    fn one_filter_is_served_for_one_role_and_refused_for_another() {
+        let (mut engine, notes) = engine();
+        engine
+            .register(alice(1, Some("authenticated")))
+            .expect("the term registers for authenticated");
+        let Err(RegisterError::MembershipTermRefused(reason)) =
+            engine.register(alice(2, Some("bot")))
+        else {
+            panic!("the same filter must be refused for bot");
+        };
+        assert!(reason.contains("role bot"), "{reason}");
+        assert_eq!(engine.subscription_count(), 1);
+
+        let notifs = engine
+            .consumers(&TestEvent::insert(
+                notes,
+                note("550e8400-e29b-41d4-a716-446655440000", "t1"),
+            ))
+            .unwrap();
+        assert_eq!(notifs.inserted(), &[1], "only the authenticated subscriber");
+    }
+}
