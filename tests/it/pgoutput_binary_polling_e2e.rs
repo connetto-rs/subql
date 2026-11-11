@@ -6,7 +6,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use crate::common;
+use crate::common::{self, decisions};
 
 use std::time::Duration;
 
@@ -85,25 +85,6 @@ fn engine(catalog: &ParserDB) -> Engine {
             .unwrap_or_else(|e| panic!("{filter} registers: {e}"));
     }
     engine
-}
-
-fn decisions(engine: &mut Engine, event: &PgChangeEvent) -> String {
-    match engine.consumers(event) {
-        Ok(notified) => format!(
-            "inserted {:?} deleted {:?} updated {:?} unanswered {:?} stopped {:?} failures {:?}",
-            notified.inserted(),
-            notified.deleted(),
-            notified.updated(),
-            notified
-                .unanswered()
-                .iter()
-                .map(|cell| (cell.subscription_id, cell.consumer_id, cell.column))
-                .collect::<Vec<_>>(),
-            notified.stopped().len(),
-            notified.evaluation_failures().len(),
-        ),
-        Err(error) => format!("error {error}"),
-    }
 }
 
 async fn row_events(source: &mut PollingPgCdcSource, count: usize) -> Vec<PgChangeEvent> {
