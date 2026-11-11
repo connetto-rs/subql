@@ -954,7 +954,7 @@ dependencies = [
 [[package]]
 name = "pg_walstream"
 version = "0.10.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#91f6bfdc28bd8b3b2b43525b7538844c4aefce7a"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#7e74fa892e4c815f701585113612ac4e03bb84e7"
 dependencies = [
  "bytes",
  "chrono",
@@ -1141,7 +1141,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#a504f1e5199214d70c97c64a763fec27149df18e"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#ccb7fd2ee23338ef008aa501684033d88806a698"
 dependencies = [
  "rls2fga-types",
  "serde",
@@ -1155,7 +1155,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#a504f1e5199214d70c97c64a763fec27149df18e"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#ccb7fd2ee23338ef008aa501684033d88806a698"
 dependencies = [
  "serde",
  "sql-values 0.5.1",

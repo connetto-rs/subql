@@ -1831,15 +1831,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "itertools"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2577,7 +2568,7 @@ dependencies = [
 [[package]]
 name = "pg_walstream"
 version = "0.10.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#91f6bfdc28bd8b3b2b43525b7538844c4aefce7a"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#7e74fa892e4c815f701585113612ac4e03bb84e7"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -2841,7 +2832,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f461f69b0cacd7a9c2bcac932e0f3a22cb13c29fc9023092502995a771a10491"
 dependencies = [
  "heck",
- "itertools 0.15.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph",
@@ -2860,7 +2851,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9a367f131d93b3395fc6207c11e67098493ab040def4ce3085adbf186687f7e"
 dependencies = [
  "anyhow",
- "itertools 0.15.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3188,7 +3179,7 @@ dependencies = [
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#a504f1e5199214d70c97c64a763fec27149df18e"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#ccb7fd2ee23338ef008aa501684033d88806a698"
 dependencies = [
  "openfga-client",
  "prost",
@@ -3204,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#a504f1e5199214d70c97c64a763fec27149df18e"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#ccb7fd2ee23338ef008aa501684033d88806a698"
 dependencies = [
  "serde",
  "sql-values 0.5.1",
