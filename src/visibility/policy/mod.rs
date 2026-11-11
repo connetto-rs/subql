@@ -734,13 +734,15 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
         assert_eq!(policy.inner().calls(), 0);
     }
 
-    /// A table no recipe covers is delegated whole.
+    /// A guarded table no recipe covers is delegated whole.
     #[test]
     fn a_table_outside_every_recipe_is_delegated() {
         let (_, relations) = translated(OWNERSHIP);
         let catalog = deployments::db(
             "CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, editor_id TEXT);
-             CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);",
+             CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY n ON notes USING (body = current_setting('app.user_id', true));",
         );
         let notes =
             catalog_helpers::table_id::<crate::backend::Postgres, _>(&catalog, "notes").unwrap();
@@ -1915,10 +1917,10 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
     /// A table the model reports as restricting nothing grants every write, with
     /// nothing to ask and no round trip.
     ///
-    /// `teams` carries no row-level security and reaches the model only because a
-    /// protected table points at it, which is the shape that is reported
-    /// unrestricted. A table the model knows nothing about at all is a different
-    /// thing and delegates, since silence is not a grant.
+    /// `teams` carries no row-level security, so the model grants every acting
+    /// role each statement on it without a condition. A table the model knows
+    /// nothing about at all is a different thing and delegates, since silence
+    /// is not a grant.
     #[test]
     fn a_table_restricting_nothing_grants_without_asking() {
         let (db, relations) = translated(TEAM);

@@ -214,6 +214,7 @@ where
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use alloc::format;
     use alloc::vec;
     use rls2fga_types::{BoundQuery, Record, RecordDerivation, RecordDescription, ReplayScope};
 
@@ -239,10 +240,9 @@ mod tests {
 
     // Schemas, translated by the real producer
 
-    /// One settled shape on `docs`, and `notes` which nothing reads.
+    /// One settled shape on `docs`.
     const OWNERSHIP: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, body TEXT);
-CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";
@@ -352,6 +352,12 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
 ";
 
     fn shapes(sql: &str) -> Shapes<ParserDB> {
+        indexed_against(sql, deployment::db(sql))
+    }
+
+    /// `sql`'s translation indexed against `catalog`, which may hold tables the
+    /// translation never saw.
+    fn indexed_against(sql: &str, catalog: ParserDB) -> Shapes<ParserDB> {
         let db = deployment::db(sql);
         let outputs = TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
@@ -372,7 +378,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
                 })
             })
             .collect();
-        Shapes::new::<Postgres>(db, outputs.translation().relations(), &enumerations)
+        Shapes::new::<Postgres>(catalog, outputs.translation().relations(), &enumerations)
     }
 
     fn table(shapes: &Shapes<ParserDB>, name: &str) -> TableId {
@@ -566,11 +572,14 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
         );
     }
 
-    /// A table nothing reads produces an empty difference rather than an
-    /// error, so an unrelated change stream costs nothing.
+    /// A table the translation never saw produces an empty difference rather
+    /// than an error, so an unrelated change stream costs nothing.
     #[test]
     fn a_table_no_shape_reads_produces_an_empty_difference() {
-        let store = shapes(OWNERSHIP);
+        let catalog = deployment::db(&format!(
+            "{OWNERSHIP}CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);"
+        ));
+        let store = indexed_against(OWNERSHIP, catalog);
         let notes = table(&store, "notes");
         let event = TestEvent::<Postgres>::insert(notes, vec![Value::Int(1), text("hi")])
             .with_pk_columns([0u16]);

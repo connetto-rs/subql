@@ -588,8 +588,8 @@ where
             .answer(table, statement)
             .ok_or(OpenFgaError::StatementNotAnswered { statement })?;
         let judges = match answer {
-            // The database restricts nothing here, so there is nothing to ask
-            // and no group has to grant.
+            // The model grants every acting role without a row or request
+            // condition, so there is nothing to ask and no group has to grant.
             ActionAnswer::Unrestricted => return Ok(Asked::Ask(Vec::new())),
             // The model grants nobody, so the write is refused without asking.
             ActionAnswer::Denied => return Ok(Asked::Refused),
