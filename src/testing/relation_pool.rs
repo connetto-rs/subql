@@ -10,22 +10,28 @@ use alloc::vec::Vec;
 
 use rls2fga_types::{
     BoundQuery, RecordDerivation, RecordDescription, RelationName, RelationShapes, ReplayScope,
+    TypeName,
 };
 
-/// The relation among `relations` whose shapes read rows of `table`.
+/// The relation among `relations` whose shapes read rows of `table` to state facts on another
+/// type, which is what a membership table's rows do.
+///
+/// Another type, because every table's rows also feed its own type's link to the request gate.
 ///
 /// # Panics
 ///
-/// When no relation reads `table`, since a fixture naming one is wrong.
+/// When no such relation exists, since a fixture naming one is wrong.
 #[must_use]
 pub fn relation_fed_by(relations: &[RelationShapes], table: &str) -> RelationName {
+    let own = TypeName::canonicalized(table);
     relations
         .iter()
         .find(|entry| {
-            entry
-                .shapes
-                .iter()
-                .any(|shape| shape.tables.iter().any(|read| read.name() == table))
+            entry.type_name != own
+                && entry
+                    .shapes
+                    .iter()
+                    .any(|shape| shape.tables.iter().any(|read| read.name() == table))
         })
         .map_or_else(
             || panic!("no relation is fed by rows of '{table}'"),

@@ -33,9 +33,10 @@ enum Local {
 /// What the model says answering one statement on one table takes.
 ///
 /// Three states rather than a list of judgements, because two of them are not
-/// lists: a table the database restricts nothing on has nothing to satisfy and
-/// grants, and one the model refuses grants nobody. An empty list cannot spell
-/// both, and reading it as either is a wrong verdict half the time.
+/// lists: a statement the model grants every acting role without a row or
+/// request condition has nothing to satisfy and grants, and one the model
+/// refuses grants nobody. An empty list cannot spell both, and reading it as
+/// either is a wrong verdict half the time.
 #[derive(Clone, Copy, Debug)]
 enum Requirement<'a> {
     /// Nothing has to be satisfied, so every watcher is granted.
