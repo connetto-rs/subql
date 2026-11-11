@@ -28,12 +28,16 @@ use openfga_client::client::{
 };
 use openfga_client::tonic::transport::Channel;
 use rls2fga::generator::json_model::{AuthorizationModel, Userset};
+use rls2fga::generator::well_known::WellKnownTypes;
 use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::ActionStatement;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{
     ConditionName, Record, RecordContextValue, RecordDerivation, RecordDescription, RelationName,
 };
+use sql_traits::structs::{Deployment, SessionSetting, SettingValue};
+use sqlparser::ast::DataType;
+use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, Value};
 use subql::testing::actor::Actor;
 use subql::testing::deployment;
@@ -2340,4 +2344,240 @@ async fn a_bot_gate_is_answered_locally_as_the_service_answers() {
             "a request carrying no list leaves the gate open, so {name} delegates it"
         );
     }
+}
+
+/// A team read restricted to the deployment's role.
+const ROLE_SCOPED: &str = "
+CREATE TABLE public.teams(id INTEGER PRIMARY KEY);
+CREATE TABLE public.team_members(team_id INTEGER REFERENCES teams(id), user_id TEXT,
+                          PRIMARY KEY(team_id, user_id));
+CREATE TABLE public.docs(id INTEGER PRIMARY KEY, team_id INTEGER REFERENCES teams(id));
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON docs FOR SELECT TO app_user USING (
+  EXISTS (SELECT 1 FROM team_members
+          WHERE team_members.team_id = docs.team_id
+            AND team_members.user_id = current_setting('app.user_id', true)));
+";
+
+/// Role grants remain per request when watchers share a subject.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires docker"]
+async fn a_known_role_reaches_the_service_and_no_other_role_does() {
+    let mut client = openfga().await;
+    let wired = wiring(ROLE_SCOPED);
+    let docs = catalog_helpers::table_id::<Postgres, _>(&wired.db, "docs")
+        .expect("docs is in the catalog");
+    let member = wired.fed_by("team_members");
+    let constants = constants(&wired.outputs);
+    let (store, model_id) =
+        create_store_with_model(&mut client, "subql-acting-role", &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
+    let shapes = wired.shapes();
+
+    let facts = tuples_of(&row_facts(
+        &shapes,
+        docs,
+        vec![Value::Int(4), Value::Int(1)],
+    ));
+    let mut tuples = vec![TupleKey {
+        user: "user:alice".to_owned(),
+        relation: member.to_string(),
+        object: "teams:1".to_owned(),
+        condition: None,
+    }];
+    tuples.extend(facts);
+    client
+        .write(WriteRequest {
+            store_id: store.clone(),
+            writes: Some(WriteRequestWrites {
+                tuple_keys: tuples,
+                on_duplicate: String::new(),
+            }),
+            deletes: None,
+            authorization_model_id: model_id.clone(),
+        })
+        .await
+        .expect("write the tuples");
+
+    let service = OpenFgaPolicy::<_, _, Actor, Postgres>::new(
+        Arc::clone(&shapes),
+        client.clone(),
+        store.clone(),
+        &installed,
+    )
+    .expect("the index carries the read relation");
+    service
+        .write_records(&constants)
+        .await
+        .expect("write the acting constant");
+
+    let event = TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::Int(1)])
+        .with_pk_columns([0u16]);
+    let row = EventRow::current(&event, shapes.catalog()).expect("post-image");
+    let watchers = [
+        Actor::app_user("user:alice"),
+        Actor {
+            name: "user:alice".into(),
+            role: None,
+        },
+        Actor {
+            name: "user:alice".into(),
+            role: Some("auditor"),
+        },
+        Actor::app_user("user:bob"),
+    ];
+    let mut verdicts = Vec::new();
+    Verdict::reset(&mut verdicts, watchers.len());
+    service
+        .may_see(&row, &watchers, &mut verdicts)
+        .await
+        .expect("the service answered");
+
+    assert_eq!(
+        verdicts,
+        [Verdict::Allow, Verdict::Deny, Verdict::Deny, Verdict::Deny],
+        "only the row's member acting as the admitted role is granted"
+    );
+
+    let acting = constants
+        .iter()
+        .find(|record| record.subject.ends_with("#usage"))
+        .expect("the load states the role's usage");
+    assert_eq!(
+        stored_relation(
+            &mut client,
+            &store,
+            &acting.relation.to_string(),
+            &acting.object
+        )
+        .await,
+        core::slice::from_ref(&acting.subject),
+        "the load wrote its one constant and nothing more"
+    );
+    let (role_object, usage) = acting
+        .subject
+        .rsplit_once('#')
+        .expect("the constant stands under the role's usage");
+    assert!(
+        stored_relation(&mut client, &store, usage, role_object)
+            .await
+            .is_empty(),
+        "no per-subject role fact is stored, the check carries it"
+    );
+}
+
+/// A quoted role with configured subject and role types.
+const QUOTED_ROLE_SCOPED: &str = "
+CREATE TABLE public.docs(id INTEGER PRIMARY KEY, owner_id TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON docs FOR SELECT TO \"reader:west\"
+  USING (owner_id = current_setting('app.user_id', true));
+";
+
+/// The encoded role object under the configured role type.
+const QUOTED_ROLE_OBJECT: &str = "database_role:~7265616465723a77657374";
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires docker"]
+async fn a_quoted_role_is_stated_with_its_encoded_name() {
+    let mut client = openfga().await;
+
+    let db = ParserDB::parse::<PostgreSqlDialect>(&format!(
+        "CREATE ROLE \"reader:west\" LOGIN;\n{QUOTED_ROLE_SCOPED}"
+    ))
+    .expect("the quoted role parses");
+    let setting = SessionSetting::value("app.user_id", SettingValue::Caller(DataType::Text))
+        .expect("a caller setting");
+    let deployment = Deployment::new("reader:west", ["reader:west"], [setting])
+        .expect("a valid fixture deployment");
+    let outputs = TranslatorBuilder::new(deployment)
+        .with_well_known_types(
+            WellKnownTypes::new("caller", "team", "database_role", "request_gate", "nobody")
+                .expect("valid well-known types"),
+        )
+        .with_min_confidence(ConfidenceLevel::B)
+        .build()
+        .translate(&db)
+        .expect("the visibility schema translates")
+        .outputs_accepting_gaps();
+    let model = outputs.json_model();
+    let wired = Wiring {
+        db,
+        outputs,
+        model,
+        pool: None,
+    };
+    let docs = catalog_helpers::table_id::<Postgres, _>(&wired.db, "docs")
+        .expect("docs is in the catalog");
+    let constants = constants(&wired.outputs);
+    let (store, model_id) =
+        create_store_with_model(&mut client, "subql-quoted-role", &wired.model).await;
+    let installed = installed_model(&wired.model, &model_id);
+
+    let shapes = wired.shapes();
+    let service = OpenFgaPolicy::<_, _, Actor, Postgres>::new(
+        Arc::clone(&shapes),
+        client.clone(),
+        store.clone(),
+        &installed,
+    )
+    .expect("the index carries the read relation");
+    service
+        .write_records(&constants)
+        .await
+        .expect("write the acting constant");
+
+    let event =
+        TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::String("alice".into())])
+            .with_pk_columns([0u16]);
+    let (diff, _requeries) = shapes.diff(&event).expect("an insert is all additions");
+    service.apply(&diff).await.expect("write the owner fact");
+    let row = EventRow::current(&event, shapes.catalog()).expect("post-image");
+
+    let watchers = [
+        Actor {
+            name: "caller:alice".into(),
+            role: Some("reader:west"),
+        },
+        Actor {
+            name: "caller:alice".into(),
+            role: None,
+        },
+        Actor {
+            name: "caller:bob".into(),
+            role: Some("reader:west"),
+        },
+    ];
+    let mut verdicts = Vec::new();
+    Verdict::reset(&mut verdicts, watchers.len());
+    service
+        .may_see(&row, &watchers, &mut verdicts)
+        .await
+        .expect("the service answered");
+    assert_eq!(
+        verdicts,
+        [Verdict::Allow, Verdict::Deny, Verdict::Deny],
+        "the owner acting as the quoted role is granted, and no one else is"
+    );
+
+    let acting = constants
+        .iter()
+        .find(|record| record.subject.ends_with("#usage"))
+        .expect("the load states the role's usage");
+    assert_eq!(
+        acting.subject,
+        format!("{QUOTED_ROLE_OBJECT}#usage"),
+        "the configured type and the encoded role name, not the DDL's spelling"
+    );
+    assert_eq!(
+        stored_relation(
+            &mut client,
+            &store,
+            &acting.relation.to_string(),
+            &acting.object
+        )
+        .await,
+        [format!("{QUOTED_ROLE_OBJECT}#usage")],
+        "the one constant stands under the encoded name"
+    );
 }
