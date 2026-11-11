@@ -386,10 +386,6 @@ impl PgOutputOrder {
 
     /// The order of a stream that asked for `binary on`, whose types
     /// `registry` describes.
-    #[cfg_attr(
-        not(any(test, feature = "pg-streaming")),
-        expect(dead_code, reason = "only the streaming sources start a binary stream")
-    )]
     pub fn binary(registry: super::pg_format::PgTypeRegistry) -> Self {
         Self {
             order: TransactionOrder::new(),
@@ -399,6 +395,12 @@ impl PgOutputOrder {
                 unannounced: Arc::new(PgRelationFormat::unannounced()),
             }),
         }
+    }
+
+    /// Drop the open transaction, keeping what the stream announced.
+    #[cfg(feature = "pg-sqlite-emu")]
+    pub const fn abandon_transaction(&mut self) {
+        self.order = TransactionOrder::new();
     }
 
     /// `change` at `position`, carrying its relation's column plans on a

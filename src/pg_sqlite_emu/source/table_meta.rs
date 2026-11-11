@@ -10,7 +10,7 @@ use sqlite_diff_rs::pg_walstream_reverse::Oid;
 
 use super::super::error::PgSqliteEmuError;
 use super::{ColumnMeta, TableMeta};
-use crate::backend::ScalarFamily;
+use crate::backend::{DeclaredType, FloatWidth, Postgres};
 use crate::{catalog_helpers, TableId};
 
 /// Build the per-table metadata map from the Postgres catalog.
@@ -59,9 +59,10 @@ pub(super) fn build_table_meta(
                 ))
             })?;
             let column_name = column.column_name().to_string();
-            let scalar_kind =
-                catalog_helpers::column_scalar_family(pg_catalog, table_id, column_id);
-            let pg_type_oid = pg_type_oid_for_kind(scalar_kind);
+            let declared =
+                catalog_helpers::column_scalar_kind::<Postgres, _>(pg_catalog, table_id, column_id)
+                    .and_then(|kind| kind.declared_type());
+            let pg_type_oid = pg_type_oid_for(declared);
             let is_pk = pk_cols.contains(&column_id);
             if is_pk {
                 pk_column_indices.push(col_idx);
@@ -69,6 +70,7 @@ pub(super) fn build_table_meta(
             columns.push(ColumnMeta {
                 name: column_name,
                 pg_type_oid,
+                declared,
                 is_pk,
             });
         }
@@ -93,24 +95,28 @@ const fn synth_oid(table_id: TableId) -> Oid {
     1_000 + table_id
 }
 
-/// Map subql's [`ScalarFamily`] to a PostgreSQL type OID for the encoded
-/// `pgoutput` relation message. The OID labels the column on the wire,
-/// while the engine decodes each cell against the catalog scalar kind.
-/// Unknown or composite columns fall back to `TEXT` (25).
-const fn pg_type_oid_for_kind(kind: Option<ScalarFamily>) -> Oid {
-    match kind {
-        Some(ScalarFamily::Bool) => 16,
-        Some(ScalarFamily::Int) => 20,
-        Some(ScalarFamily::Float) => 701,
-        Some(ScalarFamily::Bytes) => 17,
-        Some(ScalarFamily::Uuid) => 2950,
-        Some(ScalarFamily::Timestamp) => 1114,
-        Some(ScalarFamily::TimestampTz) => 1184,
-        Some(ScalarFamily::Date) => 1082,
-        Some(ScalarFamily::Time) => 1083,
-        Some(ScalarFamily::Decimal) => 1700,
-        Some(ScalarFamily::Json) => 114,
-        Some(ScalarFamily::Jsonb) => 3802,
-        Some(ScalarFamily::String | ScalarFamily::Interval) | None => 25,
+/// The PostgreSQL type OID the encoded `pgoutput` relation message names
+/// for a column of `declared` type, the type whose send format a binary
+/// cell carries. Columns without a builtin type fall back to `TEXT` (25).
+const fn pg_type_oid_for(declared: Option<DeclaredType>) -> Oid {
+    let Some(declared) = declared else {
+        return 25;
+    };
+    match declared {
+        DeclaredType::Bool => 16,
+        DeclaredType::Int(_) => 20,
+        DeclaredType::Float(FloatWidth::Single) => 700,
+        DeclaredType::Float(FloatWidth::Double) => 701,
+        DeclaredType::Bytes => 17,
+        DeclaredType::Uuid => 2950,
+        DeclaredType::Timestamp => 1114,
+        DeclaredType::TimestampTz => 1184,
+        DeclaredType::Date => 1082,
+        DeclaredType::Time => 1083,
+        DeclaredType::Decimal => 1700,
+        DeclaredType::Json => 114,
+        DeclaredType::Jsonb => 3802,
+        DeclaredType::Interval => 1186,
+        DeclaredType::Text(_) => 25,
     }
 }
