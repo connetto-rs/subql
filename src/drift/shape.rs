@@ -596,6 +596,18 @@ mod tests {
     }
 
     #[test]
+    fn nvarchar_keeps_max_exact_and_omitted_lengths() {
+        let max = shape_with_type::<MsSqlDialect>("NVARCHAR(MAX)");
+        let omitted = shape_with_type::<MsSqlDialect>("NVARCHAR");
+        let narrow = shape_with_type::<MsSqlDialect>("NVARCHAR(8)");
+        let wide = shape_with_type::<MsSqlDialect>("NVARCHAR(16)");
+        assert_retyped(&max, &omitted);
+        assert_retyped(&max, &wide);
+        assert_retyped(&omitted, &narrow);
+        assert_retyped(&narrow, &wide);
+    }
+
+    #[test]
     fn binary_lengths_distinguish_max_exact_and_omitted_bounds() {
         let max = shape_with_type::<MsSqlDialect>("VARBINARY(MAX)");
         let omitted = shape_with_type::<MsSqlDialect>("VARBINARY");
