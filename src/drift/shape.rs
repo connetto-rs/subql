@@ -380,19 +380,30 @@ fn append_pending_details(
                 details.push(TypeDetail::TimeZone(zone.clone()));
             }
         }
-        DataType::Array(element) => match element {
-            ArrayElemTypeDef::None => {}
-            ArrayElemTypeDef::AngleBracket(_) | ArrayElemTypeDef::Parenthesis(_) => {
-                details.push(TypeDetail::ArraySize(None));
+        // `array_element` answers the innermost element, so each level's declaration is kept here.
+        DataType::Array(_) => {
+            let mut level = data_type;
+            while let DataType::Array(definition) = level {
+                level = match definition {
+                    ArrayElemTypeDef::None => break,
+                    ArrayElemTypeDef::AngleBracket(element)
+                    | ArrayElemTypeDef::Parenthesis(element) => {
+                        details.push(TypeDetail::ArraySize(None));
+                        element
+                    }
+                    ArrayElemTypeDef::ParenthesisNotNull(element) => {
+                        details.push(TypeDetail::ArraySize(None));
+                        details.push(TypeDetail::NotNullElements);
+                        element
+                    }
+                    ArrayElemTypeDef::SquareBracket(element, size)
+                    | ArrayElemTypeDef::Qualified(element, size) => {
+                        details.push(TypeDetail::ArraySize(*size));
+                        element
+                    }
+                };
             }
-            ArrayElemTypeDef::ParenthesisNotNull(_) => {
-                details.push(TypeDetail::ArraySize(None));
-                details.push(TypeDetail::NotNullElements);
-            }
-            ArrayElemTypeDef::SquareBracket(_, size) | ArrayElemTypeDef::Qualified(_, size) => {
-                details.push(TypeDetail::ArraySize(*size));
-            }
-        },
+        }
         DataType::Enum(members, width) => {
             details.push(TypeDetail::Enum(members.clone(), *width));
         }
@@ -873,6 +884,16 @@ mod tests {
         let equivalent = shape_with_type::<PostgreSqlDialect>("INT[][3]");
         assert_retyped(&outer_bound, &inner_bound);
         assert_eq!(judge(&outer_bound, Some(&equivalent)), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn inner_array_dimensions_are_part_of_the_declared_type() {
+        let narrow = shape_with_type::<DuckDbDialect>("INTEGER[2][3]");
+        let wide = shape_with_type::<DuckDbDialect>("INTEGER[4][3]");
+        assert_retyped(&narrow, &wide);
+        let nullable = shape_with_type::<SnowflakeDialect>("ARRAY(ARRAY(INT))");
+        let required = shape_with_type::<SnowflakeDialect>("ARRAY(ARRAY(INT NOT NULL))");
+        assert_retyped(&nullable, &required);
     }
 
     #[test]
