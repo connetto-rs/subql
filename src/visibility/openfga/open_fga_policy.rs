@@ -3242,6 +3242,7 @@ GRANT DELETE ON docs TO writer;";
 
     /// A watcher acting as `role`, known by `names`, reading `read` when it
     /// names columns.
+    #[derive(Clone)]
     struct Reads {
         names: &'static [&'static str],
         role: &'static str,
@@ -3549,6 +3550,97 @@ GRANT DELETE ON docs TO writer;";
         block_on(policy.may_see(&row, &watchers, &mut verdicts)).unwrap();
 
         assert_eq!(verdicts, [Verdict::Deny], "bob does not own the row");
+    }
+
+    /// A column the table lacks names no relation, so the question is not put
+    /// rather than asked about some other column.
+    #[test]
+    fn a_column_the_table_lacks_is_not_answered() {
+        let (policy, docs) = column_policy::<NeverAsked, Reads>(NeverAsked);
+        let event = column_row(docs);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let Asked::Ask(plan) = policy.read_plan(docs).unwrap() else {
+            panic!("a granted read is asked");
+        };
+        let reader = Reads {
+            names: &["user:alice"],
+            role: "reader",
+            read: Some(&[9]),
+        };
+
+        let read = policy.read_questions(&row, &plan, core::slice::from_ref(&reader));
+        let write = policy.write_plan(
+            RowWrite::Delete {
+                old: &row,
+                read: &[9],
+            },
+            &reader,
+        );
+
+        assert!(matches!(
+            read,
+            Err(OpenFgaError::StatementNotAnswered { .. })
+        ));
+        assert!(matches!(
+            write,
+            Err(OpenFgaError::StatementNotAnswered { .. })
+        ));
+    }
+
+    /// A `DELETE` without a `WHERE` reads no column, so it asks no column.
+    #[test]
+    fn a_write_reading_no_column_asks_no_column() {
+        let (policy, docs) = column_policy::<NeverAsked, Reads>(NeverAsked);
+        let event = column_row(docs);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let gate = &by_column(&policy, docs, ActionStatement::Delete).gate;
+        let writer = Reads {
+            names: &["user:alice"],
+            role: "writer",
+            read: None,
+        };
+
+        let Asked::Ask(groups) = policy
+            .write_plan(
+                RowWrite::Delete {
+                    old: &row,
+                    read: &[],
+                },
+                &writer,
+            )
+            .unwrap()
+        else {
+            panic!("a granted delete is asked");
+        };
+
+        assert!(groups
+            .iter()
+            .all(|group| gate_questions(group, gate).is_empty()));
+    }
+
+    /// Rows nothing restricts settle nothing locally where the columns are asked
+    /// as well, so the write reaches the service, which refuses a nameless one.
+    #[test]
+    fn unrestricted_rows_do_not_grant_a_column_write_locally() {
+        let (backend, docs) = column_policy::<NeverAsked, Reads>(NeverAsked);
+        let policy = RowPolicy::new(Arc::clone(backend.shapes()), backend);
+        let event = column_row(docs);
+        let row = EventRow::current(&event, policy.catalog()).unwrap();
+        let nameless = Reads {
+            names: &[],
+            role: "writer",
+            read: None,
+        };
+
+        let got = block_on(policy.may_write(
+            RowWrite::Insert {
+                new: &row,
+                assigned: &[1],
+            },
+            &nameless,
+        ));
+
+        assert_eq!(got, Ok(Verdict::Deny));
     }
 
     fn policy_over(sql: &str) -> OpenFgaPolicy<ParserDB, NeverAsked, String, Postgres> {
