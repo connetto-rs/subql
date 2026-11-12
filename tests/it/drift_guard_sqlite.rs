@@ -622,6 +622,80 @@ fn locked_live_shape_reads_surface_errors_without_refusing_tables() {
 }
 
 #[test]
+fn a_failed_shape_read_cannot_release_rows_from_committed_incompatible_ddl() {
+    diesel::table! {
+        orders (id) {
+            id -> Integer,
+            required -> Text,
+        }
+    }
+
+    let ddl = [
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY)",
+        "CREATE TABLE ledger (id INTEGER PRIMARY KEY)",
+    ];
+    let (_dir, mut guard) = live_db(&std::format!("{};\n{};", ddl[0], ddl[1]), &ddl);
+    let orders_id = table_id(guard.catalog(), "orders");
+    let ledger_id = table_id(guard.catalog(), "ledger");
+    // Diesel's DSL does not express transaction control or schema changes.
+    sql_query("BEGIN EXCLUSIVE")
+        .execute(guard.inner().connection())
+        .unwrap();
+    sql_query("ALTER TABLE orders ADD COLUMN required TEXT NOT NULL")
+        .execute(guard.inner().connection())
+        .unwrap();
+    assert!(matches!(
+        subql::testing::block_on(guard.next_item()),
+        Err(DriftGuardError::Shape(SqliteShapeError::Diesel(_)))
+    ));
+    assert!(!guard.is_refused(orders_id));
+    assert!(guard.refused_tables().next().is_none());
+    assert!(matches!(
+        subql::testing::block_on(guard.next_item()),
+        Err(DriftGuardError::Shape(SqliteShapeError::Diesel(_)))
+    ));
+    assert!(!guard.is_refused(orders_id));
+
+    sql_query("COMMIT")
+        .execute(guard.inner().connection())
+        .unwrap();
+    diesel::insert_into(orders::table)
+        .values((orders::id.eq(7), orders::required.eq("present")))
+        .execute(guard.inner().connection())
+        .unwrap();
+    diesel::insert_into(ledger::table)
+        .values(ledger::id.eq(9))
+        .execute(guard.inner().connection())
+        .unwrap();
+
+    let item = subql::testing::block_on(guard.next_item()).unwrap();
+    let Some(SourceItem::Relation(signal)) = item else {
+        panic!("the pending schema judgment must precede every row");
+    };
+    assert_eq!(
+        signal,
+        DriftSignal::Refused {
+            table: orders_id,
+            reasons: vec![Incompatibility::ColumnNotAddedNullSafe {
+                column: "required".into(),
+            }],
+        }
+    );
+    assert!(guard.is_refused(orders_id));
+    let items = drain(&mut guard);
+    assert_eq!(signals_of(&items), Vec::<DriftSignal>::new());
+    let events = events_of(items);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].table_id(guard.catalog()), ledger_id);
+    assert_eq!(
+        events[0]
+            .value_at(guard.catalog(), RowKind::New, 0)
+            .unwrap(),
+        Value::Int(9)
+    );
+}
+
+#[test]
 fn a_locked_source_preserves_pending_changes_for_retry() {
     let ddl = "CREATE TABLE orders (id INTEGER PRIMARY KEY)";
     let (dir, mut guard) = live_db(ddl, &[ddl]);

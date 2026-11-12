@@ -6,6 +6,8 @@ All notable changes to subql are recorded here. The format follows [Keep a Chang
 
 ### Changed
 
+- `DriftGuard` retains pending schema judgments across live-read errors and cancellation, retrying before yielding output or reading further source items.
+- Declared-type judgments preserve signed numeric scales, unsignedness, temporal precision, array-dimension positions and compound member declarations while folding type aliases.
 - `visibility` follows `rls2fga` main, whose `Translation::action_relations` answers every statement on every table, the tables no policy reaches and those with row-level security off included. `Shapes::with_unrestricted_tables` is removed with the report it took, and `Shapes::answer` reads the naming and action reports alone. `ActionAnswer::Unrestricted` grants a statement to every acting role without a row or request condition.
 - Visibility reads authenticated database roles through `Subject::acting_role`, delegates unknown roles, and carries roles per OpenFGA question. Scalar caller inequality denies unset values, and `RequiredParameter::list` follows the deployment declaration. Read-rule folding excludes role-scoped policies and database-role expressions.
 - `OpenFgaPolicy::new` requires an authorization model carrying its installed ID. Construction stays offline, checks use that ID, and contextual role grants obey the model's direct-subject restrictions.
