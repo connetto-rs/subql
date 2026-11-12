@@ -1109,7 +1109,7 @@ pub fn engine_model_sqlite(data: &[u8]) -> EngineModelCoverage {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, NumericValue};
+    use super::{Aggregate, Cell, NumericValue, Row, Run, Shape, Statement, Step, Unstructured};
 
     /// The SQLite model has no interval answer, so one reads as NULL while a
     /// number keeps its value.
@@ -1121,5 +1121,41 @@ mod tests {
         for (answer, null) in [(interval, true), (NumericValue::Integer(1), false)] {
             assert_eq!(matches!(Cell::of_numeric(Some(&answer)), Cell::Null), null);
         }
+    }
+
+    #[test]
+    fn a_missing_old_row_moves_a_sum_to_reads_and_survives_restart() {
+        let mut run = Run::new();
+        for shape in [
+            Shape::Rows,
+            Shape::Aggregate(Aggregate::CountStar),
+            Shape::Aggregate(Aggregate::Sum),
+        ] {
+            run.register(Statement {
+                shape,
+                filter: None,
+            });
+        }
+        let row =
+            |byte| Row::arbitrary(&mut Unstructured::new(&[byte; 64])).expect("model row decodes");
+        run.write(&Step::Insert(1, row(1)));
+        run.write(&Step::Update {
+            id: 1,
+            to: 1,
+            row: row(2),
+            old_image: false,
+        });
+        run.restart();
+        run.write(&Step::Delete(1));
+
+        let reached = run.coverage;
+        assert!(
+            reached.rows > 0
+                && reached.aggregates > 0
+                && reached.reads > 0
+                && reached.transitions > 0
+                && reached.restarts > 0,
+            "a model path was not compared ({reached:?})"
+        );
     }
 }

@@ -387,6 +387,14 @@ mod tests {
     use sql_traits::structs::ParserDB;
     use sqlparser::dialect::SQLiteDialect;
 
+    diesel::table! {
+        orders (id) {
+            id -> Integer,
+            amount -> Nullable<Integer>,
+            status -> Nullable<Text>,
+        }
+    }
+
     // The session extension silently ignores changes to a table that
     // declares no primary key, so both tables key on `id`.
     fn open_orders_db() -> (SqliteConnection, ParserDB) {
@@ -715,14 +723,6 @@ mod tests {
         use diesel::connection::SimpleConnection;
         use diesel::ExpressionMethods;
 
-        diesel::table! {
-            orders (id) {
-                id -> Integer,
-                amount -> Nullable<Integer>,
-                status -> Nullable<Text>,
-            }
-        }
-
         let (_dir, connection, mut writer, catalog) = file_orders_db();
         let mut source = SqliteCdcSource::new(connection, catalog).expect("source");
         diesel::insert_into(orders::table)
@@ -752,6 +752,44 @@ mod tests {
         assert_eq!(
             event.value_at(source.catalog(), RowKind::New, 1).unwrap(),
             Value::Int(250)
+        );
+        assert!(source.poll_next_item().expect("drained").is_none());
+    }
+
+    #[test]
+    fn a_parse_error_retains_the_insert_until_its_text_is_repaired() {
+        use diesel::ExpressionMethods;
+
+        let (connection, catalog) = open_orders_db();
+        let mut source = SqliteCdcSource::new(connection, catalog).expect("source");
+        diesel::insert_into(orders::table)
+            .values((
+                orders::id.eq(7),
+                orders::status.eq(diesel::dsl::sql::<diesel::dsl::SqlTypeOf<orders::status>>(
+                    "CAST(X'80' AS TEXT)",
+                )),
+            ))
+            .execute(source.connection())
+            .expect("SQLite accepts non-UTF-8 text");
+        for _ in 0..2 {
+            assert!(matches!(
+                source.poll_next_item(),
+                Err(SqliteCdcError::Parse(WalParseError::MalformedPayload(_)))
+            ));
+        }
+        diesel::update(orders::table)
+            .set(orders::status.eq("ready"))
+            .execute(source.connection())
+            .expect("repair text");
+        let event = event_of(&mut source).expect("the repaired insert survives");
+        assert_eq!(event.kind(), crate::EventKind::Insert);
+        assert_eq!(
+            event.value_at(source.catalog(), RowKind::New, 0).unwrap(),
+            Value::Int(7)
+        );
+        assert_eq!(
+            event.value_at(source.catalog(), RowKind::New, 2).unwrap(),
+            Value::String("ready".into())
         );
         assert!(source.poll_next_item().expect("drained").is_none());
     }

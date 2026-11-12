@@ -493,8 +493,9 @@ mod tests {
     use alloc::format;
     use sql_traits::structs::ParserDB;
     use sqlparser::dialect::{
-        BigQueryDialect, ClickHouseDialect, Dialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
-        SQLiteDialect,
+        BigQueryDialect, ClickHouseDialect, DatabricksDialect, Dialect, DuckDbDialect,
+        GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+        SnowflakeDialect,
     };
 
     fn column(ddl: &str, name: &str) -> ColumnShape {
@@ -874,6 +875,70 @@ mod tests {
     fn nested_column_bounds_are_preserved() {
         let catalog = shape_with_type::<ClickHouseDialect>("Nested(amount Decimal(10, 2))");
         let wider = shape_with_type::<ClickHouseDialect>("Nested(amount Decimal(12, 2))");
+        assert_retyped(&catalog, &wider);
+    }
+
+    #[test]
+    fn character_length_units_are_part_of_the_declared_bound() {
+        let characters = shape_with_type::<GenericDialect>("CHARACTER(8 CHARACTERS)");
+        let octets = shape_with_type::<GenericDialect>("CHARACTER(8 OCTETS)");
+        let omitted = shape_with_type::<GenericDialect>("CHARACTER(8)");
+        assert_retyped(&characters, &octets);
+        assert_retyped(&characters, &omitted);
+    }
+
+    #[test]
+    fn array_element_declarations_distinguish_untyped_nullable_and_required() {
+        let untyped = shape_with_type::<SnowflakeDialect>("ARRAY");
+        let nullable = shape_with_type::<SnowflakeDialect>("ARRAY(VARCHAR(8))");
+        let required = shape_with_type::<SnowflakeDialect>("ARRAY(VARCHAR(8) NOT NULL)");
+        let wider = shape_with_type::<SnowflakeDialect>("ARRAY(VARCHAR(16) NOT NULL)");
+        assert_retyped(&untyped, &nullable);
+        assert_retyped(&nullable, &required);
+        assert_retyped(&required, &wider);
+    }
+
+    #[test]
+    fn union_member_names_types_and_order_are_preserved() {
+        let catalog = shape_with_type::<DuckDbDialect>("UNION(code INTEGER, label VARCHAR)");
+        let renamed = shape_with_type::<DuckDbDialect>("UNION(identifier INTEGER, label VARCHAR)");
+        let retyped = shape_with_type::<DuckDbDialect>("UNION(code BIGINT, label VARCHAR)");
+        let reordered = shape_with_type::<DuckDbDialect>("UNION(label VARCHAR, code INTEGER)");
+        let alias = shape_with_type::<DuckDbDialect>("UNION(code INT, label VARCHAR)");
+        assert_retyped(&catalog, &renamed);
+        assert_retyped(&catalog, &retyped);
+        assert_retyped(&catalog, &reordered);
+        assert_eq!(judge(&catalog, Some(&alias)), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn struct_field_rounding_options_are_preserved() {
+        let omitted = shape_with_type::<BigQueryDialect>("STRUCT<amount NUMERIC(10, 2)>");
+        let empty = shape_with_type::<BigQueryDialect>("STRUCT<amount NUMERIC(10, 2) OPTIONS()>");
+        let even = shape_with_type::<BigQueryDialect>(
+            "STRUCT<amount NUMERIC(10, 2) OPTIONS(rounding_mode = 'ROUND_HALF_EVEN')>",
+        );
+        let away = shape_with_type::<BigQueryDialect>(
+            "STRUCT<amount NUMERIC(10, 2) OPTIONS(rounding_mode = 'ROUND_HALF_AWAY_FROM_ZERO')>",
+        );
+        assert_retyped(&omitted, &even);
+        assert_retyped(&even, &away);
+        assert_eq!(judge(&omitted, Some(&empty)), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn object_field_nullability_is_preserved() {
+        let nullable = shape_with_type::<SnowflakeDialect>("OBJECT(city VARCHAR)");
+        let required = shape_with_type::<SnowflakeDialect>("OBJECT(city VARCHAR NOT NULL)");
+        assert_retyped(&nullable, &required);
+    }
+
+    #[test]
+    fn collated_struct_fields_keep_their_declared_bounds() {
+        let catalog =
+            shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(8) COLLATE UTF8_LCASE>");
+        let wider =
+            shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(16) COLLATE UTF8_LCASE>");
         assert_retyped(&catalog, &wider);
     }
 }
