@@ -277,6 +277,12 @@ mod dispatch_contract;
 // and is dropped while the rest of the same drain keeps being served.
 #[cfg(feature = "sqlite-cdc")]
 mod drift_guard_sqlite;
+
+// The apply path asks the guard's shared handle: a table a DriftGuard over
+// the live SQLite source refuses is refused by the apply entry point with
+// the guard's own reasons, before any op touches the target database.
+#[cfg(all(feature = "sqlite-cdc", feature = "apply-patchset-sqlite"))]
+mod drift_guard_apply_sqlite;
 mod engine_removal_bookkeeping;
 mod engine_trait_surface;
 mod engine_unknown_tables;

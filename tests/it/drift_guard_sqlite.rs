@@ -41,7 +41,7 @@ diesel::table! {
 /// A file-backed live database, its `SqliteLiveReader` connection and the
 /// catalog. The file, not `:memory:`, is what lets the reader's own
 /// connection see the source's database.
-fn live_db(catalog_ddl: &str, statements: &[&str]) -> (tempfile::TempDir, Guard) {
+pub fn live_db(catalog_ddl: &str, statements: &[&str]) -> (tempfile::TempDir, Guard) {
     live_db_with_source_catalog(catalog_ddl, catalog_ddl, statements)
 }
 
@@ -72,12 +72,12 @@ fn live_db_with_source_catalog(
 }
 
 /// The catalog id of the table named `name`.
-fn table_id(catalog: &ParserDB, name: &str) -> u32 {
+pub fn table_id(catalog: &ParserDB, name: &str) -> u32 {
     subql::catalog_helpers::table_id::<SQLite, ParserDB>(catalog, name).unwrap()
 }
 
 /// Every item the guard yields until it runs dry.
-fn drain(guard: &mut Guard) -> Vec<Item> {
+pub fn drain(guard: &mut Guard) -> Vec<Item> {
     let mut items = Vec::new();
     loop {
         let item = subql::testing::block_on(guard.next_item()).unwrap();
@@ -97,7 +97,7 @@ fn events_of(items: Vec<Item>) -> Vec<SqliteChangesetEvent> {
 }
 
 /// The signals among `items`, read beside the events that follow them.
-fn signals_of(items: &[Item]) -> Vec<DriftSignal> {
+pub fn signals_of(items: &[Item]) -> Vec<DriftSignal> {
     items
         .iter()
         .filter_map(|item| match item {
@@ -381,10 +381,7 @@ fn startup_refusals_are_enumerated_before_any_event() {
         (missing, vec![Incompatibility::TableMissing]),
     ];
     expected.sort_by_key(|(table, _)| *table);
-    let refused: Vec<_> = guard
-        .refused_tables()
-        .map(|(table, reasons)| (table, reasons.to_vec()))
-        .collect();
+    let refused = guard.refused_tables();
     assert_eq!(refused, expected);
     assert!(guard.is_refused(orders));
     assert!(guard.is_refused(missing));
@@ -477,10 +474,7 @@ fn startup_refusal_survives_restoration_and_further_schema_changes() {
             Value::Int(i64::from(id))
         );
         assert!(guard.is_refused(orders));
-        let refused: Vec<_> = guard
-            .refused_tables()
-            .map(|(table, reasons)| (table, reasons.to_vec()))
-            .collect();
+        let refused = guard.refused_tables();
         assert_eq!(refused, vec![(orders, reasons.clone())]);
     }
 }
@@ -649,7 +643,10 @@ fn a_failed_shape_read_cannot_release_rows_from_committed_incompatible_ddl() {
         Err(DriftGuardError::Shape(SqliteShapeError::Diesel(_)))
     ));
     assert!(!guard.is_refused(orders_id));
-    assert!(guard.refused_tables().next().is_none());
+    assert_eq!(
+        guard.refused_tables(),
+        Vec::<(u32, Vec<Incompatibility>)>::new()
+    );
     assert!(matches!(
         subql::testing::block_on(guard.next_item()),
         Err(DriftGuardError::Shape(SqliteShapeError::Diesel(_)))

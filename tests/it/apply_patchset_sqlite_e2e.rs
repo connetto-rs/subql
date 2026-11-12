@@ -20,6 +20,7 @@ use sqlite_diff_rs::{
     DiffOps, Insert, PatchDelete, PatchSet, PatchsetFormat, SimpleTable, Update, Value,
 };
 use sqlparser::dialect::SQLiteDialect;
+use subql::drift::NoRefusals;
 use subql::patchset::SqliteAdapter;
 use subql::{DefaultIds, SubscriptionEngine};
 // SQLite CDC changeset event is the natural E: CdcEvent for a
@@ -85,7 +86,7 @@ fn apply_patchset_sqlite_roundtrip_insert_update_delete() {
         );
 
     let n = engine
-        .apply_patchset(&inserts, &mut conn, &adapter)
+        .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
         .expect("apply inserts");
     assert_eq!(n, 2, "two rows inserted");
 
@@ -124,7 +125,7 @@ fn apply_patchset_sqlite_roundtrip_insert_update_delete() {
             .unwrap(),
     );
     let n = engine
-        .apply_patchset(&updates, &mut conn, &adapter)
+        .apply_patchset(&updates, &NoRefusals, &mut conn, &adapter)
         .expect("apply updates");
     assert_eq!(n, 1);
 
@@ -151,7 +152,7 @@ fn apply_patchset_sqlite_roundtrip_insert_update_delete() {
         vec![Value::Integer(1)],
     ));
     let n = engine
-        .apply_patchset(&deletes, &mut conn, &adapter)
+        .apply_patchset(&deletes, &NoRefusals, &mut conn, &adapter)
         .expect("apply deletes");
     assert_eq!(n, 1);
 
@@ -221,7 +222,7 @@ fn apply_patchset_sqlite_binds_real_and_null_cells() {
         );
 
     let n = engine
-        .apply_patchset(&inserts, &mut conn, &adapter)
+        .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
         .expect("apply inserts");
     assert_eq!(n, 2, "two rows inserted");
 
@@ -257,7 +258,7 @@ fn apply_patchset_sqlite_binds_real_and_null_cells() {
             .unwrap(),
     );
     let n = engine
-        .apply_patchset(&updates, &mut conn, &adapter)
+        .apply_patchset(&updates, &NoRefusals, &mut conn, &adapter)
         .expect("apply updates");
     assert_eq!(n, 1, "one row updated");
 

@@ -14,6 +14,7 @@ use diesel::{sql_query, QueryableByName, RunQueryDsl};
 use sql_traits::structs::ParserDB;
 use sqlite_diff_rs::{DiffOps, Insert, PatchSet, SimpleTable};
 use sqlparser::dialect::PostgreSqlDialect;
+use subql::drift::NoRefusals;
 use subql::patchset::PgAdapter;
 use subql::{DefaultIds, PgChangeEvent, SubscriptionEngine};
 
@@ -100,7 +101,7 @@ fn apply_patchset_binds_every_rich_scalar_natively() {
 
     let adapter = PgAdapter::new(engine.database()).expect("the catalog indexes");
     let n = engine
-        .apply_patchset(&inserts, &mut conn, &adapter)
+        .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
         .expect("apply the insert");
     assert_eq!(n, 1, "one row inserted");
 

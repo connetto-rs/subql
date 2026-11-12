@@ -26,6 +26,7 @@ use diesel::{sql_query, RunQueryDsl};
 use diesel_async::{AsyncConnection, AsyncMysqlConnection};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::MySqlDialect;
+use subql::drift::NoRefusals;
 use subql::patchset::MysqlAdapter;
 use subql::wal::MaxwellEvent;
 use subql::{DefaultIds, SubscriptionEngine};
@@ -61,7 +62,7 @@ fn apply_patchset_async_bool_roundtrip_insert_update_delete_mysql() {
 
         assert_eq!(
             engine
-                .apply_patchset_async(&inserts, &mut conn, &adapter)
+                .apply_patchset_async(&inserts, &NoRefusals, &mut conn, &adapter)
                 .await
                 .expect("apply inserts"),
             2,
@@ -74,7 +75,7 @@ fn apply_patchset_async_bool_roundtrip_insert_update_delete_mysql() {
 
         assert_eq!(
             engine
-                .apply_patchset_async(&updates, &mut conn, &adapter)
+                .apply_patchset_async(&updates, &NoRefusals, &mut conn, &adapter)
                 .await
                 .expect("apply updates"),
             1,
@@ -87,7 +88,7 @@ fn apply_patchset_async_bool_roundtrip_insert_update_delete_mysql() {
 
         assert_eq!(
             engine
-                .apply_patchset_async(&deletes, &mut conn, &adapter)
+                .apply_patchset_async(&deletes, &NoRefusals, &mut conn, &adapter)
                 .await
                 .expect("apply deletes"),
             1,

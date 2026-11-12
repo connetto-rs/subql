@@ -50,6 +50,7 @@ use sqlparser::dialect::{MySqlDialect, SQLiteDialect};
 use uuid::Uuid;
 
 use subql::backend::SQLite as SqliteBackend;
+use subql::drift::NoRefusals;
 use subql::emit::{maxwell_patchset_builder, WireTable};
 use subql::patchset::{MysqlAdapter, SqliteAdapter};
 use subql::testing::TestEvent;
@@ -447,7 +448,7 @@ fn finish_loop(
     let sqlite_adapter = SqliteAdapter::new(sqlite_engine.database()).expect("the catalog indexes");
 
     sqlite_engine
-        .apply_patchset(seed, &mut sqlite, &sqlite_adapter)
+        .apply_patchset(seed, &NoRefusals, &mut sqlite, &sqlite_adapter)
         .unwrap();
     assert_eq!(
         load_sqlite(&mut sqlite),
@@ -459,7 +460,7 @@ fn finish_loop(
     session.attach_all().unwrap();
 
     sqlite_engine
-        .apply_patchset(mutate, &mut sqlite, &sqlite_adapter)
+        .apply_patchset(mutate, &NoRefusals, &mut sqlite, &sqlite_adapter)
         .unwrap();
     assert_eq!(
         load_sqlite(&mut sqlite),
@@ -480,11 +481,13 @@ fn finish_loop(
         SubscriptionEngine::new(subql_catalog(), MySqlDialect {});
     let my_adapter = MysqlAdapter::new(my_engine.database()).expect("the catalog indexes");
 
-    my_engine.apply_patchset(seed, my, &my_adapter).unwrap();
+    my_engine
+        .apply_patchset(seed, &NoRefusals, my, &my_adapter)
+        .unwrap();
     assert_eq!(load_mysql(my), seed_mysql_rows(), "MySQL after re-seed");
 
     my_engine
-        .apply_diffset_bytes(&session_patchset, my, &my_adapter)
+        .apply_diffset_bytes(&session_patchset, &NoRefusals, my, &my_adapter)
         .unwrap();
     assert_eq!(
         load_mysql(my),

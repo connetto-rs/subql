@@ -30,7 +30,8 @@ use sqlite_diff_rs::{
     Value,
 };
 use sqlparser::dialect::PostgreSqlDialect;
-use subql::patchset::PgAdapter;
+use subql::drift::{Incompatibility, NoRefusals, RefusalView};
+use subql::patchset::{ApplyError, PgAdapter};
 use subql::{DefaultIds, PgChangeEvent, SubscriptionEngine};
 
 const DDL: &str = "CREATE TABLE items (id INT PRIMARY KEY, label TEXT, qty INT);";
@@ -61,6 +62,36 @@ fn engine() -> SubscriptionEngine<PgChangeEvent, DefaultIds, ParserDB> {
     SubscriptionEngine::new(catalog, PostgreSqlDialect {})
 }
 
+struct RefusedItems;
+
+impl RefusalView for RefusedItems {
+    fn refusal(&self, table: &str) -> Option<Vec<Incompatibility>> {
+        (table == "items").then(|| {
+            vec![Incompatibility::ColumnDropped {
+                column: "label".into(),
+            }]
+        })
+    }
+}
+
+async fn assert_refused_upload(
+    apply: impl core::future::Future<Output = Result<usize, ApplyError>>,
+    verify: &mut PgConnection,
+    expected: &[Item],
+) {
+    let error = apply.await.unwrap_err();
+    assert!(matches!(
+        error,
+        ApplyError::RefusedTable { table, reasons }
+            if table == "items"
+                && matches!(
+                    reasons.as_slice(),
+                    [Incompatibility::ColumnDropped { column }] if column == "label"
+                )
+    ));
+    assert_eq!(load_items(verify), expected);
+}
+
 /// `apply_diffset_bytes_async` dispatches uploaded **patchset** bytes: parse,
 /// reconstruct against the catalog, and apply. Covers the patchset arm plus
 /// the byte-parse entry point.
@@ -84,7 +115,7 @@ fn diffset_bytes_async_applies_patchset_bytes() {
         let adapter = PgAdapter::new(engine.database()).expect("the catalog indexes");
         let table = items_table();
 
-        let insert_bytes = PatchSet::<SimpleTable, String, Vec<u8>>::new()
+        let insert_batch = PatchSet::<SimpleTable, String, Vec<u8>>::new()
             .insert(
                 Insert::from(table.clone())
                     .set(0, 1_i64)
@@ -102,11 +133,23 @@ fn diffset_bytes_async_applies_patchset_bytes() {
                     .unwrap()
                     .set(2, 20_i64)
                     .unwrap(),
-            )
-            .build();
+            );
+        assert_refused_upload(
+            engine.apply_patchset_async(&insert_batch, &RefusedItems, &mut conn, &adapter),
+            &mut verify,
+            &[],
+        )
+        .await;
+        let insert_bytes = insert_batch.build();
+        assert_refused_upload(
+            engine.apply_diffset_bytes_async(&insert_bytes, &RefusedItems, &mut conn, &adapter),
+            &mut verify,
+            &[],
+        )
+        .await;
 
         let n = engine
-            .apply_diffset_bytes_async(&insert_bytes, &mut conn, &adapter)
+            .apply_diffset_bytes_async(&insert_bytes, &NoRefusals, &mut conn, &adapter)
             .await
             .expect("apply patchset bytes");
         assert_eq!(n, 2, "two rows inserted from patchset bytes");
@@ -136,7 +179,7 @@ fn diffset_bytes_async_applies_patchset_bytes() {
             )
             .build();
         let n = engine
-            .apply_diffset_bytes_async(&update_bytes, &mut conn, &adapter)
+            .apply_diffset_bytes_async(&update_bytes, &NoRefusals, &mut conn, &adapter)
             .await
             .expect("apply update bytes");
         assert_eq!(n, 1, "one row updated from patchset bytes");
@@ -188,8 +231,16 @@ fn apply_changeset_async_relocates_primary_key() {
                 .unwrap(),
         );
 
+        let before = load_items(&mut verify);
+        assert_refused_upload(
+            engine.apply_changeset_async(&changeset, &RefusedItems, &mut conn, &adapter),
+            &mut verify,
+            &before,
+        )
+        .await;
+
         let n = engine
-            .apply_changeset_async(&changeset, &mut conn, &adapter)
+            .apply_changeset_async(&changeset, &NoRefusals, &mut conn, &adapter)
             .await
             .expect("apply changeset");
         assert_eq!(n, 1, "one row relocated");
@@ -247,7 +298,7 @@ fn diffset_bytes_async_applies_changeset_bytes_pk_change() {
             .build();
 
         let n = engine
-            .apply_diffset_bytes_async(&changeset_bytes, &mut conn, &adapter)
+            .apply_diffset_bytes_async(&changeset_bytes, &NoRefusals, &mut conn, &adapter)
             .await
             .expect("apply changeset bytes");
         assert_eq!(n, 1, "one row relocated from changeset bytes");

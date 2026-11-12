@@ -9,9 +9,14 @@ extern crate alloc;
 // Re-export public API
 pub use compiler::vm::refusal::EvaluationRefusal;
 pub use compiler::{AggHaving, AggSpec, HavingFunction, HavingOp, HavingSubject, QueryProjection};
-pub use drift::{judge, refusal_reasons, Incompatibility, ReplicaIdentity, TableShape, Verdict};
+pub use drift::{
+    judge, refusal_reasons, Incompatibility, NoRefusals, RefusalView, ReplicaIdentity, TableShape,
+    Verdict,
+};
 #[cfg(feature = "std")]
-pub use drift::{DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, LiveShapeReader};
+pub use drift::{
+    DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, LiveShapeReader, RefusedTables,
+};
 #[cfg(feature = "sqlite-cdc")]
 pub use drift::{SqliteLiveReader, SqliteShapeError};
 pub use errors::*;

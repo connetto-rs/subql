@@ -15,6 +15,7 @@ use diesel::{sql_query, QueryableByName, RunQueryDsl};
 use sql_traits::structs::ParserDB;
 use sqlite_diff_rs::{Binder, DiffOps, Insert, PatchSet, SimpleTable, Value};
 use sqlparser::dialect::PostgreSqlDialect;
+use subql::drift::NoRefusals;
 use subql::patchset::{bind_array_as, CustomTypePgAdapter, PgArray, PgCustomBinder};
 use subql::{DefaultIds, PgChangeEvent, SubscriptionEngine};
 
@@ -133,7 +134,7 @@ fn arrays_and_vectors_bind_natively() {
         .register("mood", MoodArrays);
     sql_query("SET TIME ZONE 'UTC'").execute(&mut conn).unwrap();
     let n = engine
-        .apply_patchset(&inserts, &mut conn, &adapter)
+        .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
         .expect("apply the insert");
     assert_eq!(n, 1, "one row inserted");
 
@@ -185,7 +186,7 @@ fn malformed_arrays_and_vectors_are_refused() {
         let inserts = PatchSet::<SimpleTable, String, Vec<u8>>::new().insert(row);
         assert!(
             engine
-                .apply_patchset(&inserts, &mut conn, &adapter)
+                .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
                 .is_err(),
             "column {column} must be refused"
         );

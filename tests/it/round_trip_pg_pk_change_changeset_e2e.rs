@@ -31,6 +31,7 @@ use diesel::{sql_query, Connection, PgConnection, QueryableByName, RunQueryDsl, 
 use diesel_sqlite_session::SqliteSessionExt;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
+use subql::drift::NoRefusals;
 use subql::patchset::PgAdapter;
 use subql::{DefaultIds, PgChangeEvent, SubscriptionEngine};
 
@@ -125,7 +126,7 @@ fn round_trip_pk_change_via_changeset() {
         );
     let pg_adapter = PgAdapter::new(pg_engine.database()).expect("the catalog indexes");
     pg_engine
-        .apply_diffset_bytes(&changeset, &mut pg, &pg_adapter)
+        .apply_diffset_bytes(&changeset, &NoRefusals, &mut pg, &pg_adapter)
         .unwrap();
 
     assert_eq!(

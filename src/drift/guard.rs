@@ -15,10 +15,13 @@
 //! dropped events.
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use arc_swap::ArcSwap;
 use sql_traits::prelude::{DatabaseLike, TableLike};
 
+use super::refusal::RefusalView;
 use super::shape::{SqlparserDatabase, TableShape};
 use super::verdict::{refusal_reasons, Incompatibility};
 use crate::backend::CdcEvent;
@@ -91,6 +94,81 @@ where
     Shape(#[source] R),
 }
 
+/// The refused tables a [`DriftGuard`] has judged, shared with the apply
+/// path.
+///
+/// The guard writes the handle as it judges, and the apply entry points
+/// read a cloned handle from another task: a clone reads the guard's
+/// current refused set through its atomic snapshot, so the two never
+/// block on each other, and the handle keeps naming every new refusal
+/// for as long as the guard runs.
+#[derive(Clone)]
+pub struct RefusedTables {
+    snapshot: Arc<ArcSwap<RefusalSnapshot>>,
+}
+
+impl Default for RefusedTables {
+    fn default() -> Self {
+        Self {
+            snapshot: Arc::new(ArcSwap::new(Arc::new(RefusalSnapshot::default()))),
+        }
+    }
+}
+
+/// The immutable state a [`RefusedTables`] publishes on each refusal.
+#[derive(Clone, Default)]
+struct RefusalSnapshot {
+    /// The refused tables keyed by catalog id, each with its reasons.
+    by_id: BTreeMap<TableId, Vec<Incompatibility>>,
+    /// The refused tables' catalog names mapped to their ids, for the
+    /// name-based query the apply path asks.
+    by_name: BTreeMap<String, TableId>,
+}
+
+impl RefusedTables {
+    /// Record `table` as refused with its reasons.
+    ///
+    /// A refusal is one-way: a refused table stays refused until the guard
+    /// is dropped, and a restart re-judges every table.
+    pub(crate) fn insert(&self, table: TableId, name: &str, reasons: Vec<Incompatibility>) {
+        let mut next: RefusalSnapshot = (*self.snapshot.load_full()).clone();
+        next.by_id.insert(table, reasons);
+        next.by_name.insert(name.to_string(), table);
+        self.snapshot.store(Arc::new(next));
+    }
+
+    /// Whether the table is refused.
+    #[must_use]
+    pub fn is_refused(&self, table: TableId) -> bool {
+        self.snapshot.load().by_id.contains_key(&table)
+    }
+
+    /// The refused tables, each with its reasons, in id order.
+    #[must_use]
+    pub fn refused_tables(&self) -> Vec<(TableId, Vec<Incompatibility>)> {
+        self.snapshot
+            .load()
+            .by_id
+            .iter()
+            .map(|(table, reasons)| (*table, reasons.clone()))
+            .collect()
+    }
+
+    /// The reasons `table` is refused by name, or `None` when it is not
+    /// refused.
+    fn refused_by_name(&self, table: &str) -> Option<Vec<Incompatibility>> {
+        let snapshot = self.snapshot.load();
+        let id = *snapshot.by_name.get(table)?;
+        snapshot.by_id.get(&id).cloned()
+    }
+}
+
+impl RefusalView for RefusedTables {
+    fn refusal(&self, table: &str) -> Option<Vec<Incompatibility>> {
+        self.refused_by_name(table)
+    }
+}
+
 /// A source that judges every schema change against the catalog and
 /// drops the events of refused tables before the consumer sees them.
 ///
@@ -99,7 +177,7 @@ where
 /// itself: events, commits and acks of usable tables pass through
 /// unchanged, schema messages come back as [`DriftSignal`] items, and
 /// the events of refused tables and of tables absent from the catalog
-/// are dropped.
+/// are dropped. The refused set is shared with the apply path through the [`RefusedTables`] handle [`DriftGuard::refusals`] hands out, so an upload naming a refused table is refused before any op applies.
 ///
 /// A failed or cancelled live read is retried by `next_item` before any further output or source items.
 pub struct DriftGuard<S, C, R>
@@ -112,11 +190,12 @@ where
     inner: S,
     catalog: C,
     reader: R,
-    /// The refused tables, keyed by catalog id, with their reasons.
+    /// The refused tables, shared with the apply path through
+    /// [`RefusedTables`].
     ///
     /// Kept until the guard is dropped: a refused table stays refused,
     /// and a restart re-judges every table.
-    refused: BTreeMap<TableId, Vec<Incompatibility>>,
+    refusals: RefusedTables,
     /// The catalog's table ids, so an event the catalog does not know
     /// is dropped rather than folded.
     known: BTreeSet<TableId>,
@@ -152,7 +231,7 @@ where
         C: SqlparserDatabase,
     {
         let mut known = BTreeSet::new();
-        let mut refused = BTreeMap::new();
+        let refusals = RefusedTables::default();
         let mut pending = VecDeque::new();
         for table in catalog.tables() {
             let name = table.table_name().to_string();
@@ -170,14 +249,14 @@ where
                     table: id,
                     reasons: reasons.clone(),
                 }));
-                refused.insert(id, reasons);
+                refusals.insert(id, &name, reasons);
             }
         }
         Ok(Self {
             inner,
             catalog,
             reader,
-            refused,
+            refusals,
             known,
             pending_judgment: None,
             pending,
@@ -197,17 +276,27 @@ where
     /// Whether the table is refused.
     #[must_use]
     pub fn is_refused(&self, table: TableId) -> bool {
-        self.refused.contains_key(&table)
+        self.refusals.is_refused(table)
     }
 
     /// The refused tables, each with its reasons, in id order.
     ///
     /// The read-only view the upload path asks before refusing an upload
     /// with the typed reason.
-    pub fn refused_tables(&self) -> impl Iterator<Item = (TableId, &[Incompatibility])> {
-        self.refused
-            .iter()
-            .map(|(id, reasons)| (*id, reasons.as_slice()))
+    #[must_use]
+    pub fn refused_tables(&self) -> Vec<(TableId, Vec<Incompatibility>)> {
+        self.refusals.refused_tables()
+    }
+
+    /// The refused-tables handle the guard shares with the apply path.
+    ///
+    /// Pass a clone of the handle to an apply entry point, so an upload
+    /// naming a table the guard refuses is refused before any op applies,
+    /// and the handle keeps naming every new refusal for as long as the
+    /// guard runs.
+    #[must_use]
+    pub fn refusals(&self) -> RefusedTables {
+        self.refusals.clone()
     }
 }
 
@@ -252,7 +341,7 @@ where
                         // A refused table's events are dropped as they
                         // arrive, and so are the events of a table the
                         // catalog does not know.
-                        if this.known.contains(&table) && !this.refused.contains_key(&table) {
+                        if this.known.contains(&table) && !this.refusals.is_refused(table) {
                             return Ok(Some(SourceItem::Event(event)));
                         }
                     }
@@ -285,7 +374,7 @@ where
             // events are dropped by the loop.
             return;
         };
-        if self.refused.contains_key(&table) {
+        if self.refusals.is_refused(table) {
             // A refused table stays refused until the guard is dropped.
             return;
         }
@@ -324,7 +413,7 @@ where
                     table,
                     reasons: reasons.clone(),
                 }));
-            self.refused.insert(table, reasons);
+            self.refusals.insert(table, &name, reasons);
         }
         Ok(())
     }
