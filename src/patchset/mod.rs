@@ -40,6 +40,7 @@ use alloc::vec::Vec;
 use core::hash::Hash;
 
 use diesel::backend::Backend;
+use diesel::query_builder::{QueryFragment, QueryId};
 use diesel::serialize::ToSql;
 use diesel::sql_types::{BigInt, Binary, Double, HasSqlType, Text};
 use sql_traits::prelude::DatabaseLike;
@@ -129,17 +130,45 @@ fn check_refusals<'n, R: RefusalView>(
     Ok(())
 }
 
-/// Await the apply only when the refusal check succeeded.
+/// Check every table before applying adapter-bound operations in one transaction.
+fn apply_ops<'n, Conn, Ops>(
+    refusals: &impl RefusalView,
+    names: impl Iterator<Item = &'n str>,
+    ops: Ops,
+    conn: &mut Conn,
+) -> Result<usize, ApplyError>
+where
+    Conn: diesel::Connection,
+    Ops: Iterator,
+    Ops::Item: QueryFragment<Conn::Backend> + QueryId + diesel::RunQueryDsl<Conn>,
+{
+    check_refusals(refusals, names)?;
+    ops.apply_transactional(conn).map_err(ApplyError::from)
+}
+
+/// Check refusals eagerly and return a transaction future that does not borrow the view.
 #[cfg(any(
     feature = "apply-patchset-postgres-async",
     feature = "apply-patchset-mysql-async"
 ))]
-async fn apply_after_refusal_check(
-    refused: Result<(), ApplyError>,
-    apply: impl core::future::Future<Output = diesel::result::QueryResult<usize>>,
-) -> Result<usize, ApplyError> {
-    refused?;
-    apply.await.map_err(ApplyError::from)
+fn apply_ops_async<'a, 'n, Conn, Ops>(
+    refusals: &impl RefusalView,
+    names: impl Iterator<Item = &'n str>,
+    ops: Ops,
+    conn: &'a mut Conn,
+) -> impl core::future::Future<Output = Result<usize, ApplyError>> + Send + 'a
+where
+    Conn: diesel_async::AsyncConnection,
+    Ops: Iterator + Send + 'a,
+    Ops::Item: QueryFragment<Conn::Backend> + QueryId + Send,
+{
+    let refused = check_refusals(refusals, names);
+    async move {
+        refused?;
+        ops.apply_transactional_async(conn)
+            .await
+            .map_err(ApplyError::from)
+    }
 }
 
 // Engine entry point (generic over any diesel Backend)
@@ -193,12 +222,14 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        check_refusals(refusals, patchset.iter().map(|op| op.table().name()))?;
-        patchset
-            .iter()
-            .map(|op| op.with_adapter::<DBend, _>(adapter))
-            .apply_transactional(conn)
-            .map_err(ApplyError::from)
+        apply_ops(
+            refusals,
+            patchset.iter().map(|op| op.table().name()),
+            patchset
+                .iter()
+                .map(|op| op.with_adapter::<DBend, _>(adapter)),
+            conn,
+        )
     }
 
     /// Apply a client-uploaded SQLite session changeset against `conn`
@@ -244,12 +275,14 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        check_refusals(refusals, changeset.iter().map(|op| op.table().name()))?;
-        changeset
-            .iter()
-            .map(|op| op.with_adapter::<DBend, _>(adapter))
-            .apply_transactional(conn)
-            .map_err(ApplyError::from)
+        apply_ops(
+            refusals,
+            changeset.iter().map(|op| op.table().name()),
+            changeset
+                .iter()
+                .map(|op| op.with_adapter::<DBend, _>(adapter)),
+            conn,
+        )
     }
 
     /// Apply a client-uploaded SQLite session diffset, still in its raw
@@ -352,14 +385,14 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        // The check and the `Send` proof run up front, so the returned
-        // future borrows neither the non-`Sync` engine nor the view.
-        let refused = check_refusals(refusals, patchset.iter().map(|op| op.table().name()));
-        let apply = patchset
-            .iter()
-            .map(|op| op.with_adapter::<DBend, _>(adapter))
-            .apply_transactional_async(conn);
-        apply_after_refusal_check(refused, apply)
+        apply_ops_async(
+            refusals,
+            patchset.iter().map(|op| op.table().name()),
+            patchset
+                .iter()
+                .map(|op| op.with_adapter::<DBend, _>(adapter)),
+            conn,
+        )
     }
 
     /// Async peer of [`Self::apply_changeset`], driven by
@@ -406,12 +439,14 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        let refused = check_refusals(refusals, changeset.iter().map(|op| op.table().name()));
-        let apply = changeset
-            .iter()
-            .map(|op| op.with_adapter::<DBend, _>(adapter))
-            .apply_transactional_async(conn);
-        apply_after_refusal_check(refused, apply)
+        apply_ops_async(
+            refusals,
+            changeset.iter().map(|op| op.table().name()),
+            changeset
+                .iter()
+                .map(|op| op.with_adapter::<DBend, _>(adapter)),
+            conn,
+        )
     }
 
     /// Async peer of [`Self::apply_diffset_bytes`], driven by

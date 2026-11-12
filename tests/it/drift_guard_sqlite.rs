@@ -643,7 +643,10 @@ fn a_failed_shape_read_cannot_release_rows_from_committed_incompatible_ddl() {
         Err(DriftGuardError::Shape(SqliteShapeError::Diesel(_)))
     ));
     assert!(!guard.is_refused(orders_id));
-    assert!(guard.refused_tables().next().is_none());
+    assert_eq!(
+        guard.refused_tables(),
+        Vec::<(u32, Vec<Incompatibility>)>::new()
+    );
     assert!(matches!(
         subql::testing::block_on(guard.next_item()),
         Err(DriftGuardError::Shape(SqliteShapeError::Diesel(_)))
