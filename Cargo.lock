@@ -901,7 +901,7 @@ dependencies = [
 [[package]]
 name = "diesel"
 version = "2.3.14"
-source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
+source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -966,7 +966,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
+source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -976,7 +976,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.3.10"
-source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
+source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -989,7 +989,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
+source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
 dependencies = [
  "syn 3.0.10",
 ]
@@ -1047,7 +1047,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
+source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
 dependencies = [
  "darling",
  "either",
@@ -1106,9 +1106,9 @@ dependencies = [
 
 [[package]]
 name = "errno"
-version = "0.3.14"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -2291,9 +2291,9 @@ dependencies = [
 
 [[package]]
 name = "mysqlclient-sys"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b72511f8f6991fe4ac86421ea0625630fd94e360b906cc59720506499f9e8f3b"
+checksum = "48127dad9288a08350c34c6d9e17616420569cd24db43148bf223baac82fbb93"
 dependencies = [
  "pkg-config",
  "semver",
@@ -2577,7 +2577,7 @@ dependencies = [
 [[package]]
 name = "pg_walstream"
 version = "0.10.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#7e74fa892e4c815f701585113612ac4e03bb84e7"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#c0a309d959584f4b907e344af6cb997ad333a253"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -3655,7 +3655,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#0a9a565a7e300d6fd3faaf8b90f9fcfa65c72938"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#eef37bf61312436feaf646e353fea58e1736bf5f"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -3683,7 +3683,7 @@ dependencies = [
 [[package]]
 name = "sql-values"
 version = "0.5.1"
-source = "git+https://github.com/connetto-rs/sql-values?branch=main#f651c6e1f713c693006ae5ecf64222df4a3e898f"
+source = "git+https://github.com/connetto-rs/sql-values?branch=main#d2d0cf1caa298ed31992fc37cd6b8bb61b85cea3"
 dependencies = [
  "jiff",
  "thiserror",
@@ -3719,7 +3719,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#32a12d37d78d9a1537d7a8fa8145b06d2523454e"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#2ddee5541e55ca2d242204175b817f8648c324d2"
 dependencies = [
  "log",
  "recursive",
@@ -3749,7 +3749,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#32a12d37d78d9a1537d7a8fa8145b06d2523454e"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#2ddee5541e55ca2d242204175b817f8648c324d2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3759,7 +3759,7 @@ dependencies = [
 [[package]]
 name = "sqlstate"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#31afd783aeddb2471bba2bece823816fe4925fed"
+source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
 
 [[package]]
 name = "stable_deref_trait"
@@ -4402,9 +4402,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ureq"
-version = "3.5.1"
+version = "3.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7be76686bdf7198002062423ca0d8cf9b75a27c8e1de804513b97e97b555d9d"
+checksum = "3ac5cecf619ca81f66a96482db09687c9f7465af65f4300a8c30cca05bd5a59d"
 dependencies = [
  "base64 0.23.1",
  "log",
