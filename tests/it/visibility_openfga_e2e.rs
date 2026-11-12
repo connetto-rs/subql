@@ -2469,6 +2469,7 @@ async fn a_known_role_reaches_the_service_and_no_other_role_does() {
 /// A quoted role with configured subject and role types.
 const QUOTED_ROLE_SCOPED: &str = "
 CREATE TABLE public.docs(id INTEGER PRIMARY KEY, owner_id TEXT);
+GRANT SELECT ON docs TO \"reader:west\";
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT TO \"reader:west\"
   USING (owner_id = current_setting('app.user_id', true));

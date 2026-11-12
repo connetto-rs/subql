@@ -272,6 +272,11 @@ mod register_batch_cap;
 
 #[cfg(feature = "std")]
 mod dispatch_contract;
+
+// DriftGuard over the live SQLite source: one table's drift names itself
+// and is dropped while the rest of the same drain keeps being served.
+#[cfg(feature = "sqlite-cdc")]
+mod drift_guard_sqlite;
 mod engine_removal_bookkeeping;
 mod engine_trait_surface;
 mod engine_unknown_tables;
