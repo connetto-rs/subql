@@ -1,4 +1,6 @@
 FROM postgres:16-bookworm
+# The server is installed with the extensions because pgdg builds them against
+# its newest 16.x, which can be ahead of the base image.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends postgresql-16-wal2json postgresql-16-pgvector \
+ && apt-get install -y --no-install-recommends postgresql-16 postgresql-16-wal2json postgresql-16-pgvector \
  && rm -rf /var/lib/apt/lists/*
