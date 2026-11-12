@@ -17,11 +17,12 @@ use core::num::NonZeroU32;
 use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
 use sql_traits::structs::ParserDB;
 use sql_traits::traits::{
-    CheckConstraintLike, DataTypeLike, DialectLike, IntervalFields, TypeMatch, TypeMatchLike,
+    CheckConstraintLike, ColumnCollation, DataTypeLike, DialectLike, IntervalFields, StructureKind,
+    StructuredField, TypeMatch, TypeMatchLike,
 };
 use sqlparser::ast::{
-    ArrayElemTypeDef, BinaryLength, CharLengthUnits, CharacterLength, ColumnOptionDef, DataType,
-    EnumMember, ExactNumberInfo, Ident, ObjectName, SqlOption,
+    ArrayElemTypeDef, BinaryLength, CharLengthUnits, CharacterLength, DataType, EnumMember,
+    ExactNumberInfo,
 };
 
 /// A catalog whose declared types are sqlparser's.
@@ -81,17 +82,42 @@ enum TypeDetail {
     TimeZone(String),
     Enum(Vec<EnumMember>, Option<u8>),
     Set(Vec<String>),
-    Fields(Vec<FieldShape>),
-    Elements(Vec<TypeShape>),
-    Name(ObjectName),
-    ColumnOptions(Vec<ColumnOptionDef>),
-    StructOptions(Vec<SqlOption>),
 }
 
+/// A field of a structured type, as sql-traits answers it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FieldShape {
-    name: Option<Ident>,
+    name: Option<String>,
+    name_is_quoted: bool,
     data_type: TypeShape,
+    nullable: bool,
+    options: Vec<(String, String)>,
+    collation: ColumnCollation<'static>,
+}
+
+impl FieldShape {
+    fn of(field: &StructuredField<'_, DataType>, database: &ParserDB) -> Self {
+        Self {
+            name: field.name().map(String::from),
+            name_is_quoted: field.name_is_quoted(),
+            data_type: TypeShape::of(field.data_type(), database),
+            nullable: field.is_nullable(),
+            options: field
+                .options()
+                .iter()
+                .map(|(key, value)| (String::from(key.as_ref()), String::from(value.as_ref())))
+                .collect(),
+            collation: field.collation().clone().into_owned(),
+        }
+    }
+}
+
+/// A map type's key and value, as sql-traits answers them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MapShape {
+    key: TypeShape,
+    value: TypeShape,
+    value_nullable: bool,
 }
 
 /// The declared bounds sql-traits answers for a type.
@@ -112,6 +138,9 @@ struct TypeShape {
     normalized: String,
     bounds: TypeBounds,
     element: Option<Box<Self>>,
+    structure_kind: Option<StructureKind>,
+    fields: Vec<FieldShape>,
+    map: Option<Box<MapShape>>,
     details: Vec<TypeDetail>,
 }
 
@@ -133,7 +162,7 @@ impl TypeShape {
             }
         }
         let mut details = Vec::new();
-        append_pending_details(declared, database, &mut details);
+        append_pending_details(declared, &mut details);
         if nullable {
             details.push(TypeDetail::Nullable);
         }
@@ -152,6 +181,20 @@ impl TypeShape {
             element: declared
                 .array_element(database)
                 .map(|element| Box::new(Self::of(element, database))),
+            structure_kind: declared.structure_kind(database),
+            fields: declared
+                .structured_fields(database)
+                .into_iter()
+                .flatten()
+                .map(|field| FieldShape::of(&field, database))
+                .collect(),
+            map: declared.map_entry(database).map(|entry| {
+                Box::new(MapShape {
+                    key: Self::of(entry.key(), database),
+                    value: Self::of(entry.value(), database),
+                    value_nullable: entry.value_is_nullable(),
+                })
+            }),
             details,
         }
     }
@@ -298,11 +341,7 @@ impl TableShape {
     clippy::too_many_lines,
     reason = "The exhaustive match accounts for every parser type's metadata."
 )]
-fn append_pending_details(
-    data_type: &DataType,
-    database: &ParserDB,
-    details: &mut Vec<TypeDetail>,
-) {
+fn append_pending_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
     match data_type {
         DataType::Character(length)
         | DataType::Char(length)
@@ -383,65 +422,6 @@ fn append_pending_details(
             details.push(TypeDetail::Enum(members.clone(), *width));
         }
         DataType::Set(members) => details.push(TypeDetail::Set(members.clone())),
-        DataType::Map(key, value, _) => details.push(TypeDetail::Elements(vec![
-            TypeShape::of(key, database),
-            TypeShape::of(value, database),
-        ])),
-        DataType::Struct(fields, _) | DataType::Tuple(fields) => {
-            details.push(TypeDetail::Fields(
-                fields
-                    .iter()
-                    .map(|field| {
-                        let mut data_type = TypeShape::of(&field.field_type, database);
-                        if let Some(options) = &field.options {
-                            if !options.is_empty() {
-                                data_type
-                                    .details
-                                    .push(TypeDetail::StructOptions(options.clone()));
-                            }
-                        }
-                        FieldShape {
-                            name: field.field_name.clone(),
-                            data_type,
-                        }
-                    })
-                    .collect(),
-            ));
-        }
-        DataType::Union(fields) => details.push(TypeDetail::Fields(
-            fields
-                .iter()
-                .map(|field| FieldShape {
-                    name: Some(field.field_name.clone()),
-                    data_type: TypeShape::of(&field.field_type, database),
-                })
-                .collect(),
-        )),
-        DataType::Nested(columns)
-        | DataType::Object(columns)
-        | DataType::Table(Some(columns))
-        | DataType::NamedTable { columns, .. } => {
-            if let DataType::NamedTable { name, .. } = data_type {
-                details.push(TypeDetail::Name(name.clone()));
-            }
-            details.push(TypeDetail::Fields(
-                columns
-                    .iter()
-                    .map(|column| {
-                        let mut data_type = TypeShape::of(&column.data_type, database);
-                        if !column.options.is_empty() {
-                            data_type
-                                .details
-                                .push(TypeDetail::ColumnOptions(column.options.clone()));
-                        }
-                        FieldShape {
-                            name: Some(column.name.clone()),
-                            data_type,
-                        }
-                    })
-                    .collect(),
-            ));
-        }
         // `TypeShape::of` sees through the wrappers before asking for details.
         DataType::Nullable(_)
         | DataType::Collate(..)
@@ -480,8 +460,17 @@ fn append_pending_details(
         | DataType::BigNumeric(_)
         | DataType::BigDecimal(_)
         | DataType::Interval { .. }
+        // sql-traits answers these types' fields and entries.
+        | DataType::Map(..)
+        | DataType::Struct(..)
+        | DataType::Tuple(_)
+        | DataType::Union(_)
+        | DataType::Nested(_)
+        | DataType::Object(_)
+        // Function return types, which no column declares.
+        | DataType::Table(_)
+        | DataType::NamedTable { .. }
         // These types declare no parameters.
-        | DataType::Table(None)
         | DataType::Uuid
         | DataType::TinyBlob
         | DataType::MediumBlob
@@ -561,11 +550,14 @@ mod tests {
             .expect("column present")
     }
 
-    fn shape_with_type<D: Dialect + Default>(data_type: &str) -> TableShape {
-        let db =
-            ParserDB::parse::<D>(&format!("CREATE TABLE t (v {data_type})")).expect("DDL parses");
+    fn shape_from_ddl<D: Dialect + Default>(ddl: &str) -> TableShape {
+        let db = ParserDB::parse::<D>(ddl).expect("DDL parses");
         let table = db.tables().next().expect("one table");
         TableShape::from_table(table, &db).expect("shape builds")
+    }
+
+    fn shape_with_type<D: Dialect + Default>(data_type: &str) -> TableShape {
+        shape_from_ddl::<D>(&format!("CREATE TABLE t (v {data_type})"))
     }
 
     fn assert_retyped(catalog: &TableShape, live: &TableShape) {
@@ -1076,5 +1068,47 @@ mod tests {
         let wider =
             shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(16) COLLATE UTF8_LCASE>");
         assert_retyped(&catalog, &wider);
+    }
+
+    #[test]
+    fn struct_field_collation_is_part_of_the_declared_type() {
+        let lowercase =
+            shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(8) COLLATE UTF8_LCASE>");
+        let binary =
+            shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(8) COLLATE UTF8_BINARY>");
+        let omitted = shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(8)>");
+        assert_retyped(&lowercase, &binary);
+        assert_retyped(&lowercase, &omitted);
+    }
+
+    #[test]
+    fn composite_type_attributes_are_part_of_the_declared_type() {
+        let composite = |attributes: &str| {
+            shape_from_ddl::<PostgreSqlDialect>(&format!(
+                "CREATE TYPE pair AS ({attributes}); CREATE TABLE t (v pair);"
+            ))
+        };
+        let catalog = composite("left_side INT, right_side TEXT");
+        assert_retyped(&catalog, &composite("left_side BIGINT, right_side TEXT"));
+        assert_retyped(&catalog, &composite("left_side INT, label TEXT"));
+        assert_retyped(&catalog, &composite("right_side TEXT, left_side INT"));
+        assert_retyped(
+            &catalog,
+            &composite("left_side INT, right_side TEXT COLLATE \"C\""),
+        );
+        assert_eq!(
+            judge(
+                &catalog,
+                Some(&composite("left_side INTEGER, right_side TEXT"))
+            ),
+            Verdict::Unchanged
+        );
+    }
+
+    #[test]
+    fn map_value_nullability_is_part_of_the_declared_type() {
+        let nullable = shape_with_type::<SnowflakeDialect>("MAP(VARCHAR, INT)");
+        let required = shape_with_type::<SnowflakeDialect>("MAP(VARCHAR, INT NOT NULL)");
+        assert_retyped(&nullable, &required);
     }
 }
