@@ -131,6 +131,8 @@ struct CompiledSpec<I: IdTypes, B: Backend> {
     /// value rows the subscription states it matches today, each with the
     /// subject granting it. Empty for a filter naming no term.
     term_seeds: Vec<TermSeed<B>>,
+    /// The columns of each table the statement references.
+    columns_read: crate::ColumnsRead,
 }
 
 struct AggregateRegistration<I: IdTypes, B: Backend> {
@@ -760,6 +762,7 @@ where
             prefilter_plan,
             projection,
             terms,
+            columns_read,
         } = compiled;
 
         // A mean is a quotient, so an aggregate that computes one needs the
@@ -802,6 +805,7 @@ where
             bootstrap,
             term_plans,
             term_seeds,
+            columns_read,
         })
     }
 
@@ -1689,6 +1693,7 @@ where
                 }),
                 evicted: Vec::new(),
                 not_served_because: None,
+                columns_read: compiled.columns_read,
             });
         }
 
@@ -1789,6 +1794,7 @@ where
             }),
             evicted,
             not_served_because: None,
+            columns_read: compiled.columns_read,
         })
     }
 
@@ -1836,7 +1842,7 @@ where
             Ok(planned) => {
                 self.registration_rls_refusal(&planned, database_reads_per_consumer)?;
                 let subscription_id = self.allocate_subscription_id();
-                let mut registered = match planned {
+                let tier = match planned {
                     crate::reexec::plan::QueryPlan::GroupedPartial(plan) => {
                         self.capture_grouped_scalar(subscription_id, *plan, &registration)
                     }
@@ -1850,9 +1856,14 @@ where
                         self.capture_whole(subscription_id, plan, &registration)
                     }
                 };
-                registered.not_served_because = Some(Self::lift_refusal(refusal));
                 self.persist_reads_after_change(subscription_id)?;
-                Ok(registered)
+                Ok(Registered {
+                    subscription_id,
+                    tier,
+                    evicted: Vec::new(),
+                    not_served_because: Some(Self::lift_refusal(refusal)),
+                    columns_read: self.columns_read_of(source_query),
+                })
             }
             // No tier can serve it either, so the registration is refused
             // outright. `NotServedInProcess` never reaches a caller as an
@@ -1904,6 +1915,14 @@ where
             },
             Refusal::Unsupported(prose) => crate::NotServed::UnsupportedSql(prose),
         }
+    }
+
+    /// The columns of each table `query` references, parsed again because the
+    /// in-process compiler, which reports them while compiling, refused it.
+    fn columns_read_of(&self, query: &crate::reexec::BoundQuery<E::Backend>) -> crate::ColumnsRead {
+        crate::compiler::sql_shape::parse_single_statement(query.sql(), &self.dialect)
+            .map(|statement| crate::ColumnsRead::of::<E::Backend, DB>(&statement, &self.database))
+            .unwrap_or_default()
     }
 
     /// The registration-time row-security refusal for one planned tier, or
@@ -1974,10 +1993,15 @@ where
             source_query,
             database_reads_per_consumer: true,
         };
-        let mut registered = self.capture_whole(subscription_id, plan, &registration);
-        registered.not_served_because = Some(Self::lift_refusal(refusal));
+        let tier = self.capture_whole(subscription_id, plan, &registration);
         self.persist_reads_after_change(subscription_id)?;
-        Ok(registered)
+        Ok(Registered {
+            subscription_id,
+            tier,
+            evicted: Vec::new(),
+            not_served_because: Some(Self::lift_refusal(refusal)),
+            columns_read: self.columns_read_of(source_query),
+        })
     }
 
     /// Route `subscription_id` from every table in `tables`, and from its
@@ -2008,7 +2032,7 @@ where
         subscription_id: SubscriptionId,
         plan: crate::reexec::plan::GroupedMinMaxPlan<E::Backend>,
         registration: &RereadRegistration<'_, I, E::Backend>,
-    ) -> Registered<E::Backend> {
+    ) -> Tier<E::Backend> {
         let table_id = plan.table_id;
         let bootstrap = plan.bootstrap.clone();
         let read_query = bootstrap.query.clone();
@@ -2032,12 +2056,7 @@ where
                 database_reads_per_consumer: registration.database_reads_per_consumer,
             },
         );
-        Registered {
-            subscription_id,
-            tier: Tier::GroupedScalar { bootstrap },
-            evicted: Vec::new(),
-            not_served_because: None,
-        }
+        Tier::GroupedScalar { bootstrap }
     }
 
     /// Register a scalar extreme, re-read when the extreme itself leaves.
@@ -2046,7 +2065,7 @@ where
         subscription_id: SubscriptionId,
         plan: crate::reexec::plan::MinMaxPlan<E::Backend>,
         registration: &RereadRegistration<'_, I, E::Backend>,
-    ) -> Registered<E::Backend> {
+    ) -> Tier<E::Backend> {
         let crate::reexec::plan::MinMaxPlan {
             table_id,
             kind,
@@ -2084,14 +2103,9 @@ where
             },
         );
 
-        Registered {
-            subscription_id,
-            tier: Tier::Scalar {
-                query: tier_query,
-                column_kind: agg_kind,
-            },
-            evicted: Vec::new(),
-            not_served_because: None,
+        Tier::Scalar {
+            query: tier_query,
+            column_kind: agg_kind,
         }
     }
 
@@ -2101,7 +2115,7 @@ where
         subscription_id: SubscriptionId,
         plan: crate::reexec::plan::TotalPlan<E::Backend>,
         registration: &RereadRegistration<'_, I, E::Backend>,
-    ) -> Registered<E::Backend> {
+    ) -> Tier<E::Backend> {
         let crate::reexec::plan::TotalPlan {
             tables,
             dependency_columns,
@@ -2126,14 +2140,9 @@ where
             },
         );
 
-        Registered {
-            subscription_id,
-            tier: Tier::WholeRows {
-                query: tier_query,
-                tables,
-            },
-            evicted: Vec::new(),
-            not_served_because: None,
+        Tier::WholeRows {
+            query: tier_query,
+            tables,
         }
     }
 
@@ -2144,7 +2153,7 @@ where
         subscription_id: SubscriptionId,
         plan: crate::reexec::plan::KeyedPlan,
         registration: &RereadRegistration<'_, I, E::Backend>,
-    ) -> Registered<E::Backend> {
+    ) -> Tier<E::Backend> {
         let table = plan.table;
         self.index_reread(subscription_id, &[table], registration.session);
         let read_query = crate::reexec::BoundQuery::new(
@@ -2171,14 +2180,9 @@ where
             },
         );
 
-        Registered {
-            subscription_id,
-            tier: Tier::KeyedRows {
-                query: tier_query,
-                table_id: table,
-            },
-            evicted: Vec::new(),
-            not_served_because: None,
+        Tier::KeyedRows {
+            query: tier_query,
+            table_id: table,
         }
     }
 
@@ -2222,13 +2226,13 @@ where
             source_query: &source_query,
             database_reads_per_consumer,
         };
-        let registered = self.capture_whole(subscription_id, plan, &registration);
+        let tier = self.capture_whole(subscription_id, plan, &registration);
         self.persist_reads_after("an answer changed tier");
         Ok((
             crate::MaintenanceTransition {
                 subscription_id,
                 from,
-                to: registered.tier,
+                to: tier,
                 reason,
             },
             crate::reexec::ReExecutionTrigger {
@@ -3123,7 +3127,7 @@ where
             source_query: &entry.source_query,
             database_reads_per_consumer: entry.database_reads_per_consumer,
         };
-        let registered = match planned {
+        let tier = match planned {
             crate::reexec::plan::QueryPlan::GroupedPartial(plan) => {
                 self.capture_grouped_scalar(entry.subscription_id, *plan, &registration)
             }
@@ -3141,7 +3145,7 @@ where
         if entry.subscription_id >= self.next_subscription_id {
             self.next_subscription_id = entry.subscription_id + 1;
         }
-        let now = match &registered.tier {
+        let now = match &tier {
             Tier::Scalar { .. } => crate::ReadTier::Scalar,
             Tier::GroupedScalar { .. } => crate::ReadTier::GroupedScalar,
             Tier::KeyedRows { .. } => crate::ReadTier::KeyedRows,
@@ -3150,8 +3154,8 @@ where
             Tier::InProcess(_) => entry.tier,
         };
         Ok(RestoredRead {
-            subscription_id: registered.subscription_id,
-            tier: registered.tier,
+            subscription_id: entry.subscription_id,
+            tier,
             tier_changed: now != entry.tier,
         })
     }
@@ -3430,7 +3434,7 @@ where
 
         for spec in specs {
             match self.compile_spec(spec, false) {
-                Ok(compiled_spec) => {
+                Ok(mut compiled_spec) => {
                     // Check dedup index for idempotent re-registration.
                     let natural_key = (
                         compiled_spec.spec.consumer_id,
@@ -3451,6 +3455,7 @@ where
                             }),
                             evicted: Vec::new(),
                             not_served_because: None,
+                            columns_read: compiled_spec.columns_read,
                         }));
                         compiled.push(None); // already handled
                         continue;
@@ -3473,6 +3478,7 @@ where
                             }),
                             evicted: Vec::new(),
                             not_served_because: None,
+                            columns_read: compiled_spec.columns_read,
                         }));
                         compiled.push(None);
                         continue;
@@ -3494,6 +3500,7 @@ where
                         }),
                         evicted: Vec::new(),
                         not_served_because: None,
+                        columns_read: core::mem::take(&mut compiled_spec.columns_read),
                     }));
                     compiled.push(Some(compiled_spec));
                 }

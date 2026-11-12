@@ -2,6 +2,7 @@
 
 pub mod bytecode;
 pub mod canonicalize;
+mod columns_read;
 pub mod literals;
 pub mod parser;
 pub mod prefilter;
@@ -12,6 +13,7 @@ pub mod vm;
 
 pub use bytecode::{BytecodeProgram, Instruction};
 pub use canonicalize::{hash_sql, normalize_sql, PredicateHash};
+pub use columns_read::ColumnsRead;
 pub use literals::{parse_custom_literal, SqlLiteralParse};
 pub use parser::{
     derive_update_follow_select, derive_update_follow_select_with_set_binds, parse_and_compile,

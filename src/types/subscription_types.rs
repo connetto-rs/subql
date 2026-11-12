@@ -881,6 +881,10 @@ pub struct Registered<B: Backend = crate::backend::Postgres> {
     /// is the only thing telling a caller why its query costs a read per
     /// change rather than being answered from memory.
     pub not_served_because: Option<NotServed<B>>,
+    /// The columns of each table the statement references, whichever tier
+    /// maintains it. A caller whose readers hold column privileges answers
+    /// `Subject::columns_read` from it.
+    pub columns_read: crate::ColumnsRead,
 }
 
 impl<B: Backend> Registered<B> {

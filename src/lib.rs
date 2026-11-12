@@ -8,7 +8,9 @@ extern crate alloc;
 
 // Re-export public API
 pub use compiler::vm::refusal::EvaluationRefusal;
-pub use compiler::{AggHaving, AggSpec, HavingFunction, HavingOp, HavingSubject, QueryProjection};
+pub use compiler::{
+    AggHaving, AggSpec, ColumnsRead, HavingFunction, HavingOp, HavingSubject, QueryProjection,
+};
 pub use drift::{
     judge, refusal_reasons, Incompatibility, NoRefusals, RefusalView, ReplicaIdentity, TableShape,
     Verdict,
