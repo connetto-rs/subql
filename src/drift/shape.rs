@@ -265,7 +265,13 @@ fn append_type_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
         | DataType::CharacterVarying(length)
         | DataType::CharVarying(length)
         | DataType::Varchar(length)
-        | DataType::Nvarchar(length) => match length {
+        | DataType::Nvarchar(length)
+        | DataType::NationalCharacter(length)
+        | DataType::NationalCharacterVarying(length)
+        | DataType::NationalChar(length)
+        | DataType::NationalCharVarying(length)
+        | DataType::Nchar(length)
+        | DataType::NcharVarying(length) => match length {
             None => {}
             Some(CharacterLength::IntegerLength { length, unit }) => {
                 details.push(TypeDetail::Exact(*length));
@@ -590,6 +596,18 @@ mod tests {
     }
 
     #[test]
+    fn nvarchar_keeps_max_exact_and_omitted_lengths() {
+        let max = shape_with_type::<MsSqlDialect>("NVARCHAR(MAX)");
+        let omitted = shape_with_type::<MsSqlDialect>("NVARCHAR");
+        let narrow = shape_with_type::<MsSqlDialect>("NVARCHAR(8)");
+        let wide = shape_with_type::<MsSqlDialect>("NVARCHAR(16)");
+        assert_retyped(&max, &omitted);
+        assert_retyped(&max, &wide);
+        assert_retyped(&omitted, &narrow);
+        assert_retyped(&narrow, &wide);
+    }
+
+    #[test]
     fn binary_lengths_distinguish_max_exact_and_omitted_bounds() {
         let max = shape_with_type::<MsSqlDialect>("VARBINARY(MAX)");
         let omitted = shape_with_type::<MsSqlDialect>("VARBINARY");
@@ -721,6 +739,36 @@ mod tests {
         let equivalent = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)");
         assert_retyped(&catalog, &wider);
         assert_eq!(judge(&catalog, Some(&equivalent)), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn national_character_types_keep_character_length() {
+        for (national, plain, wider) in [
+            ("NCHAR(4)", "CHAR(4)", "NCHAR(8)"),
+            (
+                "NATIONAL CHARACTER(4)",
+                "CHARACTER(4)",
+                "NATIONAL CHARACTER(8)",
+            ),
+            ("NATIONAL CHAR(4)", "CHAR(4)", "NATIONAL CHAR(8)"),
+            ("NCHAR VARYING(8)", "VARCHAR(8)", "NCHAR VARYING(16)"),
+            (
+                "NATIONAL CHARACTER VARYING(8)",
+                "VARCHAR(8)",
+                "NATIONAL CHARACTER VARYING(16)",
+            ),
+            (
+                "NATIONAL CHAR VARYING(8)",
+                "VARCHAR(8)",
+                "NATIONAL CHAR VARYING(16)",
+            ),
+        ] {
+            let catalog = shape_with_type::<PostgreSqlDialect>(national);
+            let equivalent = shape_with_type::<PostgreSqlDialect>(plain);
+            let wider = shape_with_type::<PostgreSqlDialect>(wider);
+            assert_eq!(judge(&catalog, Some(&equivalent)), Verdict::Unchanged);
+            assert_retyped(&catalog, &wider);
+        }
     }
 
     #[test]
