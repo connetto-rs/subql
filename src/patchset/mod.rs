@@ -171,6 +171,20 @@ where
     }
 }
 
+/// Bind the distinct patchset and changeset operation types for the selected transaction helper.
+macro_rules! apply_batch {
+    ($apply:ident, $batch:ident, $refusals:ident, $conn:ident, $adapter:ident, $backend:ty) => {
+        $apply(
+            $refusals,
+            $batch.iter().map(|op| op.table().name()),
+            $batch
+                .iter()
+                .map(|op| op.with_adapter::<$backend, _>($adapter)),
+            $conn,
+        )
+    };
+}
+
 // Engine entry point (generic over any diesel Backend)
 
 impl<E, I, DB> crate::SubscriptionEngine<E, I, DB>
@@ -222,14 +236,7 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        apply_ops(
-            refusals,
-            patchset.iter().map(|op| op.table().name()),
-            patchset
-                .iter()
-                .map(|op| op.with_adapter::<DBend, _>(adapter)),
-            conn,
-        )
+        apply_batch!(apply_ops, patchset, refusals, conn, adapter, DBend)
     }
 
     /// Apply a client-uploaded SQLite session changeset against `conn`
@@ -275,14 +282,7 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        apply_ops(
-            refusals,
-            changeset.iter().map(|op| op.table().name()),
-            changeset
-                .iter()
-                .map(|op| op.with_adapter::<DBend, _>(adapter)),
-            conn,
-        )
+        apply_batch!(apply_ops, changeset, refusals, conn, adapter, DBend)
     }
 
     /// Apply a client-uploaded SQLite session diffset, still in its raw
@@ -385,14 +385,7 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        apply_ops_async(
-            refusals,
-            patchset.iter().map(|op| op.table().name()),
-            patchset
-                .iter()
-                .map(|op| op.with_adapter::<DBend, _>(adapter)),
-            conn,
-        )
+        apply_batch!(apply_ops_async, patchset, refusals, conn, adapter, DBend)
     }
 
     /// Async peer of [`Self::apply_changeset`], driven by
@@ -439,14 +432,7 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        apply_ops_async(
-            refusals,
-            changeset.iter().map(|op| op.table().name()),
-            changeset
-                .iter()
-                .map(|op| op.with_adapter::<DBend, _>(adapter)),
-            conn,
-        )
+        apply_batch!(apply_ops_async, changeset, refusals, conn, adapter, DBend)
     }
 
     /// Async peer of [`Self::apply_diffset_bytes`], driven by
