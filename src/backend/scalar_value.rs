@@ -1686,6 +1686,10 @@ pub(super) fn encode_sqlite_component(
 
 /// The custom scalar set of a backend that has none. Uninhabited, so
 /// [`ScalarKind::Custom`] cannot be constructed for such a backend.
+#[allow(
+    clippy::empty_enums,
+    reason = "an uninhabited enum is the point, since stable Rust cannot name the never type and an empty match through a reference compiles on an empty enum but not on a struct around `Infallible`, and this cannot be an expect because the 1.95 clippy the MSRV job runs does not raise the lint here"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NoCustom {}
 
