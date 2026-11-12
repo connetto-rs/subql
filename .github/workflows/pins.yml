@@ -70,8 +70,9 @@ jobs:
         run: cargo doc --workspace --no-deps --all-features --locked --release
       - if: steps.moved.outputs.moved == 'yes'
         run: cargo test --workspace --lib --tests --release --locked
+      # In debug, as CI's doctest job runs them.
       - if: steps.moved.outputs.moved == 'yes'
-        run: cargo test --workspace --doc --all-features --release --locked
+        run: cargo test --workspace --doc --all-features --locked
       - if: steps.moved.outputs.moved == 'yes'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -95,4 +96,4 @@ jobs:
             --body "$(printf '%s\n' \
               'Weekly refresh of the committed lockfiles, resolved by the 1.95 toolchain so the MSRV job stays satisfiable.' \
               '' \
-              'The scheduled job that produced this ran, against these pins, the format check, clippy over every target with all features and warnings denied, the workspace and fuzz checks, both wasm targets under no default features, the documentation build with warnings denied, and the release unit tests and doctests. Checks do not start by themselves on a pull request a workflow opened, so close and reopen this one to run the full suite, including the container groups this job cannot reach.')"
+              'The scheduled job that produced this ran, against these pins, the format check, clippy over every target with all features and warnings denied, the workspace and fuzz checks, both wasm targets under no default features, the documentation build with warnings denied, the release unit tests and the doctests. Checks do not start by themselves on a pull request a workflow opened, so close and reopen this one to run the full suite, including the container groups this job cannot reach.')"
