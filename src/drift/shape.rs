@@ -9,27 +9,32 @@
 //! backend has one. A catalog side built from a parser catalog has no
 //! replica identity, since a `CREATE TABLE` never declares one.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
 use sql_traits::structs::ParserDB;
-use sql_traits::traits::CheckConstraintLike;
-use sql_traits::utils::normalize_sqlparser_type;
+use sql_traits::traits::{
+    CheckConstraintLike, DataTypeLike, DialectLike, IntervalFields, TypeMatch, TypeMatchLike,
+};
 use sqlparser::ast::{
     ArrayElemTypeDef, BinaryLength, CharLengthUnits, CharacterLength, ColumnOptionDef, DataType,
-    EnumMember, ExactNumberInfo, Ident, IntervalFields, ObjectName, SqlOption,
+    EnumMember, ExactNumberInfo, Ident, ObjectName, SqlOption,
 };
 
-/// A catalog that exposes the raw sqlparser type a column declares.
+/// A catalog whose declared types are sqlparser's.
 ///
-/// The judgment compares declared bounds, and the normalization the
-/// trait's `data_type` spelling keeps no memory of, so the raw type has
-/// to be read as a sqlparser [`DataType`]. A `DatabaseLike` whose
-/// `DataType` is one answers this with a single coercion.
+/// sql-traits answers most declared bounds through [`DataTypeLike`]. The
+/// rest are read from the raw sqlparser [`DataType`], whose trait facts
+/// the [`ParserDB`] behind the catalog answers.
 pub trait SqlparserDatabase: DatabaseLike {
     /// The raw declared type of `column`.
     fn column_raw_type<'db>(column: &'db Self::Column, database: &'db Self) -> &'db DataType;
+
+    /// The parser catalog that answers the raw types' trait facts.
+    fn parser_database(&self) -> &ParserDB;
 }
 
 impl SqlparserDatabase for ParserDB {
@@ -38,6 +43,10 @@ impl SqlparserDatabase for ParserDB {
         database: &'db Self,
     ) -> &'db DataType {
         ColumnLike::data_type(column, database)
+    }
+
+    fn parser_database(&self) -> &ParserDB {
+        self
     }
 }
 
@@ -59,7 +68,7 @@ pub enum ReplicaIdentity {
     Full,
 }
 
-/// Declared type parameters omitted by family normalization.
+/// Declared type parameters sql-traits does not answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TypeDetail {
     Exact(u64),
@@ -71,7 +80,6 @@ enum TypeDetail {
     CharacterUnits(CharLengthUnits),
     ArraySize(Option<u64>),
     TimeZone(String),
-    IntervalFields(IntervalFields),
     Enum(Vec<EnumMember>, Option<u8>),
     Set(Vec<String>),
     Fields(Vec<FieldShape>),
@@ -87,18 +95,62 @@ struct FieldShape {
     data_type: TypeShape,
 }
 
+/// The declared bounds sql-traits answers for a type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TypeBounds {
+    fixed_binary_length: Option<u64>,
+    max_character_length: Option<u64>,
+    fractional_seconds_precision: Option<u64>,
+    numeric_precision: Option<u64>,
+    numeric_scale: Option<i64>,
+    interval_fields: Option<IntervalFields>,
+    array_dimensions: Option<NonZeroU32>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TypeShape {
     normalized: String,
+    bounds: TypeBounds,
+    element: Option<Box<Self>>,
     details: Vec<TypeDetail>,
 }
 
 impl TypeShape {
-    fn new(data_type: &DataType) -> Self {
+    /// The shape of `data_type`, transparent to storage wrappers, with `Nullable` kept as a detail.
+    fn of(data_type: &DataType, database: &ParserDB) -> Self {
+        let mut declared = data_type;
+        let mut nullable = false;
+        loop {
+            match declared {
+                DataType::LowCardinality(inner)
+                | DataType::Collate(inner, _)
+                | DataType::Zerofill(inner) => declared = inner,
+                DataType::Nullable(inner) => {
+                    nullable = true;
+                    declared = inner;
+                }
+                _ => break,
+            }
+        }
         let mut details = Vec::new();
-        append_type_details(data_type, &mut details);
+        append_pending_details(declared, database, &mut details);
+        if nullable {
+            details.push(TypeDetail::Nullable);
+        }
         Self {
-            normalized: normalize_sqlparser_type(data_type).into_owned(),
+            normalized: data_type.name(database).into_owned(),
+            bounds: TypeBounds {
+                fixed_binary_length: declared.fixed_binary_length(database),
+                max_character_length: declared.max_character_length(database),
+                fractional_seconds_precision: declared.fractional_seconds_precision(database),
+                numeric_precision: declared.numeric_precision(database),
+                numeric_scale: declared.numeric_scale(database),
+                interval_fields: declared.interval_fields(database),
+                array_dimensions: declared.array_dimensions(database),
+            },
+            element: declared
+                .array_element(database)
+                .map(|element| Box::new(Self::of(element, database))),
             details,
         }
     }
@@ -109,6 +161,9 @@ impl TypeShape {
 pub struct ColumnShape {
     name: String,
     data_type: TypeShape,
+    /// How the dialect reads the column as a boolean, which tells MySQL's
+    /// `TINYINT(1)` from a wider `TINYINT`.
+    boolean: TypeMatch,
     nullable: bool,
     has_default: bool,
 }
@@ -138,10 +193,10 @@ impl ColumnShape {
         self.has_default
     }
 
-    /// Whether the declared type, bounds and members match `other`'s.
+    /// Whether the declared type, bounds, members and boolean reading match `other`'s.
     #[must_use]
     pub fn type_matches(&self, other: &Self) -> bool {
-        self.data_type == other.data_type
+        self.data_type == other.data_type && self.boolean == other.boolean
     }
 }
 
@@ -169,11 +224,20 @@ impl TableShape {
         database: &DB,
     ) -> Result<Self, sql_traits::errors::LookupError> {
         let mut columns = Vec::new();
+        let parser = database.parser_database();
         for column in table.columns(database)? {
             let data_type = DB::column_raw_type(column, database);
+            let boolean = database.dialect().is_bool(database, column);
             columns.push(ColumnShape {
                 name: column.column_name().to_string(),
-                data_type: TypeShape::new(data_type),
+                data_type: TypeShape::of(data_type, parser),
+                boolean: if boolean.is_yes() {
+                    TypeMatch::Yes
+                } else if boolean.is_maybe() {
+                    TypeMatch::Maybe
+                } else {
+                    TypeMatch::No
+                },
                 nullable: column.is_nullable(database)?,
                 has_default: column.has_default(),
             });
@@ -227,12 +291,17 @@ impl TableShape {
     }
 }
 
-/// Append declared parameters, retaining their positions inside arrays and compound types.
+/// Append the declared facts sql-traits does not answer, keeping their positions inside compound
+/// types.
 #[expect(
     clippy::too_many_lines,
     reason = "The exhaustive match accounts for every parser type's metadata."
 )]
-fn append_type_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
+fn append_pending_details(
+    data_type: &DataType,
+    database: &ParserDB,
+    details: &mut Vec<TypeDetail>,
+) {
     if matches!(
         data_type,
         DataType::TinyIntUnsigned(_)
@@ -271,57 +340,24 @@ fn append_type_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
         | DataType::NationalChar(length)
         | DataType::NationalCharVarying(length)
         | DataType::Nchar(length)
-        | DataType::NcharVarying(length) => match length {
-            None => {}
-            Some(CharacterLength::IntegerLength { length, unit }) => {
-                details.push(TypeDetail::Exact(*length));
-                if let Some(unit) = unit {
-                    details.push(TypeDetail::CharacterUnits(*unit));
-                }
+        | DataType::NcharVarying(length) => {
+            if let Some(CharacterLength::IntegerLength {
+                unit: Some(unit), ..
+            }) = length
+            {
+                details.push(TypeDetail::CharacterUnits(*unit));
             }
-            Some(CharacterLength::Max) => details.push(TypeDetail::Max),
-        },
+        }
         DataType::Clob(width)
         | DataType::CharacterLargeObject(width)
         | DataType::CharLargeObject(width)
-        | DataType::Binary(width)
         | DataType::Blob(width)
         | DataType::Bytes(width)
-        | DataType::String(width)
-        | DataType::TinyInt(width)
-        | DataType::SmallInt(width)
-        | DataType::MediumInt(width)
-        | DataType::Int(width)
-        | DataType::Integer(width)
-        | DataType::BigInt(width)
         | DataType::Bit(width)
         | DataType::BitVarying(width)
-        | DataType::VarBit(width)
-        | DataType::Int2(width)
-        | DataType::Int4(width)
-        | DataType::Int8(width)
-        | DataType::TinyIntUnsigned(width)
-        | DataType::SmallIntUnsigned(width)
-        | DataType::MediumIntUnsigned(width)
-        | DataType::IntUnsigned(width)
-        | DataType::IntegerUnsigned(width)
-        | DataType::BigIntUnsigned(width)
-        | DataType::Int2Unsigned(width)
-        | DataType::Int4Unsigned(width)
-        | DataType::Int8Unsigned(width)
-        | DataType::Time(width, _)
-        | DataType::Timestamp(width, _)
-        | DataType::TimestampNtz(width)
-        | DataType::Datetime(width) => details.extend(width.map(TypeDetail::Exact)),
+        | DataType::VarBit(width) => details.extend(width.map(TypeDetail::Exact)),
         DataType::Float(info)
         | DataType::FloatUnsigned(info)
-        | DataType::Numeric(info)
-        | DataType::Decimal(info)
-        | DataType::DecimalUnsigned(info)
-        | DataType::Dec(info)
-        | DataType::DecUnsigned(info)
-        | DataType::BigNumeric(info)
-        | DataType::BigDecimal(info)
         | DataType::Double(info)
         | DataType::DoubleUnsigned(info) => match info {
             ExactNumberInfo::None => {}
@@ -339,30 +375,21 @@ fn append_type_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
             }
             Some(BinaryLength::Max) => details.push(TypeDetail::Max),
         },
-        DataType::Datetime64(precision, zone) => {
-            details.push(TypeDetail::Exact(*precision));
+        DataType::Datetime64(_, zone) => {
             if let Some(zone) = zone {
                 details.push(TypeDetail::TimeZone(zone.clone()));
             }
         }
-        DataType::Interval { fields, precision } => {
-            details.extend(fields.map(TypeDetail::IntervalFields));
-            details.extend(precision.map(TypeDetail::Exact));
-        }
         DataType::Array(element) => match element {
             ArrayElemTypeDef::None => {}
-            ArrayElemTypeDef::AngleBracket(element) | ArrayElemTypeDef::Parenthesis(element) => {
-                append_type_details(element, details);
+            ArrayElemTypeDef::AngleBracket(_) | ArrayElemTypeDef::Parenthesis(_) => {
                 details.push(TypeDetail::ArraySize(None));
             }
-            ArrayElemTypeDef::ParenthesisNotNull(element) => {
-                append_type_details(element, details);
+            ArrayElemTypeDef::ParenthesisNotNull(_) => {
                 details.push(TypeDetail::ArraySize(None));
                 details.push(TypeDetail::NotNullElements);
             }
-            ArrayElemTypeDef::SquareBracket(element, size)
-            | ArrayElemTypeDef::Qualified(element, size) => {
-                append_type_details(element, details);
+            ArrayElemTypeDef::SquareBracket(_, size) | ArrayElemTypeDef::Qualified(_, size) => {
                 details.push(TypeDetail::ArraySize(*size));
             }
         },
@@ -371,15 +398,15 @@ fn append_type_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
         }
         DataType::Set(members) => details.push(TypeDetail::Set(members.clone())),
         DataType::Map(key, value, _) => details.push(TypeDetail::Elements(vec![
-            TypeShape::new(key),
-            TypeShape::new(value),
+            TypeShape::of(key, database),
+            TypeShape::of(value, database),
         ])),
         DataType::Struct(fields, _) | DataType::Tuple(fields) => {
             details.push(TypeDetail::Fields(
                 fields
                     .iter()
                     .map(|field| {
-                        let mut data_type = TypeShape::new(&field.field_type);
+                        let mut data_type = TypeShape::of(&field.field_type, database);
                         if let Some(options) = &field.options {
                             if !options.is_empty() {
                                 data_type
@@ -400,7 +427,7 @@ fn append_type_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
                 .iter()
                 .map(|field| FieldShape {
                     name: Some(field.field_name.clone()),
-                    data_type: TypeShape::new(&field.field_type),
+                    data_type: TypeShape::of(&field.field_type, database),
                 })
                 .collect(),
         )),
@@ -415,7 +442,7 @@ fn append_type_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
                 columns
                     .iter()
                     .map(|column| {
-                        let mut data_type = TypeShape::new(&column.data_type);
+                        let mut data_type = TypeShape::of(&column.data_type, database);
                         if !column.options.is_empty() {
                             data_type
                                 .details
@@ -429,14 +456,46 @@ fn append_type_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
                     .collect(),
             ));
         }
-        DataType::Nullable(wrapped) => {
-            append_type_details(wrapped, details);
-            details.push(TypeDetail::Nullable);
-        }
-        DataType::Collate(wrapped, _)
-        | DataType::LowCardinality(wrapped)
-        | DataType::Zerofill(wrapped) => append_type_details(wrapped, details),
-        DataType::Table(None)
+        // `TypeShape::of` sees through the wrappers before asking for details.
+        DataType::Nullable(_)
+        | DataType::Collate(..)
+        | DataType::LowCardinality(_)
+        | DataType::Zerofill(_)
+        // sql-traits answers these types' declared bounds.
+        | DataType::Binary(_)
+        | DataType::String(_)
+        | DataType::TinyInt(_)
+        | DataType::SmallInt(_)
+        | DataType::MediumInt(_)
+        | DataType::Int(_)
+        | DataType::Integer(_)
+        | DataType::BigInt(_)
+        | DataType::Int2(_)
+        | DataType::Int4(_)
+        | DataType::Int8(_)
+        | DataType::TinyIntUnsigned(_)
+        | DataType::SmallIntUnsigned(_)
+        | DataType::MediumIntUnsigned(_)
+        | DataType::IntUnsigned(_)
+        | DataType::IntegerUnsigned(_)
+        | DataType::BigIntUnsigned(_)
+        | DataType::Int2Unsigned(_)
+        | DataType::Int4Unsigned(_)
+        | DataType::Int8Unsigned(_)
+        | DataType::Time(..)
+        | DataType::Timestamp(..)
+        | DataType::TimestampNtz(_)
+        | DataType::Datetime(_)
+        | DataType::Numeric(_)
+        | DataType::Decimal(_)
+        | DataType::DecimalUnsigned(_)
+        | DataType::Dec(_)
+        | DataType::DecUnsigned(_)
+        | DataType::BigNumeric(_)
+        | DataType::BigDecimal(_)
+        | DataType::Interval { .. }
+        // These types declare no parameters.
+        | DataType::Table(None)
         | DataType::Uuid
         | DataType::TinyBlob
         | DataType::MediumBlob
@@ -697,6 +756,13 @@ mod tests {
     }
 
     #[test]
+    fn an_omitted_time_precision_is_the_engine_default() {
+        let omitted = shape_with_type::<PostgreSqlDialect>("TIME");
+        let micros = shape_with_type::<PostgreSqlDialect>("TIME(6)");
+        assert_eq!(judge(&omitted, Some(&micros)), Verdict::Unchanged);
+    }
+
+    #[test]
     fn timestamp_precision_is_a_declared_bound() {
         let millis = shape_with_type::<PostgreSqlDialect>("TIMESTAMP(3) WITH TIME ZONE");
         let micros = shape_with_type::<PostgreSqlDialect>("TIMESTAMP(6) WITH TIME ZONE");
@@ -816,6 +882,16 @@ mod tests {
         let equivalent = shape_with_type::<MySqlDialect>("INTEGER");
         assert_retyped(&signed, &unsigned);
         assert_eq!(judge(&signed, Some(&equivalent)), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn only_the_boolean_tinyint_display_width_is_part_of_the_declared_type() {
+        let narrow = shape_with_type::<MySqlDialect>("INT(10)");
+        let wide = shape_with_type::<MySqlDialect>("INT(11)");
+        let boolean = shape_with_type::<MySqlDialect>("TINYINT(1)");
+        let tiny = shape_with_type::<MySqlDialect>("TINYINT(4)");
+        assert_eq!(judge(&narrow, Some(&wide)), Verdict::Unchanged);
+        assert_retyped(&boolean, &tiny);
     }
 
     #[test]
