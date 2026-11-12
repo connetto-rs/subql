@@ -3169,10 +3169,22 @@ GRANT DELETE ON docs TO writer;";
     where
         T: GrpcService<Body, ResponseBody = Body>,
     {
-        let db = ParserDB::parse::<PostgreSqlDialect>(COLUMN_GRANTS).unwrap();
+        column_policy_over(COLUMN_GRANTS, &["editor", "reader", "writer"], transport)
+    }
+
+    /// The policy over `sql` acting as `acting`, asking through `transport`, and `docs`.
+    fn column_policy_over<T, W>(
+        sql: &str,
+        acting: &[&str],
+        transport: T,
+    ) -> (OpenFgaPolicy<ParserDB, T, W, Postgres>, TableId)
+    where
+        T: GrpcService<Body, ResponseBody = Body>,
+    {
+        let db = ParserDB::parse::<PostgreSqlDialect>(sql).unwrap();
         let deployment = Deployment::new(
             "app_login",
-            ["editor", "reader", "writer"],
+            acting.iter().copied(),
             [deployment::caller("app.user_id")],
         )
         .unwrap();
@@ -3585,6 +3597,46 @@ GRANT DELETE ON docs TO writer;";
             write,
             Err(OpenFgaError::StatementNotAnswered { .. })
         ));
+    }
+
+    /// Rows every acting role may read leave a read with its columns alone to
+    /// ask, so no question names the row.
+    #[test]
+    fn a_read_over_unrestricted_rows_asks_only_its_columns() {
+        let (policy, docs) = column_policy_over::<NeverAsked, Reads>(
+            "CREATE ROLE app_login LOGIN;
+             CREATE ROLE keeper NOLOGIN;
+             CREATE ROLE reader NOLOGIN;
+             CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT, owner_id TEXT);
+             ALTER TABLE docs OWNER TO keeper;
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY docs_read ON docs FOR SELECT USING (true);
+             GRANT SELECT (title) ON docs TO reader;",
+            &["reader"],
+            NeverAsked,
+        );
+        let event = column_row(docs);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let select = by_column(&policy, docs, ActionStatement::Select);
+        let Asked::Ask(plan) = policy.read_plan(docs).unwrap() else {
+            panic!("a granted read is asked");
+        };
+        let reader = Reads {
+            names: &["user:alice"],
+            role: "reader",
+            read: Some(&[1]),
+        };
+
+        let questions = policy
+            .read_questions(&row, &plan, core::slice::from_ref(&reader))
+            .unwrap();
+
+        assert!(plan.rows.is_none(), "nothing restricts the rows");
+        assert_eq!(
+            gate_questions(&questions, &select.gate),
+            [(0, column_relation(select, ColumnCommand::Select, "title"))]
+        );
+        assert_eq!(questions.len(), 1, "the row is not asked about");
     }
 
     /// A `DELETE` without a `WHERE` reads no column, so it asks no column.
