@@ -512,8 +512,13 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
         let view = EventRow::current(&event, policy.catalog()).unwrap();
 
         assert!(policy.answers_locally(ledger, ActionStatement::Insert));
-        let got =
-            block_on(policy.may_write(RowWrite::Insert { new: &view }, &"user:alice".to_string()));
+        let got = block_on(policy.may_write(
+            RowWrite::Insert {
+                new: &view,
+                assigned: &[],
+            },
+            &"user:alice".to_string(),
+        ));
 
         assert_eq!(got, Ok(Verdict::Deny));
         assert_eq!(policy.inner().write_calls(), 0);
@@ -534,7 +539,13 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
         let view = EventRow::current(&event, policy.catalog()).unwrap();
         let watcher = Principal::identity("user:alice");
 
-        let removal = block_on(policy.may_write(RowWrite::Delete { old: &view }, &watcher));
+        let removal = block_on(policy.may_write(
+            RowWrite::Delete {
+                old: &view,
+                read: &[],
+            },
+            &watcher,
+        ));
         let read = see(&policy, &event, &[watcher]).unwrap();
 
         assert_eq!(
@@ -721,7 +732,10 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
 
         let view = EventRow::current(&event, policy.catalog()).unwrap();
         let got = block_on(policy.may_write(
-            RowWrite::Delete { old: &view },
+            RowWrite::Delete {
+                old: &view,
+                read: &[],
+            },
             &Principal::identity("user:alice"),
         ))
         .unwrap();
@@ -930,11 +944,17 @@ CREATE POLICY pd ON docs FOR DELETE USING (editor_id = current_setting('app.user
         let view = event_view(&policy, &event);
 
         let allowed = block_on(policy.may_write(
-            RowWrite::Delete { old: &view },
+            RowWrite::Delete {
+                old: &view,
+                read: &[],
+            },
             &Principal::identity("user:alice"),
         ));
         let denied = block_on(policy.may_write(
-            RowWrite::Delete { old: &view },
+            RowWrite::Delete {
+                old: &view,
+                read: &[],
+            },
             &Principal::identity("user:bob"),
         ));
 
@@ -958,7 +978,13 @@ CREATE POLICY pd ON docs FOR DELETE USING (editor_id = current_setting('app.user
         let view = event_view(&policy, &event);
 
         let watcher = Principal::identity("user:alice");
-        let removal = block_on(policy.may_write(RowWrite::Delete { old: &view }, &watcher));
+        let removal = block_on(policy.may_write(
+            RowWrite::Delete {
+                old: &view,
+                read: &[],
+            },
+            &watcher,
+        ));
         let mut verdicts = vec![Verdict::Deny];
         block_on(policy.may_see(&view, &[watcher], &mut verdicts)).unwrap();
 
@@ -1053,6 +1079,8 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             RowWrite::Update {
                 old: &old,
                 new: &new,
+                assigned: &[],
+                read: &[],
             },
             &Principal::identity("user:bob"),
         ));
@@ -1096,6 +1124,8 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             RowWrite::Update {
                 old: &old,
                 new: &new,
+                assigned: &[],
+                read: &[],
             },
             &Principal::identity("user:alice"),
         ));
@@ -1121,11 +1151,17 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         let view = event_view(&policy, &event);
 
         let alice = block_on(policy.may_write(
-            RowWrite::UpdateUsing { old: &view },
+            RowWrite::UpdateUsing {
+                old: &view,
+                read: &[],
+            },
             &Principal::identity("user:alice"),
         ));
         let bob = block_on(policy.may_write(
-            RowWrite::UpdateUsing { old: &view },
+            RowWrite::UpdateUsing {
+                old: &view,
+                read: &[],
+            },
             &Principal::identity("user:bob"),
         ));
 
@@ -1168,6 +1204,8 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             RowWrite::Update {
                 old: &old,
                 new: &new,
+                assigned: &[],
+                read: &[],
             },
             &Principal::identity("user:bob"),
         ));
@@ -1216,6 +1254,8 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             RowWrite::Update {
                 old: &old,
                 new: &new,
+                assigned: &[],
+                read: &[],
             },
             &Principal::identity("user:alice"),
         ));
@@ -1258,6 +1298,8 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
             RowWrite::Update {
                 old: &old,
                 new: &new,
+                assigned: &[],
+                read: &[],
             },
             &"user:bob".to_string(),
         ));
@@ -1845,6 +1887,8 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
             RowWrite::Update {
                 old: &old,
                 new: &new,
+                assigned: &[],
+                read: &[],
             },
             &alice,
         ));
@@ -1869,7 +1913,9 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
             block_on(policy.may_write(
                 RowWrite::Update {
                     old: &old,
-                    new: &new
+                    new: &new,
+                    assigned: &[],
+                    read: &[]
                 },
                 &alice
             )),
@@ -1892,21 +1938,30 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
         let event = insert(docs, docs_row(text("alice"), Value::Null));
         let view = event_view(&policy, &event);
 
-        let created = RowWrite::Insert { new: &view };
+        let created = RowWrite::Insert {
+            new: &view,
+            assigned: &[],
+        };
         assert!(image_of(&created, RowVersion::Resulting).is_some());
         assert!(
             image_of(&created, RowVersion::Existing).is_none(),
             "a creation has no existing row"
         );
 
-        let removed = RowWrite::Delete { old: &view };
+        let removed = RowWrite::Delete {
+            old: &view,
+            read: &[],
+        };
         assert!(image_of(&removed, RowVersion::Existing).is_some());
         assert!(
             image_of(&removed, RowVersion::Resulting).is_none(),
             "a removal has no resulting row"
         );
 
-        let taking = RowWrite::UpdateUsing { old: &view };
+        let taking = RowWrite::UpdateUsing {
+            old: &view,
+            read: &[],
+        };
         assert!(image_of(&taking, RowVersion::Existing).is_some());
         assert!(
             image_of(&taking, RowVersion::Resulting).is_none(),
@@ -1932,7 +1987,10 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
 
         assert!(policy.answers_locally(teams, ActionStatement::Insert));
         let got = block_on(policy.may_write(
-            RowWrite::Insert { new: &view },
+            RowWrite::Insert {
+                new: &view,
+                assigned: &[],
+            },
             &Principal::identity("user:nobody"),
         ));
 

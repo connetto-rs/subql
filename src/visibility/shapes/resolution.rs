@@ -1,3 +1,5 @@
+#[cfg(feature = "visibility-openfga")]
+use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -6,11 +8,15 @@ use core::ops::Not;
 use hashbrown::HashMap;
 #[cfg(feature = "visibility-openfga")]
 use rls2fga_types::identity::encode_part;
+#[cfg(feature = "visibility-openfga")]
+use rls2fga_types::ColumnRelations;
 use rls2fga_types::RowNaming;
 use rls2fga_types::TranslationNote;
 use rls2fga_types::{ActionAnswer, ActionRelations, ActionStatement};
 use rls2fga_types::{Record, RecordDerivation, RecordDescription};
 use rls2fga_types::{RelationShapes, RequestPredicate, RowDecision};
+#[cfg(feature = "visibility-openfga")]
+use sql_traits::traits::TableLike;
 
 use rls2fga_types::{ColumnName, RelationName, TableId as ContractTableId};
 use sql_traits::prelude::DatabaseLike;
@@ -325,10 +331,31 @@ impl<DB: DatabaseLike> Shapes<DB> {
                         .iter()
                         .all(|judge| self.recipe(table, &judge.relation).is_some())
             }
-            // One relation fusing both versions cannot be answered from either,
-            // and asking it grants a change the check clause refuses.
+            // A relation fusing both versions answers from neither image, and a
+            // column answer is asked for the caller's acting role, which no row holds.
             _ => false,
         }
+    }
+
+    /// The relation `relations` asks on its gate for each of `columns` of
+    /// `table`, each once, or [`None`] for a column `table` lacks.
+    #[cfg(feature = "visibility-openfga")]
+    pub(crate) fn column_relations<'r>(
+        &self,
+        table: TableId,
+        relations: &'r ColumnRelations,
+        columns: &[ColumnId],
+    ) -> Option<BTreeSet<&'r RelationName>> {
+        let entry = self.db.table_by_id(usize::try_from(table).ok()?)?;
+        columns
+            .iter()
+            .map(|&column| {
+                let name = entry
+                    .column_name_by_id(usize::from(column), &self.db)
+                    .ok()??;
+                Some(relations.columns.get(name).unwrap_or(&relations.on_table))
+            })
+            .collect()
     }
 
     /// The recipe deciding `relation` on a row of `table`, or [`None`] to

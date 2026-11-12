@@ -14,6 +14,11 @@ use super::WriteOp;
 /// The verb and its versions therefore travel together, and the pairings that
 /// cannot be answered are not constructible.
 ///
+/// # Columns
+///
+/// PostgreSQL checks column privileges per command, so a write names the
+/// columns it assigns apart from the columns it reads, as the SQL it runs does.
+///
 /// # Judging a replacement on one version, deliberately
 ///
 /// [`UpdateUsing`](Self::UpdateUsing) is what a caller asks when it holds only
@@ -27,9 +32,13 @@ use super::WriteOp;
 #[non_exhaustive]
 pub enum RowWrite<'a, R: ?Sized> {
     /// Creating the row, judged on the row being created.
+    ///
+    /// An `INSERT` without `RETURNING` reads nothing, so it states no read set.
     Insert {
         /// The row as it will be.
         new: &'a R,
+        /// The columns the `INSERT` names.
+        assigned: &'a [ColumnId],
     },
     /// Replacing the row, judged on both versions.
     Update {
@@ -37,17 +46,25 @@ pub enum RowWrite<'a, R: ?Sized> {
         old: &'a R,
         /// The row as it will be.
         new: &'a R,
+        /// The columns the `SET` assigns.
+        assigned: &'a [ColumnId],
+        /// The columns the `WHERE` and the `SET` right-hand sides read.
+        read: &'a [ColumnId],
     },
     /// Whether the row as it stands may be replaced at all, for a caller
     /// holding no other version.
     UpdateUsing {
         /// The row as it is.
         old: &'a R,
+        /// The columns the `WHERE` reads.
+        read: &'a [ColumnId],
     },
     /// Removing the row, judged on the row being removed.
     Delete {
         /// The row as it is.
         old: &'a R,
+        /// The columns the `WHERE` reads.
+        read: &'a [ColumnId],
     },
 }
 
@@ -62,7 +79,7 @@ impl<R: ?Sized> Clone for RowWrite<'_, R> {
 
 impl<R: ?Sized> Copy for RowWrite<'_, R> {}
 
-impl<R: ?Sized> RowWrite<'_, R> {
+impl<'a, R: ?Sized> RowWrite<'a, R> {
     /// The verb, for an implementation wanting it without matching every
     /// version the question carries.
     ///
@@ -76,6 +93,26 @@ impl<R: ?Sized> RowWrite<'_, R> {
             Self::Insert { .. } => WriteOp::Insert,
             Self::Update { .. } | Self::UpdateUsing { .. } => WriteOp::Update,
             Self::Delete { .. } => WriteOp::Delete,
+        }
+    }
+
+    /// The columns the write assigns, empty for a verb that assigns none.
+    #[must_use]
+    pub const fn assigned(&self) -> &'a [ColumnId] {
+        match self {
+            Self::Insert { assigned, .. } | Self::Update { assigned, .. } => assigned,
+            Self::UpdateUsing { .. } | Self::Delete { .. } => &[],
+        }
+    }
+
+    /// The columns the write reads, empty for an `INSERT`, which reads none.
+    #[must_use]
+    pub const fn read(&self) -> &'a [ColumnId] {
+        match self {
+            Self::Update { read, .. }
+            | Self::UpdateUsing { read, .. }
+            | Self::Delete { read, .. } => read,
+            Self::Insert { .. } => &[],
         }
     }
 }

@@ -44,8 +44,9 @@ pub enum OpenFgaError {
     ///
     /// Reached when the index was built without
     /// [`Shapes::with_action_relations`](crate::visibility::shapes::Shapes::with_action_relations),
-    /// when the model names no type for the changed table, and when one relation
-    /// fuses both row versions, which no single image answers.
+    /// when the model names no type for the changed table, when one relation
+    /// fuses both row versions, which no single image answers, and when a
+    /// column the question touches is not a column of the table.
     #[error("the model says nothing this can ask about a {statement:?} on the changed row")]
     StatementNotAnswered {
         /// The statement that went unanswered.
