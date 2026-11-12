@@ -695,47 +695,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
-name = "jiff"
-version = "0.2.43"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
-dependencies = [
- "jiff-core",
- "jiff-static",
- "jiff-tzdb",
- "portable-atomic",
- "portable-atomic-util",
- "serde_core",
-]
-
-[[package]]
-name = "jiff-core"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffe6854081f5ac0a3046a9b223729ccd7a20b1e0e8277e44dc0660eedf67dfe2"
-dependencies = [
- "log",
-]
-
-[[package]]
-name = "jiff-static"
-version = "0.2.43"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
-dependencies = [
- "jiff-core",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "jiff-tzdb"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7"
-
-[[package]]
 name = "jobserver"
 version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -945,7 +904,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#479e39dce95ecf58e97baa44400eafb23cce6bfe"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#37575ec2c1916243f4bc631a7d6622cd2d026225"
 dependencies = [
  "sql-traits",
  "sql-values 0.5.1",
@@ -979,21 +938,6 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
-
-[[package]]
-name = "portable-atomic"
-version = "1.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
-
-[[package]]
-name = "portable-atomic-util"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
-dependencies = [
- "portable-atomic",
-]
 
 [[package]]
 name = "postcard"
@@ -1319,7 +1263,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#eef37bf61312436feaf646e353fea58e1736bf5f"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#7d4872dea57c0f7942cfb3f36a8e8c51a3dd811d"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -1347,9 +1291,8 @@ dependencies = [
 [[package]]
 name = "sql-values"
 version = "0.5.1"
-source = "git+https://github.com/connetto-rs/sql-values?branch=main#d2d0cf1caa298ed31992fc37cd6b8bb61b85cea3"
+source = "git+https://github.com/connetto-rs/sql-values?branch=main#8207674b24768b1f654b9f7129de22b5059a63d4"
 dependencies = [
- "jiff",
  "thiserror",
 ]
 

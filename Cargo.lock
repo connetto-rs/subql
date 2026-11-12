@@ -1853,7 +1853,6 @@ checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
 dependencies = [
  "jiff-core",
  "jiff-static",
- "jiff-tzdb",
  "jiff-tzdb-platform",
  "log",
  "portable-atomic",
@@ -2565,7 +2564,7 @@ dependencies = [
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#479e39dce95ecf58e97baa44400eafb23cce6bfe"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#37575ec2c1916243f4bc631a7d6622cd2d026225"
 dependencies = [
  "sql-traits",
  "sql-values 0.5.1",
@@ -2826,9 +2825,9 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.14.5"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9f016da56b311cff4659f5e7335c4d5fda5ca86cae4f48b8ce1cf3335246a7d"
+checksum = "3ef0b569d1d907ab3a28596aee62cf1f61dacb0529a4bedcd8e7460e2d5228b4"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -2836,9 +2835,9 @@ dependencies = [
 
 [[package]]
 name = "prost-build"
-version = "0.14.5"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f461f69b0cacd7a9c2bcac932e0f3a22cb13c29fc9023092502995a771a10491"
+checksum = "b6e4d69d0fa3e7f6f9cf6b53a0e83e4fc99ba3586f65ce166cff30bd13bb4ad2"
 dependencies = [
  "heck",
  "itertools 0.15.0",
@@ -2855,9 +2854,9 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.14.5"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9a367f131d93b3395fc6207c11e67098493ab040def4ce3085adbf186687f7e"
+checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
 dependencies = [
  "anyhow",
  "itertools 0.15.0",
@@ -2880,9 +2879,9 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.14.5"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96e89651c132da91958fd6092a2f7262c2c36c08df4f68af0bb3591caacbbb45"
+checksum = "f29a7c4c7a84cef41a53d338a2d10d4f1b043ea5c3dde26db22ee2c9c1b1c75b"
 dependencies = [
  "prost",
 ]
@@ -3326,9 +3325,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.16"
+version = "0.103.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+checksum = "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -3655,7 +3654,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#eef37bf61312436feaf646e353fea58e1736bf5f"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#7d4872dea57c0f7942cfb3f36a8e8c51a3dd811d"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -3683,9 +3682,8 @@ dependencies = [
 [[package]]
 name = "sql-values"
 version = "0.5.1"
-source = "git+https://github.com/connetto-rs/sql-values?branch=main#d2d0cf1caa298ed31992fc37cd6b8bb61b85cea3"
+source = "git+https://github.com/connetto-rs/sql-values?branch=main#8207674b24768b1f654b9f7129de22b5059a63d4"
 dependencies = [
- "jiff",
  "thiserror",
 ]
 
