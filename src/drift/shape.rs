@@ -74,7 +74,6 @@ enum TypeDetail {
     Exact(u64),
     Scale(i64),
     Max,
-    Unsigned,
     Nullable,
     NotNullElements,
     CharacterUnits(CharLengthUnits),
@@ -104,6 +103,7 @@ struct TypeBounds {
     numeric_precision: Option<u64>,
     numeric_scale: Option<i64>,
     interval_fields: Option<IntervalFields>,
+    unsigned: Option<bool>,
     array_dimensions: Option<NonZeroU32>,
 }
 
@@ -146,6 +146,7 @@ impl TypeShape {
                 numeric_precision: declared.numeric_precision(database),
                 numeric_scale: declared.numeric_scale(database),
                 interval_fields: declared.interval_fields(database),
+                unsigned: data_type.is_unsigned(database),
                 array_dimensions: declared.array_dimensions(database),
             },
             element: declared
@@ -302,32 +303,6 @@ fn append_pending_details(
     database: &ParserDB,
     details: &mut Vec<TypeDetail>,
 ) {
-    if matches!(
-        data_type,
-        DataType::TinyIntUnsigned(_)
-            | DataType::SmallIntUnsigned(_)
-            | DataType::MediumIntUnsigned(_)
-            | DataType::IntUnsigned(_)
-            | DataType::IntegerUnsigned(_)
-            | DataType::BigIntUnsigned(_)
-            | DataType::Int2Unsigned(_)
-            | DataType::Int4Unsigned(_)
-            | DataType::Int8Unsigned(_)
-            | DataType::UTinyInt
-            | DataType::USmallInt
-            | DataType::UBigInt
-            | DataType::UHugeInt
-            | DataType::Unsigned
-            | DataType::UnsignedInteger
-            | DataType::DecimalUnsigned(_)
-            | DataType::DecUnsigned(_)
-            | DataType::FloatUnsigned(_)
-            | DataType::RealUnsigned
-            | DataType::DoubleUnsigned(_)
-            | DataType::DoublePrecisionUnsigned
-    ) {
-        details.push(TypeDetail::Unsigned);
-    }
     match data_type {
         DataType::Character(length)
         | DataType::Char(length)
@@ -920,6 +895,22 @@ mod tests {
         let signed = shape_with_type::<MySqlDialect>("DECIMAL");
         let unsigned = shape_with_type::<MySqlDialect>("DECIMAL UNSIGNED");
         assert_retyped(&signed, &unsigned);
+    }
+
+    #[test]
+    fn zerofill_declares_an_unsigned_integer() {
+        let zerofill = shape_with_type::<MySqlDialect>("INT ZEROFILL");
+        let unsigned = shape_with_type::<MySqlDialect>("INT UNSIGNED");
+        let signed = shape_with_type::<MySqlDialect>("INT");
+        assert_eq!(judge(&zerofill, Some(&unsigned)), Verdict::Unchanged);
+        assert_retyped(&zerofill, &signed);
+    }
+
+    #[test]
+    fn sqlite_ignores_a_declared_unsigned() {
+        let unsigned = shape_with_type::<SQLiteDialect>("INT UNSIGNED");
+        let signed = shape_with_type::<SQLiteDialect>("INT");
+        assert_eq!(judge(&unsigned, Some(&signed)), Verdict::Unchanged);
     }
 
     #[test]
