@@ -17,12 +17,11 @@ use core::num::NonZeroU32;
 use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
 use sql_traits::structs::ParserDB;
 use sql_traits::traits::{
-    CheckConstraintLike, ColumnCollation, DataTypeLike, DialectLike, IntervalFields, StructureKind,
-    StructuredField, TypeMatch, TypeMatchLike,
+    CheckConstraintLike, ColumnCollation, DataTypeLike, DialectLike, EnumWidth, EnumerationKind,
+    IntervalFields, StructureKind, StructuredField, TypeMatch, TypeMatchLike,
 };
 use sqlparser::ast::{
-    ArrayElemTypeDef, BinaryLength, CharLengthUnits, CharacterLength, DataType, EnumMember,
-    ExactNumberInfo,
+    ArrayElemTypeDef, BinaryLength, CharLengthUnits, CharacterLength, DataType, ExactNumberInfo,
 };
 
 /// A catalog whose declared types are sqlparser's.
@@ -80,8 +79,6 @@ enum TypeDetail {
     CharacterUnits(CharLengthUnits),
     ArraySize(Option<u64>),
     TimeZone(String),
-    Enum(Vec<EnumMember>, Option<u8>),
-    Set(Vec<String>),
 }
 
 /// A field of a structured type, as sql-traits answers it.
@@ -120,6 +117,15 @@ struct MapShape {
     value_nullable: bool,
 }
 
+/// An enumerated type's members, as sql-traits answers them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnumerationShape {
+    kind: EnumerationKind,
+    width: Option<EnumWidth>,
+    /// Each member's label and stored value, in the order sql-traits answers them.
+    members: Vec<(String, Option<i16>)>,
+}
+
 /// The declared bounds sql-traits answers for a type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TypeBounds {
@@ -141,6 +147,7 @@ struct TypeShape {
     structure_kind: Option<StructureKind>,
     fields: Vec<FieldShape>,
     map: Option<Box<MapShape>>,
+    enumeration: Option<EnumerationShape>,
     details: Vec<TypeDetail>,
 }
 
@@ -195,6 +202,16 @@ impl TypeShape {
                     value_nullable: entry.value_is_nullable(),
                 })
             }),
+            enumeration: declared
+                .enumeration(database)
+                .map(|enumeration| EnumerationShape {
+                    kind: enumeration.kind(),
+                    width: enumeration.width(),
+                    members: enumeration
+                        .into_members()
+                        .map(|member| (String::from(member.label()), member.value()))
+                        .collect(),
+                }),
             details,
         }
     }
@@ -418,10 +435,6 @@ fn append_pending_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
                 };
             }
         }
-        DataType::Enum(members, width) => {
-            details.push(TypeDetail::Enum(members.clone(), *width));
-        }
-        DataType::Set(members) => details.push(TypeDetail::Set(members.clone())),
         // `TypeShape::of` sees through the wrappers before asking for details.
         DataType::Nullable(_)
         | DataType::Collate(..)
@@ -460,7 +473,9 @@ fn append_pending_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
         | DataType::BigNumeric(_)
         | DataType::BigDecimal(_)
         | DataType::Interval { .. }
-        // sql-traits answers these types' fields and entries.
+        // sql-traits answers these types' fields, entries and members.
+        | DataType::Enum(..)
+        | DataType::Set(_)
         | DataType::Map(..)
         | DataType::Struct(..)
         | DataType::Tuple(_)
@@ -1110,5 +1125,41 @@ mod tests {
         let nullable = shape_with_type::<SnowflakeDialect>("MAP(VARCHAR, INT)");
         let required = shape_with_type::<SnowflakeDialect>("MAP(VARCHAR, INT NOT NULL)");
         assert_retyped(&nullable, &required);
+    }
+
+    #[test]
+    fn postgres_enum_type_labels_are_part_of_the_declared_type() {
+        let enumerated = |ddl: &str| {
+            shape_from_ddl::<PostgreSqlDialect>(&format!("{ddl}; CREATE TABLE t (v status);"))
+        };
+        let catalog = enumerated("CREATE TYPE status AS ENUM ('pending', 'ready')");
+        assert_retyped(
+            &catalog,
+            &enumerated("CREATE TYPE status AS ENUM ('pending', 'done')"),
+        );
+        assert_retyped(
+            &catalog,
+            &enumerated("CREATE TYPE status AS ENUM ('ready', 'pending')"),
+        );
+        assert_retyped(
+            &catalog,
+            &enumerated("CREATE TYPE status AS ENUM ('pending', 'ready', 'done')"),
+        );
+        assert_eq!(
+            judge(
+                &catalog,
+                Some(&enumerated(
+                    "CREATE TYPE status AS ENUM ('pending'); ALTER TYPE status ADD VALUE 'ready'"
+                ))
+            ),
+            Verdict::Unchanged
+        );
+    }
+
+    #[test]
+    fn clickhouse_enum_values_written_or_assigned_compare_alike() {
+        let assigned = shape_with_type::<ClickHouseDialect>("Enum8('ready', 'busy')");
+        let written = shape_with_type::<ClickHouseDialect>("Enum8('busy' = 2, 'ready' = 1)");
+        assert_eq!(judge(&assigned, Some(&written)), Verdict::Unchanged);
     }
 }
