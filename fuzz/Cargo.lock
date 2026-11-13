@@ -363,8 +363,8 @@ dependencies = [
 
 [[package]]
 name = "diesel"
-version = "2.3.14"
-source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
+version = "2.4.0"
+source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -386,9 +386,8 @@ dependencies = [
 
 [[package]]
 name = "diesel-dynamic-schema"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "030a2287b125235908614c5f32f9b3bdc43c4d639846853d66e8a68c75a02756"
+version = "0.3.0"
+source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
 dependencies = [
  "diesel",
 ]
@@ -407,7 +406,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
+source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -416,8 +415,8 @@ dependencies = [
 
 [[package]]
 name = "diesel_derives"
-version = "2.3.10"
-source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
+version = "2.4.0"
+source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -429,8 +428,8 @@ dependencies = [
 
 [[package]]
 name = "diesel_table_macro_syntax"
-version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
+version = "0.4.0"
+source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
 dependencies = [
  "syn 3.0.10",
 ]
@@ -453,8 +452,8 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 
 [[package]]
 name = "dsl_auto_type"
-version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
+version = "0.3.0"
+source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
 dependencies = [
  "darling",
  "either",
@@ -1263,7 +1262,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#7d4872dea57c0f7942cfb3f36a8e8c51a3dd811d"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#ea8cd46d5632df3b4dfa4dac34913acc453a9875"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -1298,9 +1297,8 @@ dependencies = [
 
 [[package]]
 name = "sqlite-diff-rs"
-version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6b7cf9f84c625d13ed34772a25f1a25ddc7ae917e74fd7335a652aa6399e774"
+version = "0.20.0"
+source = "git+https://github.com/connetto-rs/sqlite-diff-rs?branch=main#6f085b7b705d6551265e7a168d08058b4221e757"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
@@ -1364,7 +1362,7 @@ dependencies = [
 [[package]]
 name = "sqlstate"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#961ee1a0ec9afafec4954d65220d6ab61d5cbc6a"
+source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
 
 [[package]]
 name = "stable_try_trait_v2"

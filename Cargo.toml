@@ -20,6 +20,10 @@ sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch 
 sqlparser_derive = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 # rls2fga's `PgBpchar` equality requires the unreleased implementation.
 sql-values = { git = "https://github.com/connetto-rs/sql-values", branch = "main" }
+# Followed at main, whose version the `sqlite-diff-rs` requirement must match for the patch to apply.
+sqlite-diff-rs = { git = "https://github.com/connetto-rs/sqlite-diff-rs", branch = "main" }
+# Lives in diesel-rs, named as `diesel` is above, so it builds against that one diesel.
+diesel-dynamic-schema = { git = "https://github.com/diesel-rs/diesel" }
 
 [package]
 name = "subql"
@@ -164,18 +168,12 @@ diesel = { version = "2", optional = true }
 # `executor-diesel-postgres-r2d2` feature. Ignored otherwise.
 r2d2 = { version = "0.8", optional = true }
 
-# Async diesel execution driver. Backs both async paths: the async
-# re-exec connectors (`src/reexec/async_diesel.rs`) and the async patchset
-# apply methods (`src/patchset/mod.rs`). Off by default and
-# `default-features = false` so its backend selection stays under subql's
-# own feature gates. std-only (diesel-async needs an async runtime). Must
-# resolve to the same diesel node as subql's diesel-rs main patch, which it
-# does because diesel-async's `diesel ~2.3` requirement is satisfied by
-# main.
-diesel-async = { version = "0.9", optional = true, default-features = false }
+# Async re-exec connectors and async patchset apply, with backends chosen by subql's own features.
+# Its `diesel ~2.4.0` requirement is met by the diesel-rs main patch, so both share one diesel.
+diesel-async = { version = "0.10", optional = true, default-features = false }
 
 # SQLite patchsets and digest conversion for both CDC wire formats.
-sqlite-diff-rs = { version = "0.19", default-features = false, features = ["wal2json", "maxwell"] }
+sqlite-diff-rs = { version = "0.20", default-features = false, features = ["wal2json", "maxwell"] }
 # PostgreSQL wal2json parser and model.
 wal2json-events = { version = "0.1.0", default-features = false }
 # MySQL Maxwell parser and model. Direct, like `wal2json-events` and for the
@@ -205,7 +203,7 @@ diesel-sqlite-session = { git = "https://github.com/connetto-rs/diesel-sqlite-se
 #
 # `default-features = false`: its `sqlite` feature is exactly `diesel/sqlite`,
 # which `pg-sqlite-emu` already carries.
-diesel-dynamic-schema = { version = "0.2", default-features = false, optional = true }
+diesel-dynamic-schema = { version = "0.3", default-features = false, optional = true }
 
 # PG-DDL -> SQLite-DDL translator used by the `pg-sqlite-emu` feature
 # (a fake Postgres CDC source layered on SQLite for doctests and fuzz).
@@ -304,7 +302,7 @@ uuid = { version = "1", features = ["v4"] }
 # reached through diesel-async's re-export. Both backends are enabled so a
 # test can target whichever backend regardless of the single library
 # feature it turns on.
-diesel-async = { version = "0.9", default-features = false, features = ["postgres", "mysql", "bb8"] }
+diesel-async = { version = "0.10", default-features = false, features = ["postgres", "mysql", "bb8"] }
 
 # Property-based testing
 proptest = "1"
