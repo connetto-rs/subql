@@ -32,7 +32,7 @@ pub use guard::{
     DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, LiveShapeReader, RefusedTables,
 };
 pub use refusal::{NoRefusals, RefusalView};
-pub use shape::{ColumnShape, ReplicaIdentity, SqlparserDatabase, TableShape};
+pub use shape::{ColumnShape, ReplicaIdentity, TableShape};
 #[cfg(feature = "sqlite-cdc")]
 pub use sqlite::{SqliteLiveReader, SqliteShapeError};
 pub use verdict::{judge, refusal_reasons, Incompatibility, Verdict};

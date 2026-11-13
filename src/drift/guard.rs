@@ -22,7 +22,7 @@ use arc_swap::ArcSwap;
 use sql_traits::prelude::{DatabaseLike, TableLike};
 
 use super::refusal::RefusalView;
-use super::shape::{SqlparserDatabase, TableShape};
+use super::shape::TableShape;
 use super::verdict::{refusal_reasons, Incompatibility};
 use crate::backend::CdcEvent;
 use crate::catalog_helpers;
@@ -226,10 +226,7 @@ where
         inner: S,
         catalog: C,
         mut reader: R,
-    ) -> Result<Self, DriftGuardError<S::Error, R::Error>>
-    where
-        C: SqlparserDatabase,
-    {
+    ) -> Result<Self, DriftGuardError<S::Error, R::Error>> {
         let mut known = BTreeSet::new();
         let refusals = RefusedTables::default();
         let mut pending = VecDeque::new();
@@ -304,7 +301,7 @@ impl<S, C, R> CdcSource for DriftGuard<S, C, R>
 where
     S: CdcSource,
     S::Relation: DriftTableSignal,
-    C: DatabaseLike + SqlparserDatabase,
+    C: DatabaseLike,
     R: LiveShapeReader,
 {
     type Event = S::Event;
@@ -364,7 +361,7 @@ impl<S, C, R> DriftGuard<S, C, R>
 where
     S: CdcSource,
     S::Relation: DriftTableSignal,
-    C: DatabaseLike + SqlparserDatabase,
+    C: DatabaseLike,
     R: LiveShapeReader,
 {
     /// Queue resync output and retain the table judgment across live-read errors and cancellation.

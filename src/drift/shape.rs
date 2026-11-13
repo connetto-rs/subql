@@ -15,39 +15,11 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
-use sql_traits::structs::ParserDB;
 use sql_traits::traits::{
     ArrayDimension, CharacterLengthUnit, CheckConstraintLike, ColumnCollation, DataTypeLike,
     DialectLike, EnumWidth, EnumerationKind, IntervalFields, StructureKind, StructuredField,
     TypeMatch, TypeMatchLike,
 };
-use sqlparser::ast::DataType;
-
-/// A catalog whose declared types are sqlparser's.
-///
-/// sql-traits answers most declared bounds through [`DataTypeLike`]. The
-/// rest are read from the raw sqlparser [`DataType`], whose trait facts
-/// the [`ParserDB`] behind the catalog answers.
-pub trait SqlparserDatabase: DatabaseLike {
-    /// The raw declared type of `column`.
-    fn column_raw_type<'db>(column: &'db Self::Column, database: &'db Self) -> &'db DataType;
-
-    /// The parser catalog that answers the raw types' trait facts.
-    fn parser_database(&self) -> &ParserDB;
-}
-
-impl SqlparserDatabase for ParserDB {
-    fn column_raw_type<'db>(
-        column: &'db <Self as DatabaseLike>::Column,
-        database: &'db Self,
-    ) -> &'db DataType {
-        ColumnLike::data_type(column, database)
-    }
-
-    fn parser_database(&self) -> &ParserDB {
-        self
-    }
-}
 
 /// The replica identity a backend applies to a table's updates and
 /// deletes, where the backend has one.
@@ -79,7 +51,7 @@ struct FieldShape {
 }
 
 impl FieldShape {
-    fn of(field: &StructuredField<'_, DataType>, database: &ParserDB) -> Self {
+    fn of<T: DataTypeLike>(field: &StructuredField<'_, T>, database: &T::DB) -> Self {
         Self {
             name: field.name().map(String::from),
             name_is_quoted: field.name_is_quoted(),
@@ -143,20 +115,12 @@ struct TypeShape {
 }
 
 impl TypeShape {
-    /// The shape of `data_type`, transparent to storage wrappers.
-    fn of(data_type: &DataType, database: &ParserDB) -> Self {
-        let mut declared = data_type;
-        while let DataType::LowCardinality(inner)
-        | DataType::Collate(inner, _)
-        | DataType::Zerofill(inner)
-        | DataType::Nullable(inner) = declared
-        {
-            declared = inner;
-        }
-        let element = declared
+    /// The shape of `data_type` as sql-traits answers it.
+    fn of<T: DataTypeLike>(data_type: &T, database: &T::DB) -> Self {
+        let element = data_type
             .array_element(database)
             .map(|element| Box::new(Self::of(element, database)));
-        let enforces_dimensions = declared.enforces_array_dimensions(database);
+        let enforces_dimensions = data_type.enforces_array_dimensions(database);
         // Without an enforced dimension count, an array is named by its element and one `[]`.
         let normalized = match (enforces_dimensions, &element) {
             (Some(false), Some(element)) => format!("{}[]", element.normalized),
@@ -165,34 +129,34 @@ impl TypeShape {
         Self {
             normalized,
             bounds: TypeBounds {
-                fixed_binary_length: declared.fixed_binary_length(database),
-                max_binary_length: declared.max_binary_length(database),
-                max_bit_length: declared.max_bit_length(database),
-                max_character_length: declared.max_character_length(database),
-                character_length_unit: declared.character_length_unit(database),
-                fractional_seconds_precision: declared.fractional_seconds_precision(database),
-                numeric_precision: declared.numeric_precision(database),
-                numeric_scale: declared.numeric_scale(database),
-                interval_fields: declared.interval_fields(database),
+                fixed_binary_length: data_type.fixed_binary_length(database),
+                max_binary_length: data_type.max_binary_length(database),
+                max_bit_length: data_type.max_bit_length(database),
+                max_character_length: data_type.max_character_length(database),
+                character_length_unit: data_type.character_length_unit(database),
+                fractional_seconds_precision: data_type.fractional_seconds_precision(database),
+                numeric_precision: data_type.numeric_precision(database),
+                numeric_scale: data_type.numeric_scale(database),
+                interval_fields: data_type.interval_fields(database),
                 unsigned: data_type.is_unsigned(database),
             },
-            time_zone: declared.time_zone(database).map(String::from),
+            time_zone: data_type.time_zone(database).map(String::from),
             element,
-            structure_kind: declared.structure_kind(database),
-            fields: declared
+            structure_kind: data_type.structure_kind(database),
+            fields: data_type
                 .structured_fields(database)
                 .into_iter()
                 .flatten()
                 .map(|field| FieldShape::of(&field, database))
                 .collect(),
-            map: declared.map_entry(database).map(|entry| {
+            map: data_type.map_entry(database).map(|entry| {
                 Box::new(MapShape {
                     key: Self::of(entry.key(), database),
                     value: Self::of(entry.value(), database),
                     value_nullable: entry.value_is_nullable(),
                 })
             }),
-            enumeration: declared
+            enumeration: data_type
                 .enumeration(database)
                 .map(|enumeration| EnumerationShape {
                     kind: enumeration.kind(),
@@ -204,7 +168,7 @@ impl TypeShape {
                 }),
             array_dimensions: enforces_dimensions
                 .filter(|enforced| *enforced)
-                .and_then(|_| declared.array_dimension_declarations(database))
+                .and_then(|_| data_type.array_dimension_declarations(database))
                 .map(Iterator::collect),
             admits_null: data_type.admits_null(database),
         }
@@ -274,18 +238,16 @@ impl TableShape {
     ///
     /// A [`sql_traits::errors::LookupError`] when a column, key or check
     /// lookup on the table fails.
-    pub fn from_table<DB: SqlparserDatabase>(
+    pub fn from_table<DB: DatabaseLike>(
         table: &DB::Table,
         database: &DB,
     ) -> Result<Self, sql_traits::errors::LookupError> {
         let mut columns = Vec::new();
-        let parser = database.parser_database();
         for column in table.columns(database)? {
-            let data_type = DB::column_raw_type(column, database);
             let boolean = database.dialect().is_bool(database, column);
             columns.push(ColumnShape {
                 name: column.column_name().to_string(),
-                data_type: TypeShape::of(data_type, parser),
+                data_type: TypeShape::of(column.data_type(database), database),
                 boolean: if boolean.is_yes() {
                     TypeMatch::Yes
                 } else if boolean.is_maybe() {
@@ -910,6 +872,18 @@ mod tests {
         let wider =
             shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(16) COLLATE UTF8_LCASE>");
         assert_retyped(&catalog, &wider);
+    }
+
+    #[test]
+    fn collated_array_elements_and_map_values_keep_their_declared_bounds() {
+        let element = shape_with_type::<DatabricksDialect>("ARRAY<VARCHAR(8) COLLATE UTF8_LCASE>");
+        let wider_element =
+            shape_with_type::<DatabricksDialect>("ARRAY<VARCHAR(16) COLLATE UTF8_LCASE>");
+        assert_retyped(&element, &wider_element);
+        let value = shape_with_type::<DatabricksDialect>("MAP<STRING, VARCHAR(4) COLLATE UNICODE>");
+        let wider_value =
+            shape_with_type::<DatabricksDialect>("MAP<STRING, VARCHAR(8) COLLATE UNICODE>");
+        assert_retyped(&value, &wider_value);
     }
 
     #[test]
