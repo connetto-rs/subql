@@ -67,7 +67,9 @@ pub use checkpoint::{
 };
 #[cfg(feature = "std")]
 pub use clock::StdClock;
-pub use clock::{Clock, ClockHandle, ManualClock};
+#[cfg(feature = "pg-streaming")]
+pub use clock::TokioTimer;
+pub use clock::{Clock, ClockHandle, ManualClock, Timer};
 pub use row_set::{row_set_delta, Row, RowSetDelta};
 pub use sql_traits::{
     prelude::{ColumnLike, DatabaseLike, TableLike},
