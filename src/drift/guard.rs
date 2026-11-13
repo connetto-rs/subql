@@ -1055,6 +1055,51 @@ mod tests {
     }
 
     #[test]
+    fn a_read_failing_during_a_run_beside_the_source_keeps_the_held_item_and_resumes_there() {
+        let catalog = orders_and_ledger();
+        let ledger = table(&catalog, "ledger");
+        let probe = LiveProbe::new(catalog.clone());
+        let clock = Arc::new(ManualClock::new(0));
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let mut guard = build_guard(IdleSource(Arc::clone(&queue)), catalog, &probe, &clock);
+        probe.hold_reads();
+        let position = PgCommitPosition::new(PgLsn(470), PgXid(6), 1);
+        {
+            let mut next = pin!(guard.next_item());
+            assert!(poll_once(next.as_mut()).is_pending());
+            clock.advance(INTERVAL);
+            assert!(poll_once(next.as_mut()).is_pending());
+            queue.lock().push_back(SourceItem::Event(
+                TestEvent::insert(ledger, vec![Value::Int(4)]).with_checkpoint(position),
+            ));
+            assert!(poll_once(next.as_mut()).is_pending());
+            *probe.failing.lock() = Some("ledger");
+            probe.release_reads();
+            assert!(matches!(
+                poll_once(next.as_mut()),
+                Poll::Ready(Err(DriftGuardError::Shape(_)))
+            ));
+        }
+        assert!(
+            queue.lock().is_empty(),
+            "the failed run kept the held event"
+        );
+        assert_eq!(
+            block_on(guard.next_item())
+                .unwrap()
+                .and_then(SourceItem::into_event)
+                .and_then(|event| event.checkpoint()),
+            Some(position),
+            "the resumed run ends and the held event follows"
+        );
+        assert_eq!(
+            probe.reads(),
+            ["ledger", "orders", "ledger", "ledger", "orders"],
+            "the resumed run starts again at the table whose read failed"
+        );
+    }
+
+    #[test]
     fn a_due_run_resumes_at_the_table_whose_read_failed_before_pulling_the_source() {
         let catalog = orders_and_ledger();
         let orders = table(&catalog, "orders");
