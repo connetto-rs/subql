@@ -36,6 +36,10 @@ pub trait Subject {
     /// SQL, or [`None`] for every column, as `SELECT *` reads.
     ///
     /// An empty slice, as `SELECT 1` reads, is granted on the grant of any column.
+    ///
+    /// [`crate::Registered::columns_read`] holds the answer for the registered
+    /// statement, so a watcher keeping it answers with
+    /// [`crate::ColumnsRead::get`].
     fn columns_read(&self, table: TableId) -> Option<&[ColumnId]> {
         let _ = table;
         None

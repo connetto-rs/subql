@@ -20,6 +20,7 @@ use super::{
 use crate::backend::{Backend, ScalarFamily, ScalarTruth, Value};
 use crate::compiler::bytecode::ComparisonRef;
 use crate::compiler::sql_shape::{AggSpec, QueryProjection};
+use crate::compiler::ColumnsRead;
 use crate::table_resolution::{resolve_table_reference, TableResolutionError};
 use crate::term::CompiledTerm;
 use crate::{ColumnId, RegisterError, TableId};
@@ -349,6 +350,9 @@ pub struct CompiledQuery<B: Backend> {
     pub projection: QueryProjection,
     /// The membership terms the filter names, one per slot.
     pub terms: Vec<CompiledTerm>,
+    /// The columns of each table the statement references, read before any
+    /// read rule is folded into its `WHERE` clause.
+    pub columns_read: ColumnsRead,
 }
 
 pub(crate) struct SqlTableName {
@@ -429,6 +433,7 @@ struct ParsedQuery {
     where_clause: Option<Expr>,
     projection: QueryProjection,
     normalized: String,
+    columns_read: ColumnsRead,
 }
 
 fn parse_query_front_half<B, DB>(
@@ -444,6 +449,7 @@ where
 {
     let stmt = sql_shape::parse_single_statement(sql, dialect as &dyn Dialect)?;
     let (table_name, where_clause) = extract_table_and_where(&stmt)?;
+    let columns_read = ColumnsRead::of::<B, DB>(&stmt, database);
     let where_clause = resolve_where_placeholders::<B>(where_clause, binds)?;
     let where_clause = if let Some(rule) = read_rule {
         Some(where_clause.map_or_else(
@@ -466,6 +472,7 @@ where
         where_clause,
         projection,
         normalized,
+        columns_read,
     })
 }
 
@@ -552,6 +559,7 @@ where
         prefilter_plan,
         projection: pq.projection,
         terms,
+        columns_read: pq.columns_read,
     })
 }
 

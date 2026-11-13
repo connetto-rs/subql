@@ -85,6 +85,9 @@ mod caller_term;
 #[cfg(feature = "membership-term")]
 mod read_rule_registration;
 
+#[cfg(feature = "membership-term")]
+mod columns_read;
+
 #[cfg(any(
     feature = "executor-diesel-postgres",
     feature = "executor-diesel-mysql"

@@ -161,6 +161,28 @@ impl Drop for PgDatabase {
     }
 }
 
+/// Whether PostgreSQL runs `sql` as `role`, refusing only for a privilege.
+#[cfg(any(
+    feature = "membership-term",
+    all(feature = "visibility-openfga", feature = "testing")
+))]
+pub fn postgres_allows(pg: &mut PgConnection, role: &str, sql: &str) -> bool {
+    use diesel::connection::SimpleConnection;
+    pg.batch_execute(&format!("SET ROLE {role}"))
+        .expect("set the acting role");
+    let ran = pg.batch_execute(sql);
+    pg.batch_execute("RESET ROLE").expect("reset the role");
+    match ran {
+        Ok(()) => true,
+        Err(diesel::result::Error::DatabaseError(_, info))
+            if info.message().starts_with("permission denied") =>
+        {
+            false
+        }
+        Err(error) => panic!("{sql} as {role} failed for another reason: {error}"),
+    }
+}
+
 /// Create a logical replication slot driven by `wal2json`. Name it through
 /// [`PgDatabase::slot`].
 pub fn create_slot(conn: &mut PgConnection, name: &str) {

@@ -2762,24 +2762,6 @@ const UPDATES: [ColumnCase; 7] = [
     ),
 ];
 
-/// Whether PostgreSQL runs `sql` as `role`, refusing only for a privilege.
-fn postgres_allows(pg: &mut diesel::PgConnection, role: &str, sql: &str) -> bool {
-    use diesel::connection::SimpleConnection;
-    pg.batch_execute(&format!("SET ROLE {role}"))
-        .expect("set the acting role");
-    let ran = pg.batch_execute(sql);
-    pg.batch_execute("RESET ROLE").expect("reset the role");
-    match ran {
-        Ok(()) => true,
-        Err(diesel::result::Error::DatabaseError(_, info))
-            if info.message().starts_with("permission denied") =>
-        {
-            false
-        }
-        Err(error) => panic!("{sql} as {role} failed for another reason: {error}"),
-    }
-}
-
 /// What PostgreSQL answers for every case, on a database holding `schema`.
 fn postgres_answers(prefix: &str, schema: &str) -> Vec<bool> {
     use diesel::connection::SimpleConnection;
@@ -2792,7 +2774,13 @@ fn postgres_answers(prefix: &str, schema: &str) -> Vec<bool> {
     let answers = READS
         .iter()
         .chain(&UPDATES)
-        .map(|case| postgres_allows(&mut pg, &format!("{prefix}_{}", case.role), case.sql))
+        .map(|case| {
+            crate::common::pg::postgres_allows(
+                &mut pg,
+                &format!("{prefix}_{}", case.role),
+                case.sql,
+            )
+        })
         .collect();
     // Roles are cluster-wide, and the table holds every grant they have.
     let roles = ["login", "keeper"]

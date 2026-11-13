@@ -2566,7 +2566,7 @@ const fn qualified_parts(expr: &Expr) -> Option<(Option<&Ident>, &Ident)> {
 }
 
 /// The column a written reference names, quoting kept.
-fn written_column<B: crate::backend::Backend, DB: DatabaseLike>(
+pub(super) fn written_column<B: crate::backend::Backend, DB: DatabaseLike>(
     database: &DB,
     table_id: crate::TableId,
     column: &Ident,
@@ -2583,7 +2583,7 @@ fn written_column<B: crate::backend::Backend, DB: DatabaseLike>(
 ///
 /// `None` when the reference has more parts than a qualifier and a name,
 /// which subql's catalog has nothing to resolve against.
-fn written_table_name(name: &ObjectName) -> Option<TargetName<'_>> {
+pub(super) fn written_table_name(name: &ObjectName) -> Option<TargetName<'_>> {
     let parts: Vec<&Ident> = name
         .0
         .iter()
