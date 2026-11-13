@@ -37,7 +37,7 @@ pub trait LiveCatalog {
         database: &Self::Database,
         table: &<Self::Database as DatabaseLike>::Table,
     ) -> Result<TableShape, Self::Error> {
-        Ok(TableShape::from_table(table, database)?)
+        TableShape::from_table(table, database).map_err(Into::into)
     }
 }
 

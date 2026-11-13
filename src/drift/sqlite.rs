@@ -9,7 +9,9 @@
 //! DDL text. [`InlineLiveReader`](super::InlineLiveReader) serves it to the
 //! guard on any executor.
 
-use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl, SqliteConnection};
+use diesel::{
+    ExpressionMethods, NullableExpressionMethods, QueryDsl, RunQueryDsl, SqliteConnection,
+};
 use sql_traits::errors::LookupError;
 use sql_traits::prelude::{DatabaseLike, TableLike};
 use sql_traits::structs::ParserDB;
@@ -57,15 +59,12 @@ impl LiveCatalog for SqliteConnection {
     /// row stores no text reads as absent, and one whose text declares no
     /// table sql-traits models, such as an FTS5 virtual table, fails.
     fn load_tables(&mut self, tables: &[&str]) -> Result<ParserDB, SqliteShapeError> {
-        let rows: Vec<(String, Option<String>)> = sqlite_schema::table
+        let stored: Vec<(String, String)> = sqlite_schema::table
             .filter(sqlite_schema::kind.eq("table"))
             .filter(sqlite_schema::name.eq_any(tables))
-            .select((sqlite_schema::name, sqlite_schema::sql))
+            .filter(sqlite_schema::sql.is_not_null())
+            .select((sqlite_schema::name, sqlite_schema::sql.assume_not_null()))
             .load(self)?;
-        let stored: Vec<(String, String)> = rows
-            .into_iter()
-            .filter_map(|(name, sql)| Some((name, sql?)))
-            .collect();
         let ddl: Vec<&str> = stored.iter().map(|(_, sql)| sql.as_str()).collect();
         let database = ParserDB::parse::<SQLiteDialect>(&ddl.join(";\n"))?;
         if let Some((name, _)) = stored.iter().find(|(name, _)| {
