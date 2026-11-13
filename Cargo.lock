@@ -529,9 +529,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.11.1"
+version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ff2a8126fff0f8c839080d619675a585e61720bb12d2baceae45769fd66f155"
+checksum = "33ef9e3e8154a45c7a95cff4c1299702106ad94062d7bb85fdc5d3a5afd91d45"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -901,7 +901,7 @@ dependencies = [
 [[package]]
 name = "diesel"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
+source = "git+https://github.com/diesel-rs/diesel#53502c88dbfdfaf00318ca9d1a3a3828360b03b7"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -946,7 +946,7 @@ dependencies = [
 [[package]]
 name = "diesel-dynamic-schema"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
+source = "git+https://github.com/diesel-rs/diesel#53502c88dbfdfaf00318ca9d1a3a3828360b03b7"
 dependencies = [
  "diesel",
 ]
@@ -954,7 +954,7 @@ dependencies = [
 [[package]]
 name = "diesel-sqlite-session"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/diesel-sqlite-session#befee4a5c501e69404f45ddaa94c5f00ba01d00a"
+source = "git+https://github.com/connetto-rs/diesel-sqlite-session#56a21d9a9a8c744b84769c3d9752b6c55dff9d77"
 dependencies = [
  "diesel",
  "libsqlite3-sys",
@@ -965,7 +965,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
+source = "git+https://github.com/diesel-rs/diesel#53502c88dbfdfaf00318ca9d1a3a3828360b03b7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -975,7 +975,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
+source = "git+https://github.com/diesel-rs/diesel#53502c88dbfdfaf00318ca9d1a3a3828360b03b7"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -988,7 +988,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.4.0"
-source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
+source = "git+https://github.com/diesel-rs/diesel#53502c88dbfdfaf00318ca9d1a3a3828360b03b7"
 dependencies = [
  "syn 3.0.10",
 ]
@@ -1046,7 +1046,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
+source = "git+https://github.com/diesel-rs/diesel#53502c88dbfdfaf00318ca9d1a3a3828360b03b7"
 dependencies = [
  "darling",
  "either",
@@ -1977,9 +1977,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.39.1"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
+checksum = "b06e69070b7e12262b0cd90832f0a7396f142a2b330181255562decf9f0c6215"
 dependencies = [
  "bindgen",
  "cc",
@@ -2563,7 +2563,7 @@ dependencies = [
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#37575ec2c1916243f4bc631a7d6622cd2d026225"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#f85296b4c87590ad6abeb2a09d560eff2a84e1d4"
 dependencies = [
  "sql-traits",
  "sql-values 0.5.1",
@@ -3653,7 +3653,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#ea8cd46d5632df3b4dfa4dac34913acc453a9875"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#c4acc146a62a36d34a7bd9252e7c6821b3d6dc6d"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -3715,7 +3715,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#2ddee5541e55ca2d242204175b817f8648c324d2"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#96a5132234dda33aa75ab6d3ef045038f106703a"
 dependencies = [
  "log",
  "recursive",
@@ -3745,7 +3745,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#2ddee5541e55ca2d242204175b817f8648c324d2"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#96a5132234dda33aa75ab6d3ef045038f106703a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3755,7 +3755,7 @@ dependencies = [
 [[package]]
 name = "sqlstate"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#1a1d315e42da4d8fbfd7d219a778283d3e6cdbcf"
+source = "git+https://github.com/diesel-rs/diesel#53502c88dbfdfaf00318ca9d1a3a3828360b03b7"
 
 [[package]]
 name = "stable_deref_trait"
