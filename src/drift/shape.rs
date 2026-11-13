@@ -17,12 +17,11 @@ use core::num::NonZeroU32;
 use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
 use sql_traits::structs::ParserDB;
 use sql_traits::traits::{
-    CheckConstraintLike, ColumnCollation, DataTypeLike, DialectLike, EnumWidth, EnumerationKind,
-    IntervalFields, StructureKind, StructuredField, TypeMatch, TypeMatchLike,
+    CharacterLengthUnit, CheckConstraintLike, ColumnCollation, DataTypeLike, DialectLike,
+    EnumWidth, EnumerationKind, IntervalFields, StructureKind, StructuredField, TypeMatch,
+    TypeMatchLike,
 };
-use sqlparser::ast::{
-    ArrayElemTypeDef, BinaryLength, CharLengthUnits, CharacterLength, DataType, ExactNumberInfo,
-};
+use sqlparser::ast::{ArrayElemTypeDef, DataType};
 
 /// A catalog whose declared types are sqlparser's.
 ///
@@ -71,14 +70,9 @@ pub enum ReplicaIdentity {
 /// Declared type parameters sql-traits does not answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TypeDetail {
-    Exact(u64),
-    Scale(i64),
-    Max,
     Nullable,
     NotNullElements,
-    CharacterUnits(CharLengthUnits),
     ArraySize(Option<u64>),
-    TimeZone(String),
 }
 
 /// A field of a structured type, as sql-traits answers it.
@@ -130,7 +124,10 @@ struct EnumerationShape {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TypeBounds {
     fixed_binary_length: Option<u64>,
+    max_binary_length: Option<u64>,
+    max_bit_length: Option<u64>,
     max_character_length: Option<u64>,
+    character_length_unit: Option<CharacterLengthUnit>,
     fractional_seconds_precision: Option<u64>,
     numeric_precision: Option<u64>,
     numeric_scale: Option<i64>,
@@ -143,6 +140,7 @@ struct TypeBounds {
 struct TypeShape {
     normalized: String,
     bounds: TypeBounds,
+    time_zone: Option<String>,
     element: Option<Box<Self>>,
     structure_kind: Option<StructureKind>,
     fields: Vec<FieldShape>,
@@ -177,7 +175,10 @@ impl TypeShape {
             normalized: data_type.name(database).into_owned(),
             bounds: TypeBounds {
                 fixed_binary_length: declared.fixed_binary_length(database),
+                max_binary_length: declared.max_binary_length(database),
+                max_bit_length: declared.max_bit_length(database),
                 max_character_length: declared.max_character_length(database),
+                character_length_unit: declared.character_length_unit(database),
                 fractional_seconds_precision: declared.fractional_seconds_precision(database),
                 numeric_precision: declared.numeric_precision(database),
                 numeric_scale: declared.numeric_scale(database),
@@ -185,6 +186,7 @@ impl TypeShape {
                 unsigned: data_type.is_unsigned(database),
                 array_dimensions: declared.array_dimensions(database),
             },
+            time_zone: declared.time_zone(database).map(String::from),
             element: declared
                 .array_element(database)
                 .map(|element| Box::new(Self::of(element, database))),
@@ -360,57 +362,6 @@ impl TableShape {
 )]
 fn append_pending_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
     match data_type {
-        DataType::Character(length)
-        | DataType::Char(length)
-        | DataType::CharacterVarying(length)
-        | DataType::CharVarying(length)
-        | DataType::Varchar(length)
-        | DataType::Nvarchar(length)
-        | DataType::NationalCharacter(length)
-        | DataType::NationalCharacterVarying(length)
-        | DataType::NationalChar(length)
-        | DataType::NationalCharVarying(length)
-        | DataType::Nchar(length)
-        | DataType::NcharVarying(length) => {
-            if let Some(CharacterLength::IntegerLength {
-                unit: Some(unit), ..
-            }) = length
-            {
-                details.push(TypeDetail::CharacterUnits(*unit));
-            }
-        }
-        DataType::Clob(width)
-        | DataType::CharacterLargeObject(width)
-        | DataType::CharLargeObject(width)
-        | DataType::Blob(width)
-        | DataType::Bytes(width)
-        | DataType::Bit(width)
-        | DataType::BitVarying(width)
-        | DataType::VarBit(width) => details.extend(width.map(TypeDetail::Exact)),
-        DataType::Float(info)
-        | DataType::FloatUnsigned(info)
-        | DataType::Double(info)
-        | DataType::DoubleUnsigned(info) => match info {
-            ExactNumberInfo::None => {}
-            ExactNumberInfo::Precision(precision) => details.push(TypeDetail::Exact(*precision)),
-            ExactNumberInfo::PrecisionAndScale(precision, scale) => {
-                details.push(TypeDetail::Exact(*precision));
-                details.push(TypeDetail::Scale(*scale));
-            }
-        },
-        DataType::FixedString(width) => details.push(TypeDetail::Exact(*width)),
-        DataType::Varbinary(length) => match length {
-            None => {}
-            Some(BinaryLength::IntegerLength { length }) => {
-                details.push(TypeDetail::Exact(*length));
-            }
-            Some(BinaryLength::Max) => details.push(TypeDetail::Max),
-        },
-        DataType::Datetime64(_, zone) => {
-            if let Some(zone) = zone {
-                details.push(TypeDetail::TimeZone(zone.clone()));
-            }
-        }
         // `array_element` answers the innermost element, so each level's declaration is kept here.
         DataType::Array(_) => {
             let mut level = data_type;
@@ -440,7 +391,34 @@ fn append_pending_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
         | DataType::Collate(..)
         | DataType::LowCardinality(_)
         | DataType::Zerofill(_)
-        // sql-traits answers these types' declared bounds.
+        // sql-traits answers these types' declared bounds, units and zones.
+        | DataType::Character(_)
+        | DataType::Char(_)
+        | DataType::CharacterVarying(_)
+        | DataType::CharVarying(_)
+        | DataType::Varchar(_)
+        | DataType::Nvarchar(_)
+        | DataType::NationalCharacter(_)
+        | DataType::NationalCharacterVarying(_)
+        | DataType::NationalChar(_)
+        | DataType::NationalCharVarying(_)
+        | DataType::Nchar(_)
+        | DataType::NcharVarying(_)
+        | DataType::Clob(_)
+        | DataType::CharacterLargeObject(_)
+        | DataType::CharLargeObject(_)
+        | DataType::Blob(_)
+        | DataType::Bytes(_)
+        | DataType::Bit(_)
+        | DataType::BitVarying(_)
+        | DataType::VarBit(_)
+        | DataType::Float(_)
+        | DataType::FloatUnsigned(_)
+        | DataType::Double(_)
+        | DataType::DoubleUnsigned(_)
+        | DataType::FixedString(_)
+        | DataType::Varbinary(_)
+        | DataType::Datetime64(..)
         | DataType::Binary(_)
         | DataType::String(_)
         | DataType::TinyInt(_)
@@ -1161,5 +1139,39 @@ mod tests {
         let assigned = shape_with_type::<ClickHouseDialect>("Enum8('ready', 'busy')");
         let written = shape_with_type::<ClickHouseDialect>("Enum8('busy' = 2, 'ready' = 1)");
         assert_eq!(judge(&assigned, Some(&written)), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn mysql_blob_lengths_compare_as_the_type_mysql_creates() {
+        let short = shape_with_type::<MySqlDialect>("BLOB(100)");
+        let longer_tiny = shape_with_type::<MySqlDialect>("BLOB(200)");
+        let regular = shape_with_type::<MySqlDialect>("BLOB(300)");
+        assert_eq!(judge(&short, Some(&longer_tiny)), Verdict::Unchanged);
+        assert_retyped(&short, &regular);
+    }
+
+    #[test]
+    fn mysql_float_precision_compares_as_single_or_double() {
+        let narrow = shape_with_type::<MySqlDialect>("FLOAT(10)");
+        let single = shape_with_type::<MySqlDialect>("FLOAT(20)");
+        let double = shape_with_type::<MySqlDialect>("FLOAT(30)");
+        assert_eq!(judge(&narrow, Some(&single)), Verdict::Unchanged);
+        assert_retyped(&narrow, &double);
+    }
+
+    #[test]
+    fn a_bare_bit_holds_one_bit() {
+        let bare = shape_with_type::<PostgreSqlDialect>("BIT");
+        let one = shape_with_type::<PostgreSqlDialect>("BIT(1)");
+        let eight = shape_with_type::<PostgreSqlDialect>("BIT(8)");
+        assert_eq!(judge(&bare, Some(&one)), Verdict::Unchanged);
+        assert_retyped(&bare, &eight);
+    }
+
+    #[test]
+    fn a_bare_sql_server_varbinary_holds_one_byte() {
+        let bare = shape_with_type::<MsSqlDialect>("VARBINARY");
+        let one = shape_with_type::<MsSqlDialect>("VARBINARY(1)");
+        assert_eq!(judge(&bare, Some(&one)), Verdict::Unchanged);
     }
 }
