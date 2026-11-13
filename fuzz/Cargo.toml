@@ -38,6 +38,8 @@ sql-values = { git = "https://github.com/connetto-rs/sql-values", branch = "main
 # diesel-rs main, named as diesel-sqlite-session names it, so the
 # `SqliteConnection` here is the same type it sees.
 diesel = { git = "https://github.com/diesel-rs/diesel" }
+sqlite-diff-rs = { git = "https://github.com/connetto-rs/sqlite-diff-rs", branch = "main" }
+diesel-dynamic-schema = { git = "https://github.com/diesel-rs/diesel" }
 
 [profile.release]
 debug = 1
