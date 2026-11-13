@@ -11,16 +11,19 @@ pub use compiler::vm::refusal::EvaluationRefusal;
 pub use compiler::{
     AggHaving, AggSpec, ColumnsRead, HavingFunction, HavingOp, HavingSubject, QueryProjection,
 };
+#[cfg(feature = "sqlite-cdc")]
+pub use drift::SqliteShapeError;
 pub use drift::{
     judge, refusal_reasons, Incompatibility, NoRefusals, RefusalView, ReplicaIdentity, TableShape,
     Verdict,
 };
+#[cfg(feature = "pg-streaming")]
+pub use drift::{BlockingLiveReader, BlockingReadError};
 #[cfg(feature = "std")]
 pub use drift::{
-    DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, LiveShapeReader, RefusedTables,
+    DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, InlineLiveReader, LiveCatalog,
+    LiveShapeReader, RefusedTables,
 };
-#[cfg(feature = "sqlite-cdc")]
-pub use drift::{SqliteLiveReader, SqliteShapeError};
 pub use errors::*;
 #[cfg(feature = "pg-sqlite-emu")]
 pub use pg_sqlite_emu::{PgSqliteEmuError, PgSqliteEmuSource};

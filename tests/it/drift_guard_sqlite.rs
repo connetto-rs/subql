@@ -1,7 +1,7 @@
 //! DriftGuard over the live SQLite source.
 //!
-//! Every test runs one `DriftGuard` over a real `SqliteCdcSource` and a
-//! real `SqliteLiveReader` against a file-backed database, and writes only
+//! Every test runs one `DriftGuard` over a real `SqliteCdcSource` and an
+//! `InlineLiveReader` over a real `SqliteConnection` to a file-backed database, and writes only
 //! through the guard's inner connection. One table's drift names itself
 //! and is dropped, while the other tables of the same drain keep being
 //! served.
@@ -14,7 +14,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::dialect::SQLiteDialect;
 use subql::backend::{CdcEvent, RowKind, SQLite, Value};
 use subql::drift::{
-    DriftGuard, DriftGuardError, DriftSignal, Incompatibility, SqliteLiveReader, SqliteShapeError,
+    DriftGuard, DriftGuardError, DriftSignal, Incompatibility, InlineLiveReader, SqliteShapeError,
 };
 use subql::sqlite_cdc::{SqliteCdcError, SqliteCdcSource, SqliteChangesetEvent};
 use subql::wal::{CdcSource, SourceItem};
@@ -23,7 +23,12 @@ use subql::ManualClock;
 /// A reconciliation interval no test reaches, since the SQLite source signals every DDL itself.
 const INTERVAL: Duration = Duration::from_mins(1);
 
-type Guard = DriftGuard<SqliteCdcSource<ParserDB>, ParserDB, SqliteLiveReader, ManualClock>;
+type Guard = DriftGuard<
+    SqliteCdcSource<ParserDB>,
+    ParserDB,
+    InlineLiveReader<SqliteConnection>,
+    ManualClock,
+>;
 type Item = SourceItem<SqliteChangesetEvent, core::convert::Infallible, DriftSignal>;
 
 diesel::table! {
@@ -44,7 +49,7 @@ diesel::table! {
     }
 }
 
-/// A file-backed live database, its `SqliteLiveReader` connection and the
+/// A file-backed live database, the reader's own connection to it and the
 /// catalog. The file, not `:memory:`, is what lets the reader's own
 /// connection see the source's database.
 pub fn live_db(catalog_ddl: &str, statements: &[&str]) -> (tempfile::TempDir, Guard) {
@@ -71,7 +76,7 @@ fn live_db_with_source_catalog(
     let guard = subql::testing::block_on(DriftGuard::new(
         source,
         catalog,
-        SqliteLiveReader::new(reader_connection),
+        InlineLiveReader::new(reader_connection),
         INTERVAL,
         ManualClock::new(0),
     ))
@@ -596,7 +601,7 @@ fn locked_live_shape_reads_surface_errors_without_refusing_tables() {
     let startup = subql::testing::block_on(DriftGuard::new(
         source,
         catalog,
-        SqliteLiveReader::new(reader_connection),
+        InlineLiveReader::new(reader_connection),
         INTERVAL,
         ManualClock::new(0),
     ));
