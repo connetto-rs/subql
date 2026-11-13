@@ -10,18 +10,18 @@
 //! replica identity, since a `CREATE TABLE` never declares one.
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::num::NonZeroU32;
 
 use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
 use sql_traits::structs::ParserDB;
 use sql_traits::traits::{
-    CharacterLengthUnit, CheckConstraintLike, ColumnCollation, DataTypeLike, DialectLike,
-    EnumWidth, EnumerationKind, IntervalFields, StructureKind, StructuredField, TypeMatch,
-    TypeMatchLike,
+    ArrayDimension, CharacterLengthUnit, CheckConstraintLike, ColumnCollation, DataTypeLike,
+    DialectLike, EnumWidth, EnumerationKind, IntervalFields, StructureKind, StructuredField,
+    TypeMatch, TypeMatchLike,
 };
-use sqlparser::ast::{ArrayElemTypeDef, DataType};
+use sqlparser::ast::DataType;
 
 /// A catalog whose declared types are sqlparser's.
 ///
@@ -65,14 +65,6 @@ pub enum ReplicaIdentity {
     All,
     /// Every column of the row.
     Full,
-}
-
-/// Declared type parameters sql-traits does not answer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum TypeDetail {
-    Nullable,
-    NotNullElements,
-    ArraySize(Option<u64>),
 }
 
 /// A field of a structured type, as sql-traits answers it.
@@ -133,7 +125,6 @@ struct TypeBounds {
     numeric_scale: Option<i64>,
     interval_fields: Option<IntervalFields>,
     unsigned: Option<bool>,
-    array_dimensions: Option<NonZeroU32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,33 +137,33 @@ struct TypeShape {
     fields: Vec<FieldShape>,
     map: Option<Box<MapShape>>,
     enumeration: Option<EnumerationShape>,
-    details: Vec<TypeDetail>,
+    /// Each enforced dimension's size and element nullability, outermost first.
+    array_dimensions: Option<Vec<ArrayDimension>>,
+    admits_null: bool,
 }
 
 impl TypeShape {
-    /// The shape of `data_type`, transparent to storage wrappers, with `Nullable` kept as a detail.
+    /// The shape of `data_type`, transparent to storage wrappers.
     fn of(data_type: &DataType, database: &ParserDB) -> Self {
         let mut declared = data_type;
-        let mut nullable = false;
-        loop {
-            match declared {
-                DataType::LowCardinality(inner)
-                | DataType::Collate(inner, _)
-                | DataType::Zerofill(inner) => declared = inner,
-                DataType::Nullable(inner) => {
-                    nullable = true;
-                    declared = inner;
-                }
-                _ => break,
-            }
+        while let DataType::LowCardinality(inner)
+        | DataType::Collate(inner, _)
+        | DataType::Zerofill(inner)
+        | DataType::Nullable(inner) = declared
+        {
+            declared = inner;
         }
-        let mut details = Vec::new();
-        append_pending_details(declared, &mut details);
-        if nullable {
-            details.push(TypeDetail::Nullable);
-        }
+        let element = declared
+            .array_element(database)
+            .map(|element| Box::new(Self::of(element, database)));
+        let enforces_dimensions = declared.enforces_array_dimensions(database);
+        // Without an enforced dimension count, an array is named by its element and one `[]`.
+        let normalized = match (enforces_dimensions, &element) {
+            (Some(false), Some(element)) => format!("{}[]", element.normalized),
+            _ => data_type.name(database).into_owned(),
+        };
         Self {
-            normalized: data_type.name(database).into_owned(),
+            normalized,
             bounds: TypeBounds {
                 fixed_binary_length: declared.fixed_binary_length(database),
                 max_binary_length: declared.max_binary_length(database),
@@ -184,12 +175,9 @@ impl TypeShape {
                 numeric_scale: declared.numeric_scale(database),
                 interval_fields: declared.interval_fields(database),
                 unsigned: data_type.is_unsigned(database),
-                array_dimensions: declared.array_dimensions(database),
             },
             time_zone: declared.time_zone(database).map(String::from),
-            element: declared
-                .array_element(database)
-                .map(|element| Box::new(Self::of(element, database))),
+            element,
             structure_kind: declared.structure_kind(database),
             fields: declared
                 .structured_fields(database)
@@ -214,7 +202,11 @@ impl TypeShape {
                         .map(|member| (String::from(member.label()), member.value()))
                         .collect(),
                 }),
-            details,
+            array_dimensions: enforces_dimensions
+                .filter(|enforced| *enforced)
+                .and_then(|_| declared.array_dimension_declarations(database))
+                .map(Iterator::collect),
+            admits_null: data_type.admits_null(database),
         }
     }
 }
@@ -351,170 +343,6 @@ impl TableShape {
     #[must_use]
     pub const fn replica_identity(&self) -> Option<ReplicaIdentity> {
         self.replica_identity
-    }
-}
-
-/// Append the declared facts sql-traits does not answer, keeping their positions inside compound
-/// types.
-#[expect(
-    clippy::too_many_lines,
-    reason = "The exhaustive match accounts for every parser type's metadata."
-)]
-fn append_pending_details(data_type: &DataType, details: &mut Vec<TypeDetail>) {
-    match data_type {
-        // `array_element` answers the innermost element, so each level's declaration is kept here.
-        DataType::Array(_) => {
-            let mut level = data_type;
-            while let DataType::Array(definition) = level {
-                level = match definition {
-                    ArrayElemTypeDef::None => break,
-                    ArrayElemTypeDef::AngleBracket(element)
-                    | ArrayElemTypeDef::Parenthesis(element) => {
-                        details.push(TypeDetail::ArraySize(None));
-                        element
-                    }
-                    ArrayElemTypeDef::ParenthesisNotNull(element) => {
-                        details.push(TypeDetail::ArraySize(None));
-                        details.push(TypeDetail::NotNullElements);
-                        element
-                    }
-                    ArrayElemTypeDef::SquareBracket(element, size)
-                    | ArrayElemTypeDef::Qualified(element, size) => {
-                        details.push(TypeDetail::ArraySize(*size));
-                        element
-                    }
-                };
-            }
-        }
-        // `TypeShape::of` sees through the wrappers before asking for details.
-        DataType::Nullable(_)
-        | DataType::Collate(..)
-        | DataType::LowCardinality(_)
-        | DataType::Zerofill(_)
-        // sql-traits answers these types' declared bounds, units and zones.
-        | DataType::Character(_)
-        | DataType::Char(_)
-        | DataType::CharacterVarying(_)
-        | DataType::CharVarying(_)
-        | DataType::Varchar(_)
-        | DataType::Nvarchar(_)
-        | DataType::NationalCharacter(_)
-        | DataType::NationalCharacterVarying(_)
-        | DataType::NationalChar(_)
-        | DataType::NationalCharVarying(_)
-        | DataType::Nchar(_)
-        | DataType::NcharVarying(_)
-        | DataType::Clob(_)
-        | DataType::CharacterLargeObject(_)
-        | DataType::CharLargeObject(_)
-        | DataType::Blob(_)
-        | DataType::Bytes(_)
-        | DataType::Bit(_)
-        | DataType::BitVarying(_)
-        | DataType::VarBit(_)
-        | DataType::Float(_)
-        | DataType::FloatUnsigned(_)
-        | DataType::Double(_)
-        | DataType::DoubleUnsigned(_)
-        | DataType::FixedString(_)
-        | DataType::Varbinary(_)
-        | DataType::Datetime64(..)
-        | DataType::Binary(_)
-        | DataType::String(_)
-        | DataType::TinyInt(_)
-        | DataType::SmallInt(_)
-        | DataType::MediumInt(_)
-        | DataType::Int(_)
-        | DataType::Integer(_)
-        | DataType::BigInt(_)
-        | DataType::Int2(_)
-        | DataType::Int4(_)
-        | DataType::Int8(_)
-        | DataType::TinyIntUnsigned(_)
-        | DataType::SmallIntUnsigned(_)
-        | DataType::MediumIntUnsigned(_)
-        | DataType::IntUnsigned(_)
-        | DataType::IntegerUnsigned(_)
-        | DataType::BigIntUnsigned(_)
-        | DataType::Int2Unsigned(_)
-        | DataType::Int4Unsigned(_)
-        | DataType::Int8Unsigned(_)
-        | DataType::Time(..)
-        | DataType::Timestamp(..)
-        | DataType::TimestampNtz(_)
-        | DataType::Datetime(_)
-        | DataType::Numeric(_)
-        | DataType::Decimal(_)
-        | DataType::DecimalUnsigned(_)
-        | DataType::Dec(_)
-        | DataType::DecUnsigned(_)
-        | DataType::BigNumeric(_)
-        | DataType::BigDecimal(_)
-        | DataType::Interval { .. }
-        // sql-traits answers these types' fields, entries and members.
-        | DataType::Enum(..)
-        | DataType::Set(_)
-        | DataType::Map(..)
-        | DataType::Struct(..)
-        | DataType::Tuple(_)
-        | DataType::Union(_)
-        | DataType::Nested(_)
-        | DataType::Object(_)
-        // Function return types, which no column declares.
-        | DataType::Table(_)
-        | DataType::NamedTable { .. }
-        // These types declare no parameters.
-        | DataType::Uuid
-        | DataType::TinyBlob
-        | DataType::MediumBlob
-        | DataType::LongBlob
-        | DataType::UTinyInt
-        | DataType::USmallInt
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::Int64
-        | DataType::Int128
-        | DataType::Int256
-        | DataType::HugeInt
-        | DataType::UHugeInt
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64
-        | DataType::UInt128
-        | DataType::UInt256
-        | DataType::UBigInt
-        | DataType::Signed
-        | DataType::SignedInteger
-        | DataType::Unsigned
-        | DataType::UnsignedInteger
-        | DataType::Float4
-        | DataType::Float32
-        | DataType::Float64
-        | DataType::Real
-        | DataType::RealUnsigned
-        | DataType::Float8
-        | DataType::DoublePrecision
-        | DataType::DoublePrecisionUnsigned
-        | DataType::Bool
-        | DataType::Boolean
-        | DataType::Date
-        | DataType::Date32
-        | DataType::JSON
-        | DataType::JSONB
-        | DataType::Regclass
-        | DataType::Text
-        | DataType::TinyText
-        | DataType::MediumText
-        | DataType::LongText
-        | DataType::Bytea
-        | DataType::Custom(..)
-        | DataType::Unspecified
-        | DataType::Trigger
-        | DataType::AnyType
-        | DataType::GeometricType(_)
-        | DataType::TsVector
-        | DataType::TsQuery => {}
     }
 }
 
@@ -661,26 +489,47 @@ mod tests {
     }
 
     #[test]
-    fn array_bounds_preserve_element_width_and_dimension_order() {
-        let catalog = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)[2][3]");
-        let wider_element = shape_with_type::<PostgreSqlDialect>("VARCHAR(16)[2][3]");
-        let swapped_dimensions = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)[3][2]");
-        let unbounded_dimensions = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)[][]");
-        assert_retyped(&catalog, &wider_element);
-        assert_retyped(&catalog, &swapped_dimensions);
-        assert_retyped(&catalog, &unbounded_dimensions);
+    fn enforced_array_sizes_keep_their_order() {
+        let catalog = shape_with_type::<DuckDbDialect>("INTEGER[2][3]");
+        let swapped = shape_with_type::<DuckDbDialect>("INTEGER[3][2]");
+        let lists = shape_with_type::<DuckDbDialect>("INTEGER[][]");
+        let flat = shape_with_type::<DuckDbDialect>("INTEGER[6]");
+        assert_retyped(&catalog, &swapped);
+        assert_retyped(&catalog, &lists);
+        assert_retyped(&catalog, &flat);
     }
 
     #[test]
-    fn qualified_arrays_share_element_and_dimension_bounds() {
+    fn postgres_arrays_compare_only_their_element() {
+        let catalog = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)[2][3]");
+        for unenforced in [
+            "VARCHAR(8)[3][2]",
+            "VARCHAR(8)[][]",
+            "VARCHAR(8)[]",
+            "VARCHAR(8) ARRAY",
+            "CHARACTER VARYING(8)[3]",
+        ] {
+            let live = shape_with_type::<PostgreSqlDialect>(unenforced);
+            assert_eq!(judge(&catalog, Some(&live)), Verdict::Unchanged);
+        }
+        assert_retyped(
+            &catalog,
+            &shape_with_type::<PostgreSqlDialect>("VARCHAR(16)[2][3]"),
+        );
+        assert_retyped(
+            &catalog,
+            &shape_with_type::<PostgreSqlDialect>("VARCHAR(8)"),
+        );
+    }
+
+    #[test]
+    fn qualified_arrays_share_element_bounds() {
         let bracketed = shape_with_type::<PostgreSqlDialect>("VARCHAR(8)[3]");
         let qualified = shape_with_type::<PostgreSqlDialect>("VARCHAR(8) ARRAY[3]");
         let wider_element = shape_with_type::<PostgreSqlDialect>("VARCHAR(16) ARRAY[3]");
-        let unbounded = shape_with_type::<PostgreSqlDialect>("VARCHAR(8) ARRAY");
         assert!(bracketed.columns()[0].type_matches(&qualified.columns()[0]));
         assert_eq!(judge(&bracketed, Some(&qualified)), Verdict::Unchanged);
         assert_retyped(&qualified, &wider_element);
-        assert_retyped(&qualified, &unbounded);
     }
 
     #[test]
@@ -839,9 +688,9 @@ mod tests {
 
     #[test]
     fn omitted_array_dimensions_keep_their_positions() {
-        let outer_bound = shape_with_type::<PostgreSqlDialect>("INTEGER[][3]");
-        let inner_bound = shape_with_type::<PostgreSqlDialect>("INTEGER[3][]");
-        let equivalent = shape_with_type::<PostgreSqlDialect>("INT[][3]");
+        let outer_bound = shape_with_type::<DuckDbDialect>("INTEGER[][3]");
+        let inner_bound = shape_with_type::<DuckDbDialect>("INTEGER[3][]");
+        let equivalent = shape_with_type::<DuckDbDialect>("INT[][3]");
         assert_retyped(&outer_bound, &inner_bound);
         assert_eq!(judge(&outer_bound, Some(&equivalent)), Verdict::Unchanged);
     }
