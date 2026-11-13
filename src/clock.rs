@@ -1,16 +1,21 @@
-//! Time abstraction for rate-limiting decisions.
+//! Time abstraction for rate-limiting and reconciliation decisions.
 //!
 //! The auto-resolving engines use a [`Clock`] to debounce re-executions
 //! per captured query. The trait is intentionally minimal: a single
 //! `now_micros()` method returning a monotonically non-decreasing
-//! microsecond counter from some implementation-defined origin.
+//! microsecond counter from some implementation-defined origin. A
+//! [`Timer`] also wakes a task at a reading, which the drift guard's
+//! reconciliation awaits.
 //!
 //! [`StdClock`] is the default, available under the `std` feature. It
 //! reads `std::time::Instant`. [`ManualClock`] is for tests and ticks
-//! only when the test calls [`ManualClock::advance`].
+//! only when the test calls [`ManualClock::advance`]. `TokioTimer`, under
+//! the `pg-streaming` feature, reads and sleeps on tokio's clock.
 
 use alloc::sync::Arc;
+use core::future::{poll_fn, Future};
 use core::sync::atomic::{AtomicU64, Ordering};
+use core::task::Poll;
 use core::time::Duration;
 
 /// Monotonic time source.
@@ -121,6 +126,88 @@ impl Clock for ManualClock {
     }
 }
 
+/// A [`Clock`] that wakes a waiting task once it reaches a reading.
+///
+/// [`DriftGuard`](crate::drift::DriftGuard) awaits one to start each
+/// reconciliation run, so a run starts on an idle stream too.
+pub trait Timer: Clock {
+    /// Complete once [`Clock::now_micros`] reaches `deadline_micros`.
+    fn sleep_until(&self, deadline_micros: u64) -> impl Future<Output = ()> + Send + '_;
+}
+
+impl<C: Clock + ?Sized> Clock for Arc<C> {
+    fn now_micros(&self) -> u64 {
+        (**self).now_micros()
+    }
+}
+
+impl<T: Timer> Timer for Arc<T> {
+    fn sleep_until(&self, deadline_micros: u64) -> impl Future<Output = ()> + Send + '_ {
+        (**self).sleep_until(deadline_micros)
+    }
+}
+
+/// A manual clock has no task to wake when it advances, so its sleep asks
+/// to be polled again until the reading reaches the deadline.
+impl Timer for ManualClock {
+    fn sleep_until(&self, deadline_micros: u64) -> impl Future<Output = ()> + Send + '_ {
+        poll_fn(move |context| {
+            if self.now_micros() >= deadline_micros {
+                Poll::Ready(())
+            } else {
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+    }
+}
+
+/// A [`Timer`] on tokio's clock, so it follows `tokio::time::pause`.
+#[cfg(feature = "pg-streaming")]
+#[derive(Debug)]
+pub struct TokioTimer {
+    origin: tokio::time::Instant,
+}
+
+#[cfg(feature = "pg-streaming")]
+impl TokioTimer {
+    /// A timer whose readings count from now.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            origin: tokio::time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(feature = "pg-streaming")]
+impl Default for TokioTimer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "pg-streaming")]
+impl Clock for TokioTimer {
+    fn now_micros(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+}
+
+/// The furthest a [`TokioTimer`] sleeps, which every platform's `Instant`
+/// reaches from its origin and no run waits for.
+#[cfg(feature = "pg-streaming")]
+const FAR_FUTURE: Duration = Duration::from_hours(30 * 365 * 24);
+
+#[cfg(feature = "pg-streaming")]
+impl Timer for TokioTimer {
+    fn sleep_until(&self, deadline_micros: u64) -> impl Future<Output = ()> + Send + '_ {
+        tokio::time::sleep_until(
+            self.origin + Duration::from_micros(deadline_micros).min(FAR_FUTURE),
+        )
+    }
+}
+
 /// Compute the elapsed [`Duration`] between two `now_micros` readings.
 ///
 /// Saturates at zero when the clock somehow went backwards (the trait's
@@ -134,3 +221,21 @@ pub const fn duration_between(earlier_micros: u64, later_micros: u64) -> Duratio
 /// Shared clock handle: an `Arc<dyn Clock>` typedef used by the engines
 /// to store and clone clocks cheaply.
 pub type ClockHandle = Arc<dyn Clock>;
+
+#[cfg(all(test, feature = "pg-streaming"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_tokio_timer_wakes_at_its_deadline_and_not_before() {
+        let timer = TokioTimer::default();
+        let deadline = timer.now_micros() + 2_000;
+        timer.sleep_until(deadline).await;
+        assert!(timer.now_micros() >= deadline);
+        let far = tokio::time::timeout(Duration::from_millis(5), timer.sleep_until(u64::MAX));
+        assert!(
+            far.await.is_err(),
+            "a deadline past the far future never comes"
+        );
+    }
+}

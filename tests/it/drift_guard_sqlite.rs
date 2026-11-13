@@ -7,6 +7,8 @@
 //! served.
 #![allow(clippy::unwrap_used)]
 
+use core::time::Duration;
+
 use diesel::{sql_query, Connection, ExpressionMethods, RunQueryDsl, SqliteConnection};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::SQLiteDialect;
@@ -16,8 +18,12 @@ use subql::drift::{
 };
 use subql::sqlite_cdc::{SqliteCdcError, SqliteCdcSource, SqliteChangesetEvent};
 use subql::wal::{CdcSource, SourceItem};
+use subql::ManualClock;
 
-type Guard = DriftGuard<SqliteCdcSource<ParserDB>, ParserDB, SqliteLiveReader>;
+/// A reconciliation interval no test reaches, since the SQLite source signals every DDL itself.
+const INTERVAL: Duration = Duration::from_mins(1);
+
+type Guard = DriftGuard<SqliteCdcSource<ParserDB>, ParserDB, SqliteLiveReader, ManualClock>;
 type Item = SourceItem<SqliteChangesetEvent, core::convert::Infallible, DriftSignal>;
 
 diesel::table! {
@@ -66,6 +72,8 @@ fn live_db_with_source_catalog(
         source,
         catalog,
         SqliteLiveReader::new(reader_connection),
+        INTERVAL,
+        ManualClock::new(0),
     ))
     .unwrap();
     (dir, guard)
@@ -589,6 +597,8 @@ fn locked_live_shape_reads_surface_errors_without_refusing_tables() {
         source,
         catalog,
         SqliteLiveReader::new(reader_connection),
+        INTERVAL,
+        ManualClock::new(0),
     ));
     assert!(matches!(
         startup,
