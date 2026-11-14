@@ -235,11 +235,12 @@ mod tests {
             Ok(ParserDB::parse::<PostgreSqlDialect>(self.ddl).unwrap())
         }
 
+        /// Compares names as SQLite does, folding both sides.
         fn find_table<'d>(
             database: &'d ParserDB,
             table: TargetName<'_>,
         ) -> Result<Option<&'d <ParserDB as DatabaseLike>::Table>, FakeError> {
-            Ok(database.table_by_target(table, IdentifierCase::AsWritten)?)
+            Ok(database.table_by_target(table, IdentifierCase::Folded)?)
         }
     }
 
@@ -300,6 +301,23 @@ mod tests {
                 Poll::Ready(Err(FakeError::Refused))
             ),
             "an inline read answers within its first poll, with no runtime"
+        );
+    }
+
+    #[test]
+    fn a_read_whose_name_matches_two_tables_answers_the_lookup_error() {
+        let mut reader = InlineLiveReader::new(FakeCatalog::new(
+            "CREATE TABLE orders (id INT PRIMARY KEY);
+             CREATE TABLE \"Orders\" (id INT PRIMARY KEY);",
+            [],
+        ));
+        let answer = block_on(reader.shape(named("orders")));
+        assert!(
+            matches!(
+                answer,
+                Err(FakeError::Lookup(LookupError::AmbiguousTableLookup { .. }))
+            ),
+            "{answer:?}"
         );
     }
 
