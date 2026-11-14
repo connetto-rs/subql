@@ -40,7 +40,7 @@ pub use live::{BlockingLiveReader, BlockingReadError};
 #[cfg(feature = "std")]
 pub use live::{InlineLiveReader, LiveCatalog};
 pub use refusal::{NoRefusals, RefusalView};
-pub use shape::{ColumnShape, ReplicaIdentity, TableShape};
+pub use shape::{ColumnShape, Publication, PublishedChange, ReplicaIdentity, TableShape};
 #[cfg(feature = "sqlite-cdc")]
 pub use sqlite::SqliteShapeError;
 pub use verdict::{judge, refusal_reasons, Incompatibility, Verdict};

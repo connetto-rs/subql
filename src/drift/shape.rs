@@ -39,6 +39,40 @@ pub enum ReplicaIdentity {
     Full,
 }
 
+/// A kind of change a publication can stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PublishedChange {
+    /// A row inserted.
+    Insert,
+    /// A row updated.
+    Update,
+    /// A row deleted.
+    Delete,
+    /// The table truncated.
+    Truncate,
+}
+
+impl PublishedChange {
+    /// Every kind of change, in this order.
+    pub const ALL: [Self; 4] = [Self::Insert, Self::Update, Self::Delete, Self::Truncate];
+}
+
+/// What the source's publication streams of a table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Publication {
+    /// The publication does not carry the table.
+    Unpublished,
+    /// The publication carries the table.
+    Published {
+        /// The kinds of change it streams.
+        operations: Vec<PublishedChange>,
+        /// The columns it streams, or `None` when it streams every column.
+        columns: Option<Vec<String>>,
+        /// The text of its row filter, or `None` when it streams every row.
+        row_filter: Option<String>,
+    },
+}
+
 /// A field of a structured type, as sql-traits answers it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FieldShape {
@@ -229,6 +263,9 @@ pub struct TableShape {
     checks: Vec<String>,
     /// The replica identity, where the backend has one.
     replica_identity: Option<ReplicaIdentity>,
+    /// What the source's publication streams of the table, where the
+    /// backend has publications.
+    publication: Option<Publication>,
 }
 
 impl TableShape {
@@ -272,6 +309,7 @@ impl TableShape {
             primary_key,
             checks,
             replica_identity: None,
+            publication: None,
         })
     }
 
@@ -280,6 +318,14 @@ impl TableShape {
     #[must_use]
     pub const fn with_replica_identity(mut self, identity: ReplicaIdentity) -> Self {
         self.replica_identity = Some(identity);
+        self
+    }
+
+    /// State what the source's publication streams of the table, on a shape
+    /// the live side read from a backend that has publications.
+    #[must_use]
+    pub fn with_publication(mut self, publication: Publication) -> Self {
+        self.publication = Some(publication);
         self
     }
 
@@ -305,6 +351,13 @@ impl TableShape {
     #[must_use]
     pub const fn replica_identity(&self) -> Option<ReplicaIdentity> {
         self.replica_identity
+    }
+
+    /// What the source's publication streams of the table, where the
+    /// backend has publications.
+    #[must_use]
+    pub const fn publication(&self) -> Option<&Publication> {
+        self.publication.as_ref()
     }
 }
 
