@@ -333,7 +333,7 @@ pub fn refusal_reasons(
 mod tests {
     use super::*;
     use crate::drift::test_dialect::TestDialect;
-    use alloc::vec;
+    use alloc::{format, vec};
     use sql_traits::prelude::DatabaseLike;
     use sql_traits::structs::ParserDB;
     use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect};
@@ -757,6 +757,64 @@ mod tests {
     }
 
     #[test]
+    fn postgres_names_an_unquoted_column_and_key_as_it_stores_them() {
+        let (catalog, live) = postgres(
+            "CREATE TABLE t1 (ID INTEGER PRIMARY KEY, Amount INTEGER, \"Note\" TEXT)",
+            "CREATE TABLE t1 (id INTEGER PRIMARY KEY, amount INTEGER, \"Note\" TEXT)",
+        );
+        assert_eq!(judge(&catalog, live.as_ref()), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn postgres_keeps_a_quoted_column_apart_from_its_folded_spelling() {
+        let (catalog, live) = postgres(
+            "CREATE TABLE t1 (id INTEGER PRIMARY KEY, \"Amount\" INTEGER)",
+            "CREATE TABLE t1 (id INTEGER PRIMARY KEY, amount INTEGER)",
+        );
+        assert_eq!(
+            judge(&catalog, live.as_ref()),
+            Verdict::Incompatible {
+                reasons: vec![Incompatibility::ColumnDropped {
+                    column: "Amount".into()
+                }]
+            }
+        );
+    }
+
+    #[test]
+    fn sqlite_matches_column_and_key_names_whatever_their_case_or_quoting() {
+        let (catalog, live) = sqlite(
+            "CREATE TABLE t1 (\"ID\" INTEGER PRIMARY KEY, \"Amount\" INTEGER)",
+            "CREATE TABLE t1 (id INTEGER PRIMARY KEY, amount INTEGER)",
+        );
+        assert_eq!(judge(&catalog, live.as_ref()), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn quoted_names_differing_in_whitespace_or_composition_stay_apart() {
+        for (catalog_column, live_column) in [
+            ("\"amount \"", "\"amount\""),
+            ("\"caf\u{e9}\"", "\"cafe\u{301}\""),
+        ] {
+            let catalog =
+                format!("CREATE TABLE t1 (id INTEGER PRIMARY KEY, {catalog_column} INTEGER)");
+            let live = format!("CREATE TABLE t1 (id INTEGER PRIMARY KEY, {live_column} INTEGER)");
+            let dropped = catalog_column.trim_matches('"');
+            for (catalog, live) in [postgres(&catalog, &live), sqlite(&catalog, &live)] {
+                assert_eq!(
+                    judge(&catalog, live.as_ref()),
+                    Verdict::Incompatible {
+                        reasons: vec![Incompatibility::ColumnDropped {
+                            column: dropped.into()
+                        }]
+                    },
+                    "{catalog_column} against {live_column}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_missing_table_is_incompatible() {
         let catalog = shape_of::<SQLiteDialect>(BASE);
         assert_eq!(
@@ -829,6 +887,18 @@ mod tests {
                 }]
             }
         );
+    }
+
+    #[test]
+    fn a_column_list_names_an_unquoted_catalog_column_by_its_stored_name() {
+        let ddl = "CREATE TABLE t1 (ID INTEGER PRIMARY KEY, Amount INTEGER)";
+        let catalog = shape_of::<PostgreSqlDialect>(ddl);
+        let live = shape_of::<PostgreSqlDialect>(ddl).with_publication(Publication::Published {
+            operations: PublishedChange::ALL.to_vec(),
+            columns: Some(vec!["id".into(), "amount".into()]),
+            row_filter: None,
+        });
+        assert_eq!(judge(&catalog, Some(&live)), Verdict::Unchanged);
     }
 
     #[test]
