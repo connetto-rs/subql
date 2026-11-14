@@ -222,6 +222,18 @@ impl JsonDocument for SqliteJson {
     }
 }
 
+/// How a backend names a column's declared type, so a catalog's type and a
+/// live table's type compare as one when the engine reads them as one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeNames {
+    /// The name the type is declared with.
+    Declared,
+    /// PostgreSQL's canonical name, sql-traits' `normalized_name`, under
+    /// which `INT4`, `integer` and `INT` are one type, as are `TIMESTAMPTZ`
+    /// and `timestamp with time zone`.
+    Postgres,
+}
+
 /// One SQL database subql observes.
 ///
 /// An implementation names a database (via its sqlparser dialect) and
@@ -326,6 +338,14 @@ pub trait Backend: 'static {
     ///
     /// Required because PostgreSQL wire values and written identifiers differ.
     const WIRE_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase;
+
+    /// How a declared type is named when a catalog shape meets a live one.
+    ///
+    /// Required because the engines disagree. PostgreSQL's catalog answers
+    /// its own spelling of a type the DDL wrote another way, while
+    /// PostgreSQL's normalization would read a MySQL or SQLite `FLOAT`,
+    /// which MySQL stores in four bytes, as `DOUBLE PRECISION`.
+    const TYPE_NAMES: TypeNames;
 
     /// The width an arithmetic result is held at, given each operand's
     /// width, or `None` when the operation is not on floats.

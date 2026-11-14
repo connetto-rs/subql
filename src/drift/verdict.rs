@@ -332,19 +332,16 @@ pub fn refusal_reasons(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::drift::test_dialect::TestDialect;
     use alloc::vec;
     use sql_traits::prelude::DatabaseLike;
     use sql_traits::structs::ParserDB;
-    use sqlparser::dialect::{Dialect, PostgreSqlDialect, SQLiteDialect};
+    use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 
-    fn parse<D: Dialect + core::default::Default>(ddl: &str) -> ParserDB {
-        ParserDB::parse::<D>(ddl).expect("DDL parses")
-    }
-
-    fn shape_of<D: Dialect + core::default::Default>(ddl: &str) -> TableShape {
-        let db = parse::<D>(ddl);
+    fn shape_of<D: TestDialect>(ddl: &str) -> TableShape {
+        let db = ParserDB::parse::<D>(ddl).expect("DDL parses");
         let table = db.tables().next().expect("one table");
-        TableShape::from_table(table, &db).expect("shape builds")
+        TableShape::from_table::<D::Backend, _>(table, &db).expect("shape builds")
     }
 
     fn sqlite(catalog: &str, live: &str) -> (TableShape, Option<TableShape>) {
@@ -730,6 +727,31 @@ mod tests {
                         live: vec!["id".into(), "v".into()],
                     },
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn postgres_compares_types_under_its_own_names_for_them() {
+        let (catalog, live) = postgres(
+            "CREATE TABLE t1 (id INT4 PRIMARY KEY, at TIMESTAMPTZ, ratio FLOAT, share FLOAT8)",
+            "CREATE TABLE t1 (id INTEGER PRIMARY KEY, at TIMESTAMP WITH TIME ZONE, ratio DOUBLE PRECISION, share DOUBLE PRECISION)",
+        );
+        assert_eq!(judge(&catalog, live.as_ref()), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn mysql_keeps_a_single_precision_float_apart_from_double() {
+        let catalog = shape_of::<MySqlDialect>("CREATE TABLE t1 (id INT PRIMARY KEY, v FLOAT)");
+        let live = shape_of::<MySqlDialect>("CREATE TABLE t1 (id INT PRIMARY KEY, v DOUBLE)");
+        assert_eq!(
+            judge(&catalog, Some(&live)),
+            Verdict::Incompatible {
+                reasons: vec![Incompatibility::ColumnRetyped {
+                    column: "v".into(),
+                    catalog: "FLOAT".into(),
+                    live: "DOUBLE".into(),
+                }]
             }
         );
     }

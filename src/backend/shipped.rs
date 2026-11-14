@@ -231,6 +231,9 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> Backend for Postgres<V> {
     const WIRE_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase =
         sql_traits::structs::IdentifierCase::Exact;
 
+    /// PostgreSQL's catalog answers its own spelling of every type.
+    const TYPE_NAMES: crate::backend::TypeNames = crate::backend::TypeNames::Postgres;
+
     /// Measured on 16.11. Equality under a deterministic collation is byte
     /// equality, including for the database default, since `CREATE
     /// DATABASE` cannot select a nondeterministic collation. Ordering is
@@ -541,6 +544,10 @@ impl<C: MySqlTableNameCase> Backend for MySql<C> {
 
     /// Reported names follow the same server setting.
     const WIRE_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase = C::TABLE_NAME_CASE;
+
+    /// A bare MySQL `FLOAT` is single precision, which PostgreSQL's names
+    /// would read as double.
+    const TYPE_NAMES: crate::backend::TypeNames = crate::backend::TypeNames::Declared;
 
     /// Measured: MySQL answers `NULL` with warning 1365, even with
     /// `ERROR_FOR_DIVISION_BY_ZERO` in `sql_mode`, which raises on writes.
@@ -983,6 +990,9 @@ impl Backend for SQLite {
     /// SQLite reports names under the same folded comparison.
     const WIRE_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase =
         sql_traits::structs::IdentifierCase::Folded;
+
+    /// SQLite stores the declared type as written.
+    const TYPE_NAMES: crate::backend::TypeNames = crate::backend::TypeNames::Declared;
 
     fn compare_cross_kind_numeric(
         left: &Value<Self>,

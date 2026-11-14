@@ -52,6 +52,7 @@ pub enum SqliteShapeError {
 }
 
 impl LiveCatalog for SqliteConnection {
+    type Backend = SQLite;
     type Database = ParserDB;
     type Error = SqliteShapeError;
 
