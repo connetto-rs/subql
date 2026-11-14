@@ -496,9 +496,9 @@ dependencies = [
 
 [[package]]
 name = "bumpalo"
-version = "3.20.3"
+version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+checksum = "87a0cf66fd1eb2fb7b822cb78370d82303750809bc6ba855f3f58e517d3238db"
 
 [[package]]
 name = "bytemuck"
@@ -1852,6 +1852,7 @@ checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
 dependencies = [
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb",
  "jiff-tzdb-platform",
  "log",
  "portable-atomic",
@@ -2208,9 +2209,9 @@ checksum = "c505b3e17ed6b70a7ed2e67fbb2c560ee327353556120d6e72f5232b6880d536"
 
 [[package]]
 name = "mio"
-version = "1.2.4"
+version = "1.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+checksum = "20521a903f02b0a573cd6840e9d0a5a0cc043d361fe924092cd70f8556cc9c4a"
 dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
@@ -2563,7 +2564,7 @@ dependencies = [
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#f85296b4c87590ad6abeb2a09d560eff2a84e1d4"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#8f94d59671d89c589a08e1d0a6f65185f48c311a"
 dependencies = [
  "sql-traits",
  "sql-values 0.5.1",
@@ -2575,7 +2576,7 @@ dependencies = [
 [[package]]
 name = "pg_walstream"
 version = "0.10.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#c0a309d959584f4b907e344af6cb997ad333a253"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#bf98459624e43ff353716e4284a750e29b823a97"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -3186,7 +3187,7 @@ dependencies = [
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#29ac7711e4b66e4f8ed7efa8b3272aba37903b6f"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#bc05696fa09c7405d6db7e5a2c640e260080060d"
 dependencies = [
  "openfga-client",
  "prost",
@@ -3194,7 +3195,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sql-traits",
- "sql-values 0.5.1",
+ "sql-values 0.6.0",
  "sqlparser",
  "thiserror",
 ]
@@ -3202,10 +3203,10 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#29ac7711e4b66e4f8ed7efa8b3272aba37903b6f"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#bc05696fa09c7405d6db7e5a2c640e260080060d"
 dependencies = [
  "serde",
- "sql-values 0.5.1",
+ "sql-values 0.6.0",
  "thiserror",
 ]
 
@@ -3653,7 +3654,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#c4acc146a62a36d34a7bd9252e7c6821b3d6dc6d"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#42605ce3fb54e013338a32393e7cb82ea0d4acce"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -3681,8 +3682,19 @@ dependencies = [
 [[package]]
 name = "sql-values"
 version = "0.5.1"
-source = "git+https://github.com/connetto-rs/sql-values?branch=main#8207674b24768b1f654b9f7129de22b5059a63d4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa63391be723434747b0c2ffc2e7270f4a7a476d083b55cdda961c4773d1d5e4"
 dependencies = [
+ "jiff",
+ "thiserror",
+]
+
+[[package]]
+name = "sql-values"
+version = "0.6.0"
+source = "git+https://github.com/connetto-rs/sql-values?branch=main#7c18726d135c2f8d685d3d89915bf6d228d84351"
+dependencies = [
+ "jiff",
  "thiserror",
 ]
 

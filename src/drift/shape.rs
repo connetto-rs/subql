@@ -232,7 +232,7 @@ pub struct ColumnShape {
 }
 
 impl ColumnShape {
-    /// The column's name, unqualified as the catalog stores it.
+    /// The column's unqualified name, in the form its backend compares names.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -293,7 +293,7 @@ impl TableShape {
         for column in table.columns(database)? {
             let boolean = database.dialect().is_bool(database, column);
             columns.push(ColumnShape {
-                name: column.column_name().to_string(),
+                name: column_name::<B, DB>(column),
                 data_type: TypeShape::of(column.data_type(database), database, B::TYPE_NAMES),
                 boolean: if boolean.is_yes() {
                     TypeMatch::Yes
@@ -308,7 +308,7 @@ impl TableShape {
         }
         let primary_key = table
             .primary_key_columns(database)?
-            .map(|column| column.column_name().to_string())
+            .map(column_name::<B, DB>)
             .collect();
         let checks = table
             .check_constraints(database)?
@@ -369,6 +369,13 @@ impl TableShape {
     pub const fn publication(&self) -> Option<&Publication> {
         self.publication.as_ref()
     }
+}
+
+/// The name `column` compares under in backend `B`.
+fn column_name<B: Backend, DB: DatabaseLike>(column: &DB::Column) -> String {
+    B::COLUMN_NAME_CASE
+        .compared_form(column.column_name(), column.column_name_is_quoted())
+        .into_owned()
 }
 
 #[cfg(test)]
