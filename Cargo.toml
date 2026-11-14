@@ -96,7 +96,9 @@ sqlparser = { version = "0.64", default-features = false, features = ["visitor"]
 # `default-features = false` follows sql-traits' own gating. The `std`
 # feature is propagated below. `serde` derives the names and collation facts
 # a compiled program persists, which is why subql carries no copy of them.
-sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "main", default-features = false, features = ["serde"] }
+# `canonicalize` proves the casts and constants PostgreSQL's deparse of a
+# `CHECK` writes, so a declared `CHECK` and the server's read as one.
+sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "main", default-features = false, features = ["serde", "canonicalize"] }
 
 sql-values = { version = "0.3", features = ["decimal", "serde"] }
 

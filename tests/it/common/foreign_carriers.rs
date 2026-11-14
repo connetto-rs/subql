@@ -51,6 +51,7 @@ impl Backend for ForeignCarriers {
     const WIRE_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase =
         sql_traits::structs::IdentifierCase::Exact;
     const TYPE_NAMES: subql::backend::TypeNames = subql::backend::TypeNames::Postgres;
+    const CHECK_TEXTS: subql::backend::CheckTexts = subql::backend::CheckTexts::Postgres;
     const DIVISION_BY_ZERO: DivisionByZero = DivisionByZero::Fails;
     const INTEGER_OVERFLOW: IntegerOverflow = IntegerOverflow::Fails;
     const DIVISION: DivisionRule = DivisionRule::QuotientsAreDecimalInWords;

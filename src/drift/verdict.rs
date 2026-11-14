@@ -781,6 +781,61 @@ mod tests {
         );
     }
 
+    /// Each live `CHECK` is spelled as PostgreSQL 18's `pg_get_constraintdef`
+    /// returns the declared one.
+    #[test]
+    fn postgres_compares_checks_as_its_deparse_spells_them() {
+        let (catalog, live) = postgres(
+            "CREATE TABLE t1 (id INTEGER PRIMARY KEY, s TEXT CHECK (s <> ''), \
+             k TEXT CHECK (k IN ('a', 'b')), i INTEGER CHECK (t1.i = '7'))",
+            "CREATE TABLE t1 (id INTEGER PRIMARY KEY, s TEXT CHECK ((s <> ''::text)), \
+             k TEXT CHECK ((k = ANY (ARRAY['a'::text, 'b'::text]))), i INTEGER CHECK ((i = 7)))",
+        );
+        assert_eq!(judge(&catalog, live.as_ref()), Verdict::Unchanged);
+    }
+
+    /// The second pair's operator has no canonical spelling yet, so its
+    /// `CHECK`s compare as written.
+    #[test]
+    fn postgres_refuses_a_changed_check() {
+        for (catalog_check, live_check) in [("s <> ''", "(s <> 'x'::text)"), ("s ~ 'a'", "s ~ 'b'")]
+        {
+            let (catalog, live) = postgres(
+                &format!("CREATE TABLE t1 (id INTEGER PRIMARY KEY, s TEXT CHECK ({catalog_check}))"),
+                &format!("CREATE TABLE t1 (id INTEGER PRIMARY KEY, s TEXT CHECK ({live_check}))"),
+            );
+            let verdict = judge(&catalog, live.as_ref());
+            assert!(
+                matches!(
+                    &verdict,
+                    Verdict::Incompatible { reasons }
+                        if matches!(reasons.as_slice(), [Incompatibility::CheckChanged { .. }])
+                ),
+                "{catalog_check} against {live_check}: {verdict:?}"
+            );
+        }
+    }
+
+    /// SQLite compares two columns under the left one's collation, "with
+    /// precedence to the left operand" (<https://www.sqlite.org/datatype3.html#collation>),
+    /// so swapped operands make another `CHECK`.
+    #[test]
+    fn sqlite_keeps_the_operand_order_of_a_check() {
+        let (catalog, live) = sqlite(
+            "CREATE TABLE t1 (id INTEGER PRIMARY KEY, a TEXT COLLATE NOCASE, b TEXT, CHECK (a = b))",
+            "CREATE TABLE t1 (id INTEGER PRIMARY KEY, a TEXT COLLATE NOCASE, b TEXT, CHECK (b = a))",
+        );
+        assert_eq!(
+            judge(&catalog, live.as_ref()),
+            Verdict::Incompatible {
+                reasons: vec![Incompatibility::CheckChanged {
+                    catalog: "a = b".into(),
+                    live: "b = a".into(),
+                }]
+            }
+        );
+    }
+
     #[test]
     fn sqlite_matches_column_and_key_names_whatever_their_case_or_quoting() {
         let (catalog, live) = sqlite(
