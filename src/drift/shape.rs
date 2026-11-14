@@ -229,6 +229,9 @@ pub struct TableShape {
     checks: Vec<String>,
     /// The replica identity, where the backend has one.
     replica_identity: Option<ReplicaIdentity>,
+    /// Whether the source's publication carries the table, where the
+    /// backend has publications.
+    published: Option<bool>,
 }
 
 impl TableShape {
@@ -272,6 +275,7 @@ impl TableShape {
             primary_key,
             checks,
             replica_identity: None,
+            published: None,
         })
     }
 
@@ -280,6 +284,14 @@ impl TableShape {
     #[must_use]
     pub const fn with_replica_identity(mut self, identity: ReplicaIdentity) -> Self {
         self.replica_identity = Some(identity);
+        self
+    }
+
+    /// State whether the source's publication carries the table, on a shape
+    /// the live side read from a backend that has publications.
+    #[must_use]
+    pub const fn with_published(mut self, published: bool) -> Self {
+        self.published = Some(published);
         self
     }
 
@@ -305,6 +317,13 @@ impl TableShape {
     #[must_use]
     pub const fn replica_identity(&self) -> Option<ReplicaIdentity> {
         self.replica_identity
+    }
+
+    /// Whether the source's publication carries the table, where the
+    /// backend has publications.
+    #[must_use]
+    pub const fn published(&self) -> Option<bool> {
+        self.published
     }
 }
 

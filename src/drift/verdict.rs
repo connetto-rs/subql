@@ -3,7 +3,7 @@
 //! [`judge`] compares the consumer's fixed catalog shape of one table
 //! against the live shape, or a missing live table, and answers the
 //! verdict the vocabulary fixes: unchanged, allowed additions,
-//! incompatible with every reason, or identity weakened. A renamed
+//! incompatible with every reason, identity weakened, or unpublished. A renamed
 //! column reads as a drop plus an add, since the judgment compares
 //! names and a rename is exactly that on the wire.
 
@@ -82,6 +82,9 @@ pub enum Incompatibility {
         /// The identity the live backend states.
         identity: ReplicaIdentity,
     },
+    /// The source's publication does not carry the table, so none of its
+    /// changes reach the stream.
+    Unpublished,
 }
 
 /// The judgment of a live shape against the catalog's table.
@@ -101,16 +104,19 @@ pub enum Verdict {
     },
     /// The live replica identity is other than `FULL`.
     IdentityWeakened(ReplicaIdentity),
+    /// The source's publication does not carry the table.
+    Unpublished,
 }
 
 /// Judge the live shape, or a missing live table, against the catalog's.
 ///
-/// The identity is judged before the shape: a live identity other than
-/// `FULL` refuses the table on its own, since the old-image reasoning a
-/// consumer builds on needs every column. The shape judgment runs when
-/// the identity holds, and its reasons come back in a fixed order,
-/// catalog columns first in catalog order, then the live extras in live
-/// order, the key, and the `CHECK` constraints.
+/// The publication is judged first, since a table the source does not
+/// publish streams no changes whatever its identity and shape. The identity
+/// is judged next, since a live identity other than `FULL` refuses the table
+/// on its own, as the old-image reasoning a consumer builds on needs every
+/// column. The shape judgment runs when both hold, and its reasons come back
+/// in a fixed order, catalog columns first in catalog order, then the live
+/// extras in live order, the key, and the `CHECK` constraints.
 #[must_use]
 pub fn judge(catalog: &TableShape, live: Option<&TableShape>) -> Verdict {
     let Some(live) = live else {
@@ -118,6 +124,9 @@ pub fn judge(catalog: &TableShape, live: Option<&TableShape>) -> Verdict {
             reasons: alloc::vec![Incompatibility::TableMissing],
         };
     };
+    if live.published() == Some(false) {
+        return Verdict::Unpublished;
+    }
     if let Some(identity) = live.replica_identity() {
         if identity != ReplicaIdentity::Full {
             return Verdict::IdentityWeakened(identity);
@@ -256,6 +265,7 @@ pub fn refusal_reasons(
         Verdict::IdentityWeakened(identity) => {
             Some(Vec::from([Incompatibility::IdentityWeakened { identity }]))
         }
+        Verdict::Unpublished => Some(Vec::from([Incompatibility::Unpublished])),
     }
 }
 
@@ -694,6 +704,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unpublished_table_is_an_unpublished_verdict() {
+        let catalog = shape_of::<PostgreSqlDialect>(BASE);
+        let live = shape_of::<PostgreSqlDialect>(BASE);
+        assert_eq!(
+            judge(&catalog, Some(&live.clone().with_published(false))),
+            Verdict::Unpublished
+        );
+        assert_eq!(
+            judge(&catalog, Some(&live.with_published(true))),
+            Verdict::Unchanged
+        );
+    }
+
+    #[test]
     fn every_reason_survives_in_one_verdict() {
         let live = "CREATE TABLE t1 (id INTEGER PRIMARY KEY, v TEXT, extra INTEGER NOT NULL, PRIMARY KEY (id, extra))";
         let (catalog, live) = sqlite(BASE, live);
@@ -765,5 +789,22 @@ mod tests {
         );
         let unchanged = catalog.clone().with_replica_identity(ReplicaIdentity::Full);
         assert_eq!(refusal_reasons(&catalog, Some(&unchanged)), None);
+    }
+
+    #[test]
+    fn refusal_reasons_report_an_unpublished_table_before_its_identity_and_shape() {
+        let catalog = shape_of::<PostgreSqlDialect>(BASE);
+        let changed = shape_of::<PostgreSqlDialect>("CREATE TABLE t1 (id INTEGER PRIMARY KEY)")
+            .with_replica_identity(ReplicaIdentity::Default);
+        assert_eq!(
+            refusal_reasons(&catalog, Some(&changed.clone().with_published(false))),
+            Some(vec![Incompatibility::Unpublished])
+        );
+        assert_eq!(
+            refusal_reasons(&catalog, Some(&changed.with_published(true))),
+            Some(vec![Incompatibility::IdentityWeakened {
+                identity: ReplicaIdentity::Default
+            }])
+        );
     }
 }
