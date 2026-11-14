@@ -69,7 +69,7 @@ pub use scalar_value::{
 };
 pub use scalars_and_backend::{
     Backend, JsonDocument, ScalarCore, ScalarKey, ScalarText, ScalarTruth, SqliteJson,
-    SqliteJsonStorage,
+    SqliteJsonStorage, TypeNames,
 };
 pub use shipped::{
     MySql, MySqlTableNameCase, NamesFoldedAtLookup, NamesStoredAsWritten, NamesStoredLowercased,

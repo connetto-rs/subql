@@ -22,6 +22,8 @@ macro_rules! postgres_like_backend {
             const WIRE_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase =
                 sql_traits::structs::IdentifierCase::Exact;
 
+            const TYPE_NAMES: subql::backend::TypeNames = subql::backend::TypeNames::Postgres;
+
             /// This backend speaks the PostgreSQL dialect, so it takes
             /// PostgreSQL's `LIKE` escape rule with it.
             const LIKE_DEFAULT_ESCAPE: Option<char> = Some('\\');

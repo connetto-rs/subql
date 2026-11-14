@@ -20,6 +20,7 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::{poll_fn, Future};
+use core::marker::PhantomData;
 use core::ops::Bound;
 use core::pin::{pin, Pin};
 use core::task::Poll;
@@ -32,7 +33,7 @@ use sql_traits::structs::TargetName;
 use super::refusal::RefusalView;
 use super::shape::TableShape;
 use super::verdict::{refusal_reasons, Incompatibility};
-use crate::backend::CdcEvent;
+use crate::backend::{Backend, CdcEvent};
 use crate::clock::Timer;
 use crate::types::TableId;
 use crate::wal::{CdcSource, SourceItem, SourceItemOf};
@@ -200,7 +201,7 @@ where
     T: Timer,
 {
     inner: S,
-    judge: Judge<C, R>,
+    judge: Judge<C, R, <S::Event as CdcEvent>::Backend>,
     timer: T,
     /// The reconciliation interval in the timer's microseconds.
     interval_micros: u64,
@@ -213,11 +214,12 @@ where
     held: Option<Result<Option<SourceItemOf<S>>, S::Error>>,
 }
 
-/// The catalog, the live reader and the judgments made so far.
+/// The catalog, the live reader and the judgments made so far, under the
+/// rules of backend `B`.
 ///
 /// Kept apart from the inner source, so a run judges while the source's
 /// pending read stays polled.
-struct Judge<C, R> {
+struct Judge<C, R, B> {
     catalog: C,
     reader: R,
     /// The refused tables, shared with the apply path through
@@ -231,6 +233,8 @@ struct Judge<C, R> {
     known: BTreeSet<TableId>,
     /// Signals the guard produced but the consumer has not taken yet.
     signals: VecDeque<DriftSignal>,
+    /// The backend whose rules name the catalog shape's columns.
+    backend: PhantomData<fn() -> B>,
 }
 
 impl<S, C, R, T> DriftGuard<S, C, R, T>
@@ -271,6 +275,7 @@ where
             refusals: RefusedTables::default(),
             known,
             signals: VecDeque::new(),
+            backend: PhantomData,
         };
         let mut next = judge.first_table();
         judge
@@ -444,10 +449,11 @@ where
     }
 }
 
-impl<C, R> Judge<C, R>
+impl<C, R, B> Judge<C, R, B>
 where
     C: DatabaseLike,
     R: LiveShapeReader,
+    B: Backend,
 {
     /// The first table a run judges.
     fn first_table(&self) -> Option<TableId> {
@@ -482,7 +488,7 @@ where
             .ok()
             .and_then(|index| self.catalog.table_by_id(index))
             .and_then(|catalog_table| {
-                TableShape::from_table(catalog_table, &self.catalog)
+                TableShape::from_table::<B, C>(catalog_table, &self.catalog)
                     .ok()
                     .map(|shape| (catalog_table, shape))
             })
@@ -528,15 +534,16 @@ async fn race<O>(
 
 /// Run a reconciliation from `run` while still polling the source's
 /// pending read, holding its result in `held` until the run ends.
-async fn judge_beside<O, C, R>(
+async fn judge_beside<O, C, R, B>(
     mut pending: Pin<&mut impl Future<Output = O>>,
-    judge: &mut Judge<C, R>,
+    judge: &mut Judge<C, R, B>,
     run: &mut Option<TableId>,
     held: &mut Option<O>,
 ) -> Result<(), R::Error>
 where
     C: DatabaseLike,
     R: LiveShapeReader,
+    B: Backend,
 {
     let mut judging = pin!(judge.judge_from(run));
     poll_fn(|context| {
@@ -678,7 +685,7 @@ mod tests {
                 let shape = catalog
                     .table_by_target(table, IdentifierCase::AsWritten)
                     .unwrap()
-                    .map(|table| TableShape::from_table(table, &*catalog).unwrap());
+                    .map(|table| TableShape::from_table::<Postgres, _>(table, &*catalog).unwrap());
                 drop(catalog);
                 Ok(shape)
             }

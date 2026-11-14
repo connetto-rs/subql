@@ -21,6 +21,8 @@ use sql_traits::traits::{
     TypeMatch, TypeMatchLike,
 };
 
+use crate::backend::{Backend, TypeNames};
+
 /// The replica identity a backend applies to a table's updates and
 /// deletes, where the backend has one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -85,11 +87,15 @@ struct FieldShape {
 }
 
 impl FieldShape {
-    fn of<T: DataTypeLike>(field: &StructuredField<'_, T>, database: &T::DB) -> Self {
+    fn of<T: DataTypeLike>(
+        field: &StructuredField<'_, T>,
+        database: &T::DB,
+        names: TypeNames,
+    ) -> Self {
         Self {
             name: field.name().map(String::from),
             name_is_quoted: field.name_is_quoted(),
-            data_type: TypeShape::of(field.data_type(), database),
+            data_type: TypeShape::of(field.data_type(), database, names),
             nullable: field.is_nullable(),
             options: field
                 .options()
@@ -149,16 +155,20 @@ struct TypeShape {
 }
 
 impl TypeShape {
-    /// The shape of `data_type` as sql-traits answers it.
-    fn of<T: DataTypeLike>(data_type: &T, database: &T::DB) -> Self {
+    /// The shape of `data_type` as sql-traits answers it, named under `names`.
+    fn of<T: DataTypeLike>(data_type: &T, database: &T::DB, names: TypeNames) -> Self {
         let element = data_type
             .array_element(database)
-            .map(|element| Box::new(Self::of(element, database)));
+            .map(|element| Box::new(Self::of(element, database, names)));
         let enforces_dimensions = data_type.enforces_array_dimensions(database);
         // Without an enforced dimension count, an array is named by its element and one `[]`.
         let normalized = match (enforces_dimensions, &element) {
             (Some(false), Some(element)) => format!("{}[]", element.normalized),
-            _ => data_type.name(database).into_owned(),
+            _ => match names {
+                TypeNames::Declared => data_type.name(database),
+                TypeNames::Postgres => data_type.normalized_name(database),
+            }
+            .into_owned(),
         };
         Self {
             normalized,
@@ -181,12 +191,12 @@ impl TypeShape {
                 .structured_fields(database)
                 .into_iter()
                 .flatten()
-                .map(|field| FieldShape::of(&field, database))
+                .map(|field| FieldShape::of(&field, database, names))
                 .collect(),
             map: data_type.map_entry(database).map(|entry| {
                 Box::new(MapShape {
-                    key: Self::of(entry.key(), database),
-                    value: Self::of(entry.value(), database),
+                    key: Self::of(entry.key(), database, names),
+                    value: Self::of(entry.value(), database, names),
                     value_nullable: entry.value_is_nullable(),
                 })
             }),
@@ -269,13 +279,13 @@ pub struct TableShape {
 }
 
 impl TableShape {
-    /// Build the shape of `table` as `database` declares it.
+    /// Build the shape of `table` as `database` declares it, for backend `B`.
     ///
     /// # Errors
     ///
     /// A [`sql_traits::errors::LookupError`] when a column, key or check
     /// lookup on the table fails.
-    pub fn from_table<DB: DatabaseLike>(
+    pub fn from_table<B: Backend, DB: DatabaseLike>(
         table: &DB::Table,
         database: &DB,
     ) -> Result<Self, sql_traits::errors::LookupError> {
@@ -284,7 +294,7 @@ impl TableShape {
             let boolean = database.dialect().is_bool(database, column);
             columns.push(ColumnShape {
                 name: column.column_name().to_string(),
-                data_type: TypeShape::of(column.data_type(database), database),
+                data_type: TypeShape::of(column.data_type(database), database, B::TYPE_NAMES),
                 boolean: if boolean.is_yes() {
                     TypeMatch::Yes
                 } else if boolean.is_maybe() {
@@ -365,19 +375,20 @@ impl TableShape {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::backend::SQLite;
+    use crate::drift::test_dialect::TestDialect;
     use crate::drift::verdict::{judge, Incompatibility, Verdict};
     use alloc::format;
     use sql_traits::structs::ParserDB;
     use sqlparser::dialect::{
-        BigQueryDialect, ClickHouseDialect, DatabricksDialect, Dialect, DuckDbDialect,
-        GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
-        SnowflakeDialect,
+        BigQueryDialect, ClickHouseDialect, DatabricksDialect, DuckDbDialect, GenericDialect,
+        MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
     };
 
     fn column(ddl: &str, name: &str) -> ColumnShape {
         let db = ParserDB::parse::<SQLiteDialect>(ddl).expect("DDL parses");
         let table = db.tables().next().expect("one table");
-        TableShape::from_table(table, &db)
+        TableShape::from_table::<SQLite, _>(table, &db)
             .expect("shape builds")
             .columns()
             .iter()
@@ -386,13 +397,15 @@ mod tests {
             .expect("column present")
     }
 
-    fn shape_from_ddl<D: Dialect + Default>(ddl: &str) -> TableShape {
+    /// The shape of the one table `ddl` declares, judged under its dialect's
+    /// backend.
+    fn shape_from_ddl<D: TestDialect>(ddl: &str) -> TableShape {
         let db = ParserDB::parse::<D>(ddl).expect("DDL parses");
         let table = db.tables().next().expect("one table");
-        TableShape::from_table(table, &db).expect("shape builds")
+        TableShape::from_table::<D::Backend, _>(table, &db).expect("shape builds")
     }
 
-    fn shape_with_type<D: Dialect + Default>(data_type: &str) -> TableShape {
+    fn shape_with_type<D: TestDialect>(data_type: &str) -> TableShape {
         shape_from_ddl::<D>(&format!("CREATE TABLE t (v {data_type})"))
     }
 
@@ -431,7 +444,7 @@ mod tests {
         let other =
             ParserDB::parse::<SQLiteDialect>("CREATE TABLE other (v INTEGER)").expect("DDL parses");
         let table = source.tables().next().expect("one table");
-        assert!(TableShape::from_table(table, &other).is_err());
+        assert!(TableShape::from_table::<SQLite, _>(table, &other).is_err());
     }
 
     #[test]

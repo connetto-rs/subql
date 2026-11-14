@@ -29,6 +29,8 @@ pub mod refusal;
 pub mod shape;
 #[cfg(feature = "sqlite-cdc")]
 pub mod sqlite;
+#[cfg(test)]
+mod test_dialect;
 pub mod verdict;
 
 #[cfg(feature = "std")]

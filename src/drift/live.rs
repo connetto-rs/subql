@@ -7,6 +7,7 @@ use sql_traits::structs::TargetName;
 
 use super::guard::LiveShapeReader;
 use super::shape::TableShape;
+use crate::backend::Backend;
 
 /// A connection to a live database that loads that database's catalog.
 ///
@@ -21,6 +22,8 @@ use super::shape::TableShape;
 /// without one through the session's search path, while SQLite ignores the
 /// schema.
 pub trait LiveCatalog {
+    /// The backend whose rules name the live shape's columns.
+    type Backend: Backend;
     /// The catalog a load answers.
     type Database: DatabaseLike;
     /// The error a load or a shape can surface.
@@ -55,7 +58,7 @@ pub trait LiveCatalog {
         database: &Self::Database,
         table: &<Self::Database as DatabaseLike>::Table,
     ) -> Result<TableShape, Self::Error> {
-        TableShape::from_table(table, database).map_err(Into::into)
+        TableShape::from_table::<Self::Backend, _>(table, database).map_err(Into::into)
     }
 }
 
@@ -218,6 +221,7 @@ mod tests {
     }
 
     impl LiveCatalog for FakeCatalog {
+        type Backend = crate::backend::Postgres;
         type Database = ParserDB;
         type Error = FakeError;
 
