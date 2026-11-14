@@ -14,8 +14,8 @@ pub use compiler::{
 #[cfg(feature = "sqlite-cdc")]
 pub use drift::SqliteShapeError;
 pub use drift::{
-    judge, refusal_reasons, Incompatibility, NoRefusals, RefusalView, ReplicaIdentity, TableShape,
-    Verdict,
+    judge, refusal_reasons, Incompatibility, NoRefusals, Publication, PublishedChange, RefusalView,
+    ReplicaIdentity, TableShape, Verdict,
 };
 #[cfg(feature = "pg-streaming")]
 pub use drift::{BlockingLiveReader, BlockingReadError};
