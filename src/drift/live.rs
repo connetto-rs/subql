@@ -2,7 +2,8 @@
 //! and the readers that turn it into the guard's [`LiveShapeReader`].
 
 use sql_traits::errors::LookupError;
-use sql_traits::prelude::{DatabaseLike, TableLike};
+use sql_traits::prelude::DatabaseLike;
+use sql_traits::structs::TargetName;
 
 use super::guard::LiveShapeReader;
 use super::shape::TableShape;
@@ -14,19 +15,36 @@ use super::shape::TableShape;
 /// failed or panicked load leaves the connection usable for the next one.
 /// [`InlineLiveReader`] runs it on the task that awaits the read, and
 /// [`BlockingLiveReader`] runs it on tokio's blocking pool.
+///
+/// A table is named as the catalog names it, by its optional schema and its
+/// name. PostgreSQL selects an explicit schema exactly and resolves a name
+/// without one through the session's search path, while SQLite ignores the
+/// schema.
 pub trait LiveCatalog {
     /// The catalog a load answers.
     type Database: DatabaseLike;
     /// The error a load or a shape can surface.
     type Error: core::error::Error + From<LookupError> + Send + Sync + 'static;
 
-    /// Load the live catalog of the named `tables`. A table the database
+    /// Load the live catalog of the `tables` named. A table the database
     /// lacks is absent from the answer.
     ///
     /// # Errors
     ///
     /// The backend's error when the read fails or its answer does not load.
-    fn load_tables(&mut self, tables: &[&str]) -> Result<Self::Database, Self::Error>;
+    fn load_tables(&mut self, tables: &[TargetName<'_>]) -> Result<Self::Database, Self::Error>;
+
+    /// The table `table` names in a `database` this connection loaded, or
+    /// `None` when the database lacks it.
+    ///
+    /// # Errors
+    ///
+    /// The backend's error when the name does not resolve, as when it
+    /// matches more than one table.
+    fn find_table<'d>(
+        database: &'d Self::Database,
+        table: TargetName<'_>,
+    ) -> Result<Option<&'d <Self::Database as DatabaseLike>::Table>, Self::Error>;
 
     /// The shape of `table` in a `database` this connection loaded.
     ///
@@ -44,12 +62,10 @@ pub trait LiveCatalog {
 /// The live shape of `table`, or `None` when the database lacks it.
 fn read_shape<C: LiveCatalog>(
     connection: &mut C,
-    table: &str,
+    table: TargetName<'_>,
 ) -> Result<Option<TableShape>, C::Error> {
-    let database = connection.load_tables(&[table])?;
-    let shape = database
-        .tables()
-        .find(|candidate| candidate.table_name() == table)
+    let database = connection.load_tables(core::slice::from_ref(&table))?;
+    let shape = C::find_table(&database, table)?
         .map(|found| C::table_shape(&database, found))
         .transpose();
     shape
@@ -80,7 +96,7 @@ impl<C: LiveCatalog + Send> LiveShapeReader for InlineLiveReader<C> {
 
     fn shape<'r>(
         &'r mut self,
-        table: &'r str,
+        table: TargetName<'r>,
     ) -> impl core::future::Future<Output = Result<Option<TableShape>, Self::Error>> + Send + 'r
     {
         core::future::ready(read_shape(&mut self.connection, table))
@@ -129,18 +145,18 @@ where
 
     fn shape<'r>(
         &'r mut self,
-        table: &'r str,
+        table: TargetName<'r>,
     ) -> impl core::future::Future<Output = Result<Option<TableShape>, Self::Error>> + Send + 'r
     {
         let connection = std::sync::Arc::clone(&self.connection);
-        let table = alloc::string::String::from(table);
+        let table = table.into_owned();
         async move {
             let load = tokio::task::spawn_blocking(move || {
                 // A panicked load only read, so its poisoned lock still guards a usable connection.
                 let mut connection = connection
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                read_shape(&mut *connection, &table)
+                read_shape(&mut *connection, table)
             });
             match load.await {
                 Ok(shape) => shape.map_err(BlockingReadError::Read),
@@ -161,7 +177,7 @@ mod tests {
     use alloc::string::String;
     use core::future::Future;
     use core::task::{Context, Poll, Waker};
-    use sql_traits::structs::ParserDB;
+    use sql_traits::structs::{IdentifierCase, ParserDB};
     use sqlparser::dialect::PostgreSqlDialect;
 
     use crate::testing::block_on;
@@ -205,9 +221,9 @@ mod tests {
         type Database = ParserDB;
         type Error = FakeError;
 
-        fn load_tables(&mut self, tables: &[&str]) -> Result<ParserDB, FakeError> {
+        fn load_tables(&mut self, tables: &[TargetName<'_>]) -> Result<ParserDB, FakeError> {
             self.loads
-                .push(tables.iter().map(|table| String::from(*table)).collect());
+                .push(tables.iter().map(ToString::to_string).collect());
             match self.script.pop_front().unwrap_or(Next::Answer) {
                 Next::Answer => {}
                 Next::Fail => return Err(FakeError::Refused),
@@ -218,9 +234,22 @@ mod tests {
             }
             Ok(ParserDB::parse::<PostgreSqlDialect>(self.ddl).unwrap())
         }
+
+        /// Compares names as SQLite does, folding both sides.
+        fn find_table<'d>(
+            database: &'d ParserDB,
+            table: TargetName<'_>,
+        ) -> Result<Option<&'d <ParserDB as DatabaseLike>::Table>, FakeError> {
+            Ok(database.table_by_target(table, IdentifierCase::Folded)?)
+        }
     }
 
     const DDL: &str = "CREATE TABLE orders (id INT PRIMARY KEY, amount INT NOT NULL);";
+
+    /// An unqualified, unquoted name.
+    fn named(table: &str) -> TargetName<'_> {
+        TargetName::new(table, false)
+    }
 
     fn column_names(shape: &TableShape) -> Vec<&str> {
         shape
@@ -233,23 +262,62 @@ mod tests {
     #[test]
     fn an_inline_read_loads_only_the_named_table_and_shapes_it() {
         let mut reader = InlineLiveReader::new(FakeCatalog::new(DDL, []));
-        let shape = block_on(reader.shape("orders")).unwrap().unwrap();
+        let shape = block_on(reader.shape(named("orders"))).unwrap().unwrap();
         assert_eq!(column_names(&shape), ["id", "amount"]);
         assert!(!shape.columns()[1].nullable());
-        assert_eq!(block_on(reader.shape("ledger")).unwrap(), None);
+        assert_eq!(block_on(reader.shape(named("ledger"))).unwrap(), None);
         assert_eq!(reader.connection().loads, [["orders"], ["ledger"]]);
+    }
+
+    #[test]
+    fn a_read_names_its_table_by_schema_and_name() {
+        let mut reader = InlineLiveReader::new(FakeCatalog::new(
+            "CREATE SCHEMA sales;
+             CREATE TABLE orders (id INT PRIMARY KEY, amount INT NOT NULL);
+             CREATE TABLE sales.orders (id INT PRIMARY KEY, region TEXT);",
+            [],
+        ));
+        let mut read = |schema| {
+            block_on(reader.shape(named("orders").with_schema(schema, false)))
+                .unwrap()
+                .map(|shape| column_names(&shape).join(", "))
+        };
+        assert_eq!(read("sales").as_deref(), Some("id, region"));
+        assert_eq!(read("public").as_deref(), Some("id, amount"));
+        assert_eq!(read("archive"), None);
+        assert_eq!(
+            reader.connection().loads,
+            [["sales.orders"], ["public.orders"], ["archive.orders"]]
+        );
     }
 
     #[test]
     fn an_inline_read_completes_in_its_first_poll_and_answers_the_load_error() {
         let mut reader = InlineLiveReader::new(FakeCatalog::new(DDL, [Next::Fail]));
-        let mut read = core::pin::pin!(reader.shape("orders"));
+        let mut read = core::pin::pin!(reader.shape(named("orders")));
         assert!(
             matches!(
                 read.as_mut().poll(&mut Context::from_waker(Waker::noop())),
                 Poll::Ready(Err(FakeError::Refused))
             ),
             "an inline read answers within its first poll, with no runtime"
+        );
+    }
+
+    #[test]
+    fn a_read_whose_name_matches_two_tables_answers_the_lookup_error() {
+        let mut reader = InlineLiveReader::new(FakeCatalog::new(
+            "CREATE TABLE orders (id INT PRIMARY KEY);
+             CREATE TABLE \"Orders\" (id INT PRIMARY KEY);",
+            [],
+        ));
+        let answer = block_on(reader.shape(named("orders")));
+        assert!(
+            matches!(
+                answer,
+                Err(FakeError::Lookup(LookupError::AmbiguousTableLookup { .. }))
+            ),
+            "{answer:?}"
         );
     }
 
@@ -272,12 +340,20 @@ mod tests {
             let runtime = runtime();
             let mut reader = BlockingLiveReader::new(FakeCatalog::new(DDL, [Next::Fail]));
             assert!(matches!(
-                runtime.block_on(reader.shape("orders")),
+                runtime.block_on(reader.shape(named("orders"))),
                 Err(BlockingReadError::Read(FakeError::Refused))
             ));
-            let shape = runtime.block_on(reader.shape("orders")).unwrap().unwrap();
+            let shape = runtime
+                .block_on(reader.shape(named("orders").with_schema("public", false)))
+                .unwrap()
+                .unwrap();
             assert_eq!(column_names(&shape), ["id", "amount"]);
-            assert_eq!(runtime.block_on(reader.shape("ledger")).unwrap(), None);
+            assert_eq!(
+                runtime
+                    .block_on(reader.shape(named("orders").with_schema("sales", false)))
+                    .unwrap(),
+                None
+            );
         }
 
         #[test]
@@ -286,14 +362,14 @@ mod tests {
             let (release, held) = channel();
             let mut reader = BlockingLiveReader::new(FakeCatalog::new(DDL, [Next::WaitFor(held)]));
             runtime.block_on(async {
-                let mut read = core::pin::pin!(reader.shape("orders"));
+                let mut read = core::pin::pin!(reader.shape(named("orders")));
                 assert!(read
                     .as_mut()
                     .poll(&mut Context::from_waker(Waker::noop()))
                     .is_pending());
             });
             release.send(()).unwrap();
-            let shape = runtime.block_on(reader.shape("orders")).unwrap();
+            let shape = runtime.block_on(reader.shape(named("orders"))).unwrap();
             assert!(
                 shape.is_some(),
                 "the retried read finds the connection usable"
@@ -305,13 +381,16 @@ mod tests {
             let runtime = runtime();
             let mut reader = BlockingLiveReader::new(FakeCatalog::new(DDL, [Next::Panic]));
             let panicked = catch_unwind(AssertUnwindSafe(|| {
-                runtime.block_on(reader.shape("orders"))
+                runtime.block_on(reader.shape(named("orders")))
             }));
             assert!(
                 panicked.is_err(),
                 "the load's panic reaches the awaiting task"
             );
-            assert!(runtime.block_on(reader.shape("orders")).unwrap().is_some());
+            assert!(runtime
+                .block_on(reader.shape(named("orders")))
+                .unwrap()
+                .is_some());
         }
 
         #[test]
@@ -321,7 +400,7 @@ mod tests {
             runtime.shutdown_background();
             let _context = handle.enter();
             let mut reader = BlockingLiveReader::new(FakeCatalog::new(DDL, []));
-            let answer = block_on(reader.shape("orders"));
+            let answer = block_on(reader.shape(named("orders")));
             assert!(
                 matches!(answer, Err(BlockingReadError::Cancelled)),
                 "{answer:?}"

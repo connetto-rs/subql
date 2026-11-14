@@ -27,6 +27,7 @@ use core::time::Duration;
 
 use arc_swap::ArcSwap;
 use sql_traits::prelude::{DatabaseLike, TableLike};
+use sql_traits::structs::TargetName;
 
 use super::refusal::RefusalView;
 use super::shape::TableShape;
@@ -77,11 +78,12 @@ pub trait LiveShapeReader: Send {
     /// The error a live read can surface.
     type Error: core::error::Error + Send + Sync + 'static;
 
-    /// The live shape of `table`, or `None` when the database has no
-    /// such table.
+    /// The live shape of the table `table` names, or `None` when the
+    /// database has no such table. The guard names a table as its catalog
+    /// does, by its optional schema and its name, each with its quoting.
     fn shape<'r>(
         &'r mut self,
-        table: &'r str,
+        table: TargetName<'r>,
     ) -> impl core::future::Future<Output = Result<Option<TableShape>, Self::Error>> + Send + 'r;
 }
 
@@ -488,7 +490,11 @@ where
             return Ok(());
         };
         let name = catalog_table.table_name();
-        let live = self.reader.shape(name).await?;
+        let mut target = TargetName::new(name, catalog_table.table_name_is_quoted());
+        if let Some(schema) = catalog_table.table_schema() {
+            target = target.with_schema(schema, catalog_table.table_schema_is_quoted());
+        }
+        let live = self.reader.shape(target).await?;
         if let Some(reasons) = refusal_reasons(&catalog_shape, live.as_ref()) {
             self.signals.push_back(DriftSignal::Refused {
                 table,
@@ -553,7 +559,7 @@ mod tests {
     use core::future::ready;
     use core::task::{Context, Waker};
     use parking_lot::Mutex;
-    use sql_traits::structs::ParserDB;
+    use sql_traits::structs::{IdentifierCase, ParserDB};
     use sqlparser::dialect::PostgreSqlDialect;
 
     use crate::backend::{Postgres, RowKind, Value};
@@ -643,7 +649,7 @@ mod tests {
 
         fn shape<'r>(
             &'r mut self,
-            table: &'r str,
+            table: TargetName<'r>,
         ) -> impl Future<Output = Result<Option<TableShape>, Self::Error>> + Send + 'r {
             let probe = &self.0;
             async move {
@@ -658,19 +664,20 @@ mod tests {
                     }
                 })
                 .await;
-                probe.reads.lock().push(table.to_string());
-                if probe
+                let name = table.to_string();
+                let failed = probe
                     .failing
                     .lock()
-                    .take_if(|failing| *failing == table)
-                    .is_some()
-                {
+                    .take_if(|failing| *failing == name)
+                    .is_some();
+                probe.reads.lock().push(name);
+                if failed {
                     return Err(std::io::Error::other("live read failed"));
                 }
                 let catalog = probe.live.lock();
                 let shape = catalog
-                    .tables()
-                    .find(|candidate| candidate.table_name() == table)
+                    .table_by_target(table, IdentifierCase::AsWritten)
+                    .unwrap()
                     .map(|table| TableShape::from_table(table, &*catalog).unwrap());
                 drop(catalog);
                 Ok(shape)
@@ -955,6 +962,48 @@ mod tests {
             ["ledger", "orders", "ledger", "orders", "orders"],
             "a refused table is not read again"
         );
+    }
+
+    #[test]
+    fn tables_sharing_a_name_in_two_schemas_are_read_and_refused_apart() {
+        const BOTH: &str = "CREATE SCHEMA sales;
+             CREATE TABLE orders (id INTEGER PRIMARY KEY, amount INTEGER);
+             CREATE TABLE sales.orders (id INTEGER PRIMARY KEY, region TEXT);";
+        let catalog = parse(BOTH);
+        let sales_orders = table(&catalog, "sales.orders");
+        let probe = LiveProbe::new(parse(BOTH));
+        let clock = Arc::new(ManualClock::new(0));
+        let mut guard = build_guard(IdleSource(Arc::default()), catalog, &probe, &clock);
+        assert_eq!(
+            guard.refused_tables(),
+            Vec::new(),
+            "each table reads its own shape"
+        );
+        let mut reads = probe.reads();
+        reads.sort();
+        assert_eq!(reads, ["orders", "sales.orders"]);
+
+        probe.set_live(
+            "CREATE SCHEMA sales;
+             CREATE TABLE orders (id INTEGER PRIMARY KEY, amount INTEGER);
+             CREATE TABLE sales.orders (id INTEGER PRIMARY KEY);",
+        );
+        let region_dropped = vec![Incompatibility::ColumnDropped {
+            column: "region".into(),
+        }];
+        {
+            let mut next = pin!(guard.next_item());
+            clock.advance(INTERVAL);
+            assert_eq!(
+                poll_once(next.as_mut())
+                    .map(|item| item.unwrap().and_then(SourceItem::into_relation)),
+                Poll::Ready(Some(DriftSignal::Refused {
+                    table: sales_orders,
+                    reasons: region_dropped.clone(),
+                }))
+            );
+        }
+        assert_eq!(guard.refused_tables(), [(sales_orders, region_dropped)]);
     }
 
     #[test]

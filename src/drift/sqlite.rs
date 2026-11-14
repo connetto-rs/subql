@@ -14,7 +14,7 @@ use diesel::{
 };
 use sql_traits::errors::LookupError;
 use sql_traits::prelude::{DatabaseLike, TableLike};
-use sql_traits::structs::ParserDB;
+use sql_traits::structs::{ParserDB, TargetName};
 use sqlparser::dialect::SQLiteDialect;
 
 use super::guard::DriftTableSignal;
@@ -55,13 +55,15 @@ impl LiveCatalog for SqliteConnection {
     type Database = ParserDB;
     type Error = SqliteShapeError;
 
-    /// Parse the stored `CREATE` text of each named table. A table whose
+    /// Parse the stored `CREATE` text of each named table, by name alone,
+    /// since `sqlite_schema` lists the tables of one database. A table whose
     /// row stores no text reads as absent, and one whose text declares no
     /// table sql-traits models, such as an FTS5 virtual table, fails.
-    fn load_tables(&mut self, tables: &[&str]) -> Result<ParserDB, SqliteShapeError> {
+    fn load_tables(&mut self, tables: &[TargetName<'_>]) -> Result<ParserDB, SqliteShapeError> {
+        let names: Vec<&str> = tables.iter().map(TargetName::name).collect();
         let stored: Vec<(String, String)> = sqlite_schema::table
             .filter(sqlite_schema::kind.eq("table"))
-            .filter(sqlite_schema::name.eq_any(tables))
+            .filter(sqlite_schema::name.eq_any(names))
             .filter(sqlite_schema::sql.is_not_null())
             .select((sqlite_schema::name, sqlite_schema::sql.assume_not_null()))
             .load(self)?;
@@ -78,6 +80,16 @@ impl LiveCatalog for SqliteConnection {
             .into());
         }
         Ok(database)
+    }
+
+    /// The loaded table stored under the name, whatever schema it names.
+    fn find_table<'d>(
+        database: &'d ParserDB,
+        table: TargetName<'_>,
+    ) -> Result<Option<&'d <ParserDB as DatabaseLike>::Table>, SqliteShapeError> {
+        Ok(database
+            .tables()
+            .find(|candidate| candidate.table_name() == table.name()))
     }
 }
 
@@ -104,6 +116,11 @@ mod tests {
 
     use crate::drift::{InlineLiveReader, LiveShapeReader};
 
+    /// An unqualified, unquoted name.
+    fn named(table: &str) -> TargetName<'_> {
+        TargetName::new(table, false)
+    }
+
     fn table_names(database: &ParserDB) -> Vec<&str> {
         database.tables().map(TableLike::table_name).collect()
     }
@@ -128,7 +145,7 @@ mod tests {
         ]);
         let mut reader = InlineLiveReader::new(connection);
         let shape = reader
-            .shape("t1")
+            .shape(named("t1"))
             .await
             .expect("the read succeeds")
             .expect("t1 exists");
@@ -147,10 +164,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_read_ignores_the_schema_of_the_name() {
+        let (_dir, connection) = live_db(&["CREATE TABLE t1 (id INTEGER PRIMARY KEY)"]);
+        let mut reader = InlineLiveReader::new(connection);
+        for schema in ["main", "sales"] {
+            let shape = reader
+                .shape(named("t1").with_schema(schema, false))
+                .await
+                .expect("the read succeeds");
+            assert!(shape.is_some(), "t1 reads under the schema {schema}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_table_the_database_lacks_reads_as_missing() {
         let (_dir, connection) = live_db(&["CREATE TABLE t1 (id INTEGER)"]);
         let mut reader = InlineLiveReader::new(connection);
-        assert_eq!(reader.shape("t2").await.expect("the read succeeds"), None);
+        assert_eq!(
+            reader.shape(named("t2")).await.expect("the read succeeds"),
+            None
+        );
     }
 
     #[test]
@@ -162,11 +195,11 @@ mod tests {
             "CREATE INDEX t1_id ON t1 (id)",
         ]);
         let database = connection
-            .load_tables(&["t1", "t3", "t1_id", "absent"])
+            .load_tables(&["t1", "t3", "t1_id", "absent"].map(named))
             .expect("the load succeeds");
         assert_eq!(table_names(&database), ["t1", "t3"]);
         let empty = connection
-            .load_tables(&["absent"])
+            .load_tables(&[named("absent")])
             .expect("the load succeeds");
         assert!(empty.tables().next().is_none(), "no named table exists");
     }
@@ -177,7 +210,7 @@ mod tests {
         let mut reader = InlineLiveReader::new(connection);
         assert_eq!(
             reader
-                .shape("t1")
+                .shape(named("t1"))
                 .await
                 .expect("read")
                 .expect("t1")
@@ -188,7 +221,7 @@ mod tests {
         raw("ALTER TABLE t1 ADD COLUMN extra TEXT")
             .execute(reader.connection())
             .expect("the column is added");
-        let shape = reader.shape("t1").await.expect("read").expect("t1");
+        let shape = reader.shape(named("t1")).await.expect("read").expect("t1");
         assert_eq!(shape.columns().len(), 3);
         assert_eq!(shape.columns()[2].name(), "extra");
         assert!(shape.columns()[2].nullable());
@@ -202,7 +235,7 @@ mod tests {
         raw("ALTER TABLE t1 DROP COLUMN v")
             .execute(reader.connection())
             .expect("the column is dropped");
-        let shape = reader.shape("t1").await.expect("read").expect("t1");
+        let shape = reader.shape(named("t1")).await.expect("read").expect("t1");
         let names: Vec<String> = shape
             .columns()
             .iter()
@@ -218,8 +251,8 @@ mod tests {
         raw("ALTER TABLE t1 RENAME TO t2")
             .execute(reader.connection())
             .expect("the table is renamed");
-        assert_eq!(reader.shape("t1").await.expect("read"), None);
-        assert!(reader.shape("t2").await.expect("read").is_some());
+        assert_eq!(reader.shape(named("t1")).await.expect("read"), None);
+        assert!(reader.shape(named("t2")).await.expect("read").is_some());
     }
 
     #[tokio::test]
@@ -233,7 +266,7 @@ mod tests {
         ];
         let (_dir, connection) = live_db(&statements);
         let mut reader = InlineLiveReader::new(connection);
-        let shape = reader.shape("t1").await.expect("read").expect("t1");
+        let shape = reader.shape(named("t1")).await.expect("read").expect("t1");
         assert_eq!(shape.checks(), &["v > -5".to_string()]);
     }
 
@@ -251,7 +284,7 @@ mod tests {
             .expect("hold the database lock");
         let mut reader = InlineLiveReader::new(connection);
         assert!(matches!(
-            reader.shape("t1").await,
+            reader.shape(named("t1")).await,
             Err(SqliteShapeError::Diesel(
                 diesel::result::Error::DatabaseError(_, _)
             ))
@@ -259,7 +292,11 @@ mod tests {
         raw("ROLLBACK")
             .execute(&mut writer)
             .expect("release the database lock");
-        let shape = reader.shape("t1").await.expect("read resumes").expect("t1");
+        let shape = reader
+            .shape(named("t1"))
+            .await
+            .expect("read resumes")
+            .expect("t1");
         assert_eq!(shape.primary_key(), &["id".to_string()]);
     }
 
@@ -268,7 +305,7 @@ mod tests {
         let (_dir, connection) = live_db(&["CREATE VIRTUAL TABLE t1 USING fts5(body)"]);
         let mut reader = InlineLiveReader::new(connection);
         assert!(matches!(
-            reader.shape("t1").await,
+            reader.shape(named("t1")).await,
             Err(SqliteShapeError::Lookup(
                 sql_traits::errors::LookupError::TableNotFound { object_name }
             )) if object_name == "t1"
@@ -281,7 +318,7 @@ mod tests {
             live_db(&["CREATE VIRTUAL TABLE t1 USING fts5(body, tokenize = 'porter')"]);
         let mut reader = InlineLiveReader::new(connection);
         assert!(matches!(
-            reader.shape("t1").await,
+            reader.shape(named("t1")).await,
             Err(SqliteShapeError::Parse(_))
         ));
     }
