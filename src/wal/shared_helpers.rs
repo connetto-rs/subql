@@ -42,7 +42,8 @@ pub fn resolve_table<B: crate::backend::Backend, DB: DatabaseLike>(
 /// Derive the changed columns of an UPDATE by comparing the old and new
 /// image value of each catalog column, in ordinal order.
 ///
-/// `lookup(name)` returns the `(old, new)` value pair for a column name.
+/// `lookup(name)` returns the `(old, new)` value pair for a column's name as
+/// PostgreSQL stores it, which is the name pgoutput and wal2json carry.
 /// A column present in both images whose values differ is reported; a
 /// column absent from either image is skipped. The comparison is by value,
 /// so it serves any `PartialEq` cell type (wal2json's `serde_json::Value`,
@@ -64,7 +65,9 @@ where
         let Ok(col) = ColumnId::try_from(idx) else {
             break;
         };
-        let Some(name) = catalog_helpers::column_name(db, table_id, col) else {
+        let Some(name) =
+            catalog_helpers::column_name::<crate::backend::Postgres, DB>(db, table_id, col)
+        else {
             continue;
         };
         if let (Some(old), Some(new)) = lookup(&name) {

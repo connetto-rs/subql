@@ -122,7 +122,7 @@ where
     let arity = catalog_helpers::table_arity(&database, table).expect("the table has an arity");
     for ordinal in 0..arity {
         let column = subql::ColumnId::from(u16::try_from(ordinal).expect("arity fits a u16"));
-        let name = catalog_helpers::column_name(&database, table, column)
+        let name = catalog_helpers::column_name::<E::Backend, _>(&database, table, column)
             .expect("a column in range has a name");
         cells.push((
             name.clone(),

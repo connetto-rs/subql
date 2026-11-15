@@ -339,7 +339,7 @@ where
     let (group_kinds, group_idents) =
         grouped_column_metadata::<B, DB>(&projection.groups, parsed.table_id, dialect, database)?;
     let agg_name =
-        crate::catalog_helpers::column_name(database, parsed.table_id, projection.column)
+        crate::catalog_helpers::column_name::<B, DB>(database, parsed.table_id, projection.column)
             .ok_or_else(|| RegisterError::UnknownColumn {
                 table_id: parsed.table_id,
                 column: alloc::format!("column {}", projection.column),
@@ -417,12 +417,10 @@ where
                     "a grouped extreme column has no supported decode kind".to_string(),
                 )
             })?;
-        let name =
-            crate::catalog_helpers::column_name(database, table_id, *column).ok_or_else(|| {
-                RegisterError::UnknownColumn {
-                    table_id,
-                    column: alloc::format!("column {column}"),
-                }
+        let name = crate::catalog_helpers::column_name::<B, DB>(database, table_id, *column)
+            .ok_or_else(|| RegisterError::UnknownColumn {
+                table_id,
+                column: alloc::format!("column {column}"),
             })?;
         kinds.push(kind);
         idents.push(crate::compiler::quoted_ident(
@@ -822,7 +820,7 @@ where
 
     let mut key_idents = Vec::with_capacity(key_columns.len());
     for column in &key_columns {
-        let name = crate::catalog_helpers::column_name(database, table, *column)
+        let name = crate::catalog_helpers::column_name::<B, DB>(database, table, *column)
             .ok_or_else(|| RegisterError::UnknownTable(name.unqualified.clone()))?;
         key_idents.push(crate::compiler::quoted_ident(
             dialect as &dyn Dialect,
@@ -947,7 +945,10 @@ where
     let mut columns = Vec::new();
     for column in crate::catalog_helpers::table_columns(database, table)? {
         columns.push(SelectItem::UnnamedExpr(Expr::Identifier(
-            crate::compiler::quoted_ident(dialect as &dyn Dialect, column.column_name()),
+            crate::compiler::quoted_ident(
+                dialect as &dyn Dialect,
+                &crate::catalog_helpers::stored_column_name::<B, _>(column),
+            ),
         )));
     }
     select.projection = columns;

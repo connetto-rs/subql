@@ -320,23 +320,41 @@ pub fn primary_key_columns<DB: DatabaseLike>(
         .collect()
 }
 
-/// Resolve a column's stored name from its compact [`ColumnId`].
+/// The name the database stores for a column, from its compact [`ColumnId`].
 ///
-/// The inverse of [`column_id`], through
-/// [`TableLike::column_name_by_id`]. Returns `None` when the table or column
-/// id is unknown.
+/// This is the name a wire message carries and the one a quoted identifier
+/// names, so [`column_id_for_name`] reads it back with the quoting set.
+/// PostgreSQL folds an unquoted name to lowercase and keeps a quoted one as
+/// written, so a column declared `Status` is `status` and one declared
+/// `"Status"` is `Status`. An engine whose
+/// [`Backend::COLUMN_NAME_CASE`](crate::backend::Backend::COLUMN_NAME_CASE)
+/// ignores quoting stores every name as written. Returns `None` when the
+/// table or column id is unknown.
 #[must_use]
-pub fn column_name<DB: DatabaseLike>(
+pub fn column_name<B: crate::backend::Backend, DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
     column_id: ColumnId,
-) -> Option<alloc::string::String> {
-    use alloc::string::ToString;
+) -> Option<String> {
     let table = database.table_by_id(usize::try_from(table_id).ok()?)?;
-    let name = table
-        .column_name_by_id(usize::from(column_id), database)
+    let column = table
+        .column_by_id(usize::from(column_id), database)
         .ok()??;
-    Some(name.to_string())
+    Some(stored_column_name::<B, _>(column).into_owned())
+}
+
+/// The name the database stores for `column`, as [`column_name`] answers it.
+pub(crate) fn stored_column_name<B: crate::backend::Backend, C: ColumnLike>(
+    column: &C,
+) -> alloc::borrow::Cow<'_, str> {
+    use sql_traits::structs::IdentifierCase;
+
+    match B::COLUMN_NAME_CASE {
+        IdentifierCase::AsWritten => column.stored_column_name(),
+        IdentifierCase::Folded | IdentifierCase::Exact => {
+            alloc::borrow::Cow::Borrowed(column.column_name())
+        }
+    }
 }
 
 /// Build a [`SimpleTable`] from the catalog for `table_id`.
@@ -356,24 +374,21 @@ pub fn simple_table<DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
 ) -> Result<SimpleTable, crate::CatalogError> {
+    let table = lookup_table(database, table_id)?;
     let arity = table_arity(database, table_id)?;
-    let mut column_names: Vec<String> = Vec::with_capacity(arity);
+    let mut column_refs: Vec<(&str, &str)> = Vec::with_capacity(arity);
     for ordinal in 0..arity {
-        let column_id = ColumnId::try_from(ordinal)
-            .map_err(|_| crate::CatalogError::UnknownColumn { table_id, ordinal })?;
-        column_names.push(
-            column_name(database, table_id, column_id)
-                .ok_or(crate::CatalogError::UnknownColumn { table_id, ordinal })?,
-        );
+        let name = table
+            .column_name_by_id(ordinal, database)
+            .ok()
+            .flatten()
+            .ok_or(crate::CatalogError::UnknownColumn { table_id, ordinal })?;
+        column_refs.push((name, ""));
     }
-    let table_name = lookup_table(database, table_id)?.table_name().to_string();
+    let table_name = table.table_name().to_string();
     let pk_indices: Vec<usize> = primary_key_columns(database, table_id)?
         .into_iter()
         .map(usize::from)
-        .collect();
-    let column_refs: Vec<(&str, &str)> = column_names
-        .iter()
-        .map(|name| (name.as_str(), ""))
         .collect();
     Ok(SimpleTable::new(table_name, &column_refs, &pk_indices))
 }
@@ -1269,8 +1284,29 @@ mod tests {
         let db = make_db();
         let table = table_id::<crate::backend::Postgres, _>(&db, "orders").expect("orders exists");
 
-        assert_eq!(column_name(&db, table, 1).as_deref(), Some("amount"));
-        assert_eq!(column_name(&db, table, 3), None);
+        assert_eq!(
+            column_name::<Postgres, _>(&db, table, 1).as_deref(),
+            Some("amount")
+        );
+        assert_eq!(column_name::<Postgres, _>(&db, table, 3), None);
+    }
+
+    /// PostgreSQL stores an unquoted name folded and a quoted one as written,
+    /// and MySQL and SQLite store both as written, so each answers the name
+    /// its own wire messages carry and its own quoted identifier reaches.
+    #[test]
+    fn column_name_answers_the_name_each_engine_stores() {
+        use crate::backend::{MySql, SQLite};
+
+        let db = ParserDB::parse::<GenericDialect>(r#"CREATE TABLE t (Status TEXT, "Kind" TEXT);"#)
+            .expect("DDL parses");
+        let stored = |name: fn(&ParserDB, TableId, ColumnId) -> Option<String>| {
+            [0, 1].map(|column| name(&db, 0, column).expect("the column has a name"))
+        };
+
+        assert_eq!(stored(column_name::<Postgres, _>), ["status", "Kind"]);
+        assert_eq!(stored(column_name::<MySql, _>), ["Status", "Kind"]);
+        assert_eq!(stored(column_name::<SQLite, _>), ["Status", "Kind"]);
     }
 
     #[test]
@@ -1366,8 +1402,14 @@ mod tests {
             "an unquoted lookup folds, so it reaches the bare column"
         );
         // And the inverse answers the stored spelling of each.
-        assert_eq!(column_name(&db, tid, 0).as_deref(), Some("id"));
-        assert_eq!(column_name(&db, tid, 1).as_deref(), Some("ID"));
+        assert_eq!(
+            column_name::<Postgres, _>(&db, tid, 0).as_deref(),
+            Some("id")
+        );
+        assert_eq!(
+            column_name::<Postgres, _>(&db, tid, 1).as_deref(),
+            Some("ID")
+        );
     }
 
     /// A composite key declared in an order the columns do not follow comes

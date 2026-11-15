@@ -1492,6 +1492,56 @@ mod describe_terms {
             "only the decoy column holds alice's project, so the row must not reach her"
         );
     }
+
+    /// A quoted `"ProjectId"` is described under the name PostgreSQL stores,
+    /// and values stated under that name bind to it, never to the unquoted
+    /// `projectid` beside it.
+    #[test]
+    fn a_quoted_mixed_case_compared_column_takes_the_values_stated_as_described() {
+        const QUOTED_DDL: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
+         CREATE TABLE project_members(project_id INTEGER REFERENCES projects(id), user_id TEXT, PRIMARY KEY(project_id, user_id));
+         CREATE TABLE reports(id INTEGER PRIMARY KEY, \"ProjectId\" INTEGER, projectid INTEGER);";
+        const QUOTED_TERM: &str = "SELECT * FROM reports WHERE \"ProjectId\" IN \
+         (SELECT project_id FROM project_members WHERE user_id = current_setting('app.user_id', true))";
+
+        let db = deployment::db(QUOTED_DDL);
+        let reports = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "reports")
+            .expect("reports is in the catalog");
+        let mut engine: Engine =
+            SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator());
+        let request =
+            SubscriptionRequest::new(1u64, QUOTED_TERM).subscriber(Value::String("alice".into()));
+        let described = engine
+            .describe_terms(&request)
+            .expect("the term is describable");
+        let [subql::term::TermDescription::Membership(term)] = described.as_slice() else {
+            panic!("one membership subquery, got {described:?}");
+        };
+        let column = term.pairs[0].column.clone();
+
+        engine
+            .register(request.term_values(vec![column], rows_of("alice", vec![Value::Int(7)])))
+            .expect("values stated under the described name register");
+
+        let row = |id: i64, quoted: i64, unquoted: i64| {
+            vec![Value::Int(id), Value::Int(quoted), Value::Int(unquoted)]
+        };
+        let notifs = engine
+            .consumers(&TestEvent::insert(reports, row(1, 7, 999)))
+            .unwrap();
+        assert_eq!(
+            notifs.inserted(),
+            &[1],
+            "\"ProjectId\" holds alice's project"
+        );
+        let notifs = engine
+            .consumers(&TestEvent::insert(reports, row(2, 999, 7)))
+            .unwrap();
+        assert!(
+            notifs.inserted().is_empty(),
+            "only projectid holds alice's project, so the row must not reach her"
+        );
+    }
 }
 
 /// A membership table with row-level security, read by a subscriber that states

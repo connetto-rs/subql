@@ -16,7 +16,7 @@ use rls2fga_types::{ActionAnswer, ActionRelations, ActionStatement};
 use rls2fga_types::{Record, RecordDerivation, RecordDescription};
 use rls2fga_types::{RelationShapes, RequestPredicate, RowDecision};
 #[cfg(feature = "visibility-openfga")]
-use sql_traits::traits::TableLike;
+use sql_traits::traits::{ColumnLike, TableLike};
 
 use rls2fga_types::{ColumnName, RelationName, TableId as ContractTableId};
 use sql_traits::prelude::DatabaseLike;
@@ -339,6 +339,9 @@ impl<DB: DatabaseLike> Shapes<DB> {
 
     /// The relation `relations` asks on its gate for each of `columns` of
     /// `table`, each once, or [`None`] for a column `table` lacks.
+    ///
+    /// A column granted on its own is keyed by the name PostgreSQL stores,
+    /// which is how `rls2fga` names it.
     #[cfg(feature = "visibility-openfga")]
     pub(crate) fn column_relations<'r>(
         &self,
@@ -351,9 +354,15 @@ impl<DB: DatabaseLike> Shapes<DB> {
             .iter()
             .map(|&column| {
                 let name = entry
-                    .column_name_by_id(usize::from(column), &self.db)
-                    .ok()??;
-                Some(relations.columns.get(name).unwrap_or(&relations.on_table))
+                    .column_by_id(usize::from(column), &self.db)
+                    .ok()??
+                    .stored_column_name();
+                Some(
+                    relations
+                        .columns
+                        .get(name.as_ref())
+                        .unwrap_or(&relations.on_table),
+                )
             })
             .collect()
     }
