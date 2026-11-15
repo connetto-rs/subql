@@ -164,12 +164,15 @@ impl RefusedTables {
             .collect()
     }
 
-    /// The reasons `table` is refused by name, or `None` when it is not
-    /// refused.
+    /// The reasons `table` is refused, matching names without ASCII case as
+    /// an uploaded table name resolves.
     fn refused_by_name(&self, table: &str) -> Option<Vec<Incompatibility>> {
         let snapshot = self.snapshot.load();
-        let id = *snapshot.by_name.get(table)?;
-        snapshot.by_id.get(&id).cloned()
+        let (_, id) = snapshot
+            .by_name
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(table))?;
+        snapshot.by_id.get(id).cloned()
     }
 }
 
@@ -1200,5 +1203,20 @@ mod tests {
             queue.lock().is_empty(),
             "the refused table's event is dropped"
         );
+    }
+
+    /// An upload naming a refused table under any ASCII case is refused.
+    #[test]
+    fn a_refused_table_is_refused_under_any_ascii_case_of_its_name() {
+        let refusals = RefusedTables::default();
+        refusals.insert(0, "Orders", vec![Incompatibility::TableMissing]);
+        for uploaded in ["Orders", "orders", "ORDERS"] {
+            assert_eq!(
+                refusals.refusal(uploaded),
+                Some(vec![Incompatibility::TableMissing]),
+                "an upload naming `{uploaded}` is refused"
+            );
+        }
+        assert_eq!(refusals.refusal("ledger"), None);
     }
 }

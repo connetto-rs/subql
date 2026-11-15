@@ -42,7 +42,7 @@ use alloc::vec::Vec;
 use alloc::sync::Arc;
 use hashbrown::HashMap;
 use maxwell_cdc::Message as MaxwellMessage;
-use sql_traits::prelude::{ColumnLike, DataTypeLike, DatabaseLike, TableLike, VectorKind};
+use sql_traits::prelude::{ColumnLike, DataTypeLike, DatabaseLike, VectorKind};
 use sqlite_diff_rs::maxwell::{ConversionError as MaxwellConversionError, Maxwell};
 #[cfg(feature = "pgoutput-emit")]
 use sqlite_diff_rs::pg_walstream::{
@@ -163,8 +163,9 @@ impl ColumnNames for WireTable {
 
 /// A subql catalog exposed as a `sqlite-diff-rs` [`WireSchema`].
 ///
-/// Holds one owned [`WireTable`] per catalog table, grouped by bare table
-/// name and carrying each table's declaring schema. Built once from a
+/// Holds one owned [`WireTable`] per catalog table, grouped by the bare
+/// name its engine stores and carrying the schema it stores, which are the
+/// names that engine's change messages carry. Built once from a
 /// [`DatabaseLike`] catalog and reused across a batch of events.
 ///
 /// Lookup is source-qualified: when several tables share a bare name, the
@@ -180,7 +181,8 @@ pub struct WireCatalog {
 }
 
 impl WireCatalog {
-    /// Build a catalog over every table in `database`.
+    /// Build a catalog over every table in `database`, naming each table,
+    /// its schema and its columns as the engine `B` stores them.
     ///
     /// Columns whose declared SQL type does not map to a [`ScalarFamily`]
     /// travel as [`WireType::Opaque`], their type's text output, which a
@@ -189,18 +191,18 @@ impl WireCatalog {
     /// # Errors
     /// [`CatalogError`](crate::CatalogError) when any table's metadata cannot
     /// be resolved: a catalog that cannot describe itself must not emit.
-    pub fn from_database<DB: DatabaseLike>(database: &DB) -> Result<Self, crate::CatalogError> {
+    pub fn from_database<B: crate::backend::Backend, DB: DatabaseLike>(
+        database: &DB,
+    ) -> Result<Self, crate::CatalogError> {
         let mut tables: HashMap<String, Vec<(Option<String>, WireTable)>> = HashMap::new();
         for index in 0..database.number_of_tables() {
             let Ok(table_id) = TableId::try_from(index) else {
                 break;
             };
-            let schema = database
-                .table_by_id(index)
-                .ok_or(crate::CatalogError::UnknownTable(table_id))?
-                .table_schema()
-                .map(ToString::to_string);
-            let wire_table = build_wire_table(database, table_id)?;
+            let schema = catalog_helpers::stored_table_name::<B, DB>(database, table_id)?
+                .schema
+                .map(alloc::borrow::Cow::into_owned);
+            let wire_table = build_wire_table::<B, DB>(database, table_id)?;
             tables
                 .entry(wire_table.name().to_string())
                 .or_default()
@@ -295,12 +297,12 @@ fn array_element<DB: DatabaseLike>(database: &DB, element: &DB::DataType) -> Opt
     })
 }
 
-/// Build one [`WireTable`] for `table_id`.
-fn build_wire_table<DB: DatabaseLike>(
+/// Build one [`WireTable`] for `table_id`, named as the engine `B` stores it.
+fn build_wire_table<B: crate::backend::Backend, DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
 ) -> Result<WireTable, crate::CatalogError> {
-    let inner = catalog_helpers::simple_table(database, table_id)?;
+    let inner = catalog_helpers::simple_table::<B, DB>(database, table_id)?;
     let wire_types = catalog_helpers::table_columns(database, table_id)?
         .map(|column| column_wire_type(database, column).unwrap_or(WireType::Opaque))
         .collect();
@@ -311,10 +313,14 @@ fn build_wire_table<DB: DatabaseLike>(
 /// each event's table through a [`WireCatalog`] and decoding its columns
 /// through `adapter`.
 ///
-/// Resolve `database` into a [`WireCatalog`], the one spelling of the
-/// catalog failure that every vehicle below shares.
-fn wire_catalog<DB: DatabaseLike>(database: &DB) -> Result<WireCatalog, ConversionError> {
-    WireCatalog::from_database(database).map_err(|e| ConversionError::TableNotFound(e.to_string()))
+/// Resolve `database` into a [`WireCatalog`] named as the engine `B` stores
+/// its tables, the one spelling of the catalog failure that every vehicle
+/// below shares.
+fn wire_catalog<B: crate::backend::Backend, DB: DatabaseLike>(
+    database: &DB,
+) -> Result<WireCatalog, ConversionError> {
+    WireCatalog::from_database::<B, DB>(database)
+        .map_err(|e| ConversionError::TableNotFound(e.to_string()))
 }
 
 /// The one procedure behind every vehicle below: the format, the wire source
@@ -522,7 +528,7 @@ where
         Error = ConversionError,
     >,
 {
-    let catalog = wire_catalog(database)?;
+    let catalog = wire_catalog::<crate::backend::Postgres, DB>(database)?;
     fold_events(&catalog, &wal2json_adapter(), events)
 }
 
@@ -581,7 +587,7 @@ where
         Error = ConversionError,
     >,
 {
-    let catalog = wire_catalog(database)?;
+    let catalog = wire_catalog::<crate::backend::Postgres, DB>(database)?;
     fold_events(&catalog, &wal2json_adapter(), events)
 }
 
@@ -646,7 +652,7 @@ pub fn pgoutput_patchset_builder<DB: DatabaseLike>(
     database: &DB,
     events: &[ChangeEvent],
 ) -> Result<PatchSet<WireTable, String, Vec<u8>>, PgConversionError> {
-    let catalog = wire_catalog(database)?;
+    let catalog = wire_catalog::<crate::backend::Postgres, DB>(database)?;
     fold_pg_events(
         &catalog,
         &pgoutput_adapter(),
@@ -684,7 +690,7 @@ pub fn pgoutput_changeset_builder<DB: DatabaseLike>(
     database: &DB,
     events: &[ChangeEvent],
 ) -> Result<ChangeSet<WireTable, String, Vec<u8>>, PgConversionError> {
-    let catalog = wire_catalog(database)?;
+    let catalog = wire_catalog::<crate::backend::Postgres, DB>(database)?;
     fold_pg_events(
         &catalog,
         &pgoutput_adapter(),
@@ -733,7 +739,7 @@ pub fn maxwell_patchset_builder<DB: DatabaseLike>(
     database: &DB,
     events: &[MaxwellMessage],
 ) -> Result<PatchSet<WireTable, String, Vec<u8>>, MaxwellConversionError> {
-    let catalog = wire_catalog(database)?;
+    let catalog = wire_catalog::<crate::backend::MySql, DB>(database)?;
     fold_events(&catalog, &maxwell_adapter(), events)
 }
 
@@ -765,7 +771,7 @@ pub fn maxwell_changeset_builder<DB: DatabaseLike>(
     database: &DB,
     events: &[MaxwellMessage],
 ) -> Result<ChangeSet<WireTable, String, Vec<u8>>, MaxwellConversionError> {
-    let catalog = wire_catalog(database)?;
+    let catalog = wire_catalog::<crate::backend::MySql, DB>(database)?;
     fold_events(&catalog, &maxwell_adapter(), events)
 }
 
@@ -802,8 +808,9 @@ pub fn pgbinary_adapter() -> TypeMap<PgBinary, String, Vec<u8>> {
 /// the catalog's (a scaled decimal as [`WireType::ScaledDecimal`]), the
 /// same source the pgoutput CDC path folds through, so the patchset is
 /// byte-identical to that path for the same rows (a `uuid` lands as a
-/// 16-byte blob). A catalog column absent from `column_names` is stored as
-/// NULL.
+/// 16-byte blob). `column_names` are the names the server reports, which
+/// are the names the engine `B` stores, and a catalog column absent from
+/// them is stored as NULL.
 ///
 /// A snapshot is a set of rows to insert with no old images, so this
 /// assembles [`Insert`]s directly rather than using the `Digestable` fold
@@ -825,7 +832,7 @@ pub fn pgbinary_patchset_builder<B: crate::backend::Backend, DB: DatabaseLike>(
 ) -> Result<PatchSet<SimpleTable, String, Vec<u8>>, ConversionError> {
     let table_id = catalog_helpers::table_id::<B, DB>(database, table)
         .ok_or_else(|| ConversionError::TableNotFound(table.to_string()))?;
-    let simple = catalog_helpers::simple_table(database, table_id)
+    let simple = catalog_helpers::simple_table::<B, DB>(database, table_id)
         .map_err(|e| ConversionError::TableNotFound(e.to_string()))?;
 
     // The same catalog columns the CDC path folds through, so the two encoders agree.
@@ -833,7 +840,7 @@ pub fn pgbinary_patchset_builder<B: crate::backend::Backend, DB: DatabaseLike>(
     for column in catalog_helpers::table_columns(database, table_id)
         .map_err(|e| ConversionError::TableNotFound(e.to_string()))?
     {
-        let name = column.column_name().to_string();
+        let name = catalog_helpers::stored_column_name::<B, _>(column).into_owned();
         let wire_type = column_wire_type(database, column)
             .ok_or_else(|| ConversionError::UnsupportedType(name.clone()))?;
         columns.push((name, wire_type));
@@ -986,7 +993,8 @@ mod tests {
     #[test]
     fn wire_catalog_resolves_declared_table() {
         let db = orders_db();
-        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let catalog = WireCatalog::from_database::<crate::backend::Postgres, _>(&db)
+            .expect("catalog resolves");
         assert_eq!(catalog.len(), 1);
         let table = catalog.get(None, "orders").expect("orders resolves");
         assert_eq!(table.number_of_columns(), 3);
@@ -1001,7 +1009,8 @@ mod tests {
             "CREATE TABLE ledger (id INTEGER PRIMARY KEY, amount NUMERIC, note TEXT);",
         )
         .unwrap();
-        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let catalog = WireCatalog::from_database::<crate::backend::Postgres, _>(&db)
+            .expect("catalog resolves");
         let mut builder = PatchSet::<WireTable, String, Vec<u8>>::new();
         builder.add_table(catalog.get(None, "ledger").expect("ledger resolves"));
         builder
@@ -1242,6 +1251,51 @@ mod tests {
         values.to_vec()
     }
 
+    /// wal2json names an unquoted `Orders` and its columns as PostgreSQL
+    /// stores them, and the patchset names them the same way.
+    #[test]
+    fn an_unquoted_mixed_case_table_emits_from_its_stored_names() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE Orders (Id INT PRIMARY KEY, Status TEXT);",
+        )
+        .unwrap();
+        let line = r#"{"action":"I","schema":"public","table":"orders","columns":[{"name":"id","type":"integer","value":1},{"name":"status","type":"text","value":"new"}]}"#;
+        let ps = patchset_ops(&db, line);
+        let ops = ps.ops();
+        let PatchsetOp::Insert { values, .. } = &ops[0] else {
+            panic!("expected an insert op, got {:?}", ops[0]);
+        };
+        assert_eq!(ops[0].table().name(), "orders");
+        assert_eq!(
+            values.to_vec(),
+            vec![WireValue::Integer(1), WireValue::Text("new".to_string())]
+        );
+    }
+
+    /// PostgreSQL reports an unquoted `Quantity` result column as
+    /// `quantity`, and the snapshot stores its value.
+    #[test]
+    fn pgbinary_reads_an_unquoted_mixed_case_column_by_its_stored_name() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE orders (id UUID PRIMARY KEY, Quantity BIGINT);",
+        )
+        .unwrap();
+        let uuid_bytes: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let qty = 42i64.to_be_bytes();
+        let rows = vec![vec![Some(uuid_bytes.as_slice()), Some(qty.as_slice())]];
+        let bytes = pgbinary_patchset::<crate::backend::Postgres, _>(
+            &db,
+            "orders",
+            &["id", "quantity"],
+            &rows,
+        )
+        .unwrap();
+        assert_eq!(
+            only_insert_values(&bytes),
+            vec![WireValue::Blob(uuid_bytes.to_vec()), WireValue::Integer(42)]
+        );
+    }
+
     #[test]
     fn pgbinary_adapter_decodes_uuid_to_16_byte_blob() {
         // The whole motivation, pinned at the subql seam: the PgBinary
@@ -1402,7 +1456,8 @@ mod tests {
              whole NUMERIC(10), bare NUMERIC, hundreds NUMERIC(5,-2));",
         )
         .unwrap();
-        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let catalog = WireCatalog::from_database::<crate::backend::Postgres, _>(&db)
+            .expect("catalog resolves");
         let table = catalog.get(None, "amounts").expect("amounts resolves");
         assert_eq!(table.column_type(1), WireType::ScaledDecimal { scale: 2 });
         assert_eq!(table.column_type(2), WireType::ScaledDecimal { scale: 0 });
@@ -1494,7 +1549,7 @@ mod tests {
 
         assert_eq!(snapshot, pgoutput, "the snapshot and pgoutput agree");
         assert_eq!(snapshot, wal2json, "the snapshot and wal2json agree");
-        let table = catalog_helpers::simple_table(
+        let table = catalog_helpers::simple_table::<crate::backend::Postgres, _>(
             &db,
             catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "amounts").unwrap(),
         )
@@ -1538,7 +1593,8 @@ mod tests {
     #[test]
     fn arrays_vectors_and_intervals_travel_as_their_replica_storage() {
         let db = ParserDB::parse::<PostgreSqlDialect>(ARRAY_VECTOR_INTERVAL_DDL).unwrap();
-        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let catalog = WireCatalog::from_database::<crate::backend::Postgres, _>(&db)
+            .expect("catalog resolves");
         let table = catalog.get(None, "things").expect("things resolves");
         let types: Vec<WireType> = (1..13).map(|column| table.column_type(column)).collect();
         assert_eq!(
@@ -1581,7 +1637,8 @@ mod tests {
              i JSONB[], j INTERVAL[]);",
         )
         .unwrap();
-        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let catalog = WireCatalog::from_database::<crate::backend::Postgres, _>(&db)
+            .expect("catalog resolves");
         let table = catalog.get(None, "things").expect("things resolves");
         let elements: Vec<WireType> = (1..11).map(|column| table.column_type(column)).collect();
         let expected: Vec<WireType> = [
@@ -1610,7 +1667,8 @@ mod tests {
             "CREATE TABLE things (id INT PRIMARY KEY, emb vector(3));",
         )
         .unwrap();
-        let catalog = WireCatalog::from_database(&db).expect("catalog resolves");
+        let catalog = WireCatalog::from_database::<crate::backend::Postgres, _>(&db)
+            .expect("catalog resolves");
         let table = catalog.get(None, "things").expect("things resolves");
         assert_eq!(table.column_type(1), WireType::Opaque);
     }
@@ -1904,7 +1962,7 @@ mod tests {
         };
 
         let bytes = pgoutput_patchset(&db, &[insert, update]).unwrap();
-        let table = catalog_helpers::simple_table(
+        let table = catalog_helpers::simple_table::<crate::backend::Postgres, _>(
             &db,
             catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "orders").unwrap(),
         )
@@ -2029,7 +2087,7 @@ mod tests {
             xid: None,
         };
         let bytes = pgoutput_patchset(&db, core::slice::from_ref(&delete)).unwrap();
-        let table = catalog_helpers::simple_table(
+        let table = catalog_helpers::simple_table::<crate::backend::Postgres, _>(
             &db,
             catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "orders").unwrap(),
         )
@@ -2096,7 +2154,7 @@ mod tests {
         };
 
         let bytes = pgoutput_changeset(&db, &[insert, update]).unwrap();
-        let table = catalog_helpers::simple_table(
+        let table = catalog_helpers::simple_table::<crate::backend::Postgres, _>(
             &db,
             catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "orders").unwrap(),
         )
@@ -2138,7 +2196,7 @@ mod tests {
         )
         .unwrap();
         let bytes = maxwell_changeset(&db, &[insert, update]).unwrap();
-        let table = catalog_helpers::simple_table(
+        let table = catalog_helpers::simple_table::<crate::backend::MySql, _>(
             &db,
             catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "orders").unwrap(),
         )

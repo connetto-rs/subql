@@ -81,3 +81,32 @@ fn apply_patchset_bool_roundtrip_insert_update_delete() {
         common::patchset::expected_after_delete()
     );
 }
+
+/// A patchset names `things` and `active` as PostgreSQL stores a table and
+/// column the DDL wrote unquoted in mixed case, and the adapter renders them
+/// the same way.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn apply_patchset_names_unquoted_mixed_case_identifiers_as_postgres_stores_them() {
+    const MIXED: &str = "CREATE TABLE Things (Id INT PRIMARY KEY, Active BOOLEAN)";
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut conn = db.connect();
+    sql_query(MIXED).execute(&mut conn).expect("create table");
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(MIXED).expect("parse subql DDL");
+    let engine: SubscriptionEngine<PgChangeEvent, DefaultIds, ParserDB> =
+        SubscriptionEngine::new(catalog, PostgreSqlDialect {});
+    let adapter = PgAdapter::new(engine.database()).expect("the catalog indexes");
+    let (inserts, _, _) = common::patchset::bool_roundtrip_ops();
+
+    assert_eq!(
+        engine
+            .apply_patchset(&inserts, &NoRefusals, &mut conn, &adapter)
+            .expect("apply inserts"),
+        2
+    );
+    assert_eq!(
+        common::patchset::load_all(&mut conn),
+        common::patchset::expected_after_inserts()
+    );
+}

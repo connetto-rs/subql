@@ -338,7 +338,13 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        apply_diffset_bytes_with_catalog(self.database(), bytes, refusals, conn, adapter)
+        apply_diffset_bytes_with_catalog::<E::Backend, _, _, _, _, _>(
+            self.database(),
+            bytes,
+            refusals,
+            conn,
+            adapter,
+        )
     }
 
     /// Async peer of [`Self::apply_patchset`], driven by
@@ -478,7 +484,13 @@ where
         str: ToSql<Text, DBend>,
         [u8]: ToSql<Binary, DBend>,
     {
-        apply_diffset_bytes_async_with_catalog(self.database(), bytes, refusals, conn, adapter)
+        apply_diffset_bytes_async_with_catalog::<E::Backend, _, _, _, _, _>(
+            self.database(),
+            bytes,
+            refusals,
+            conn,
+            adapter,
+        )
     }
 }
 
@@ -967,20 +979,21 @@ mod tests {
         let (catalog, mut conn) = catalog_fixture();
         let adapter = SqliteAdapter::new(&catalog).expect("the catalog indexes");
 
-        let inserted = super::apply_diffset_bytes_with_catalog(
-            &catalog,
-            &insert_bytes(1, "a", 10),
-            &NoRefusals,
-            &mut conn,
-            &adapter,
-        )
-        .unwrap();
+        let inserted =
+            super::apply_diffset_bytes_with_catalog::<crate::backend::SQLite, _, _, _, _, _>(
+                &catalog,
+                &insert_bytes(1, "a", 10),
+                &NoRefusals,
+                &mut conn,
+                &adapter,
+            )
+            .unwrap();
         assert_eq!(
             inserted, 1,
             "one row inserted through the catalog entry point"
         );
 
-        super::apply_diffset_bytes_with_catalog(
+        super::apply_diffset_bytes_with_catalog::<crate::backend::SQLite, _, _, _, _, _>(
             &catalog,
             &update_qty_bytes(1, 42),
             &NoRefusals,
@@ -1008,7 +1021,7 @@ mod tests {
     fn apply_diffset_bytes_with_catalog_relocates_a_primary_key() {
         let (catalog, mut conn) = catalog_fixture();
         let adapter = SqliteAdapter::new(&catalog).expect("the catalog indexes");
-        super::apply_diffset_bytes_with_catalog(
+        super::apply_diffset_bytes_with_catalog::<crate::backend::SQLite, _, _, _, _, _>(
             &catalog,
             &insert_bytes(1, "a", 10),
             &NoRefusals,
@@ -1017,14 +1030,15 @@ mod tests {
         )
         .unwrap();
 
-        let touched = super::apply_diffset_bytes_with_catalog(
-            &catalog,
-            &changeset_relocate_pk_bytes(1, 2, "a", "b"),
-            &NoRefusals,
-            &mut conn,
-            &adapter,
-        )
-        .unwrap();
+        let touched =
+            super::apply_diffset_bytes_with_catalog::<crate::backend::SQLite, _, _, _, _, _>(
+                &catalog,
+                &changeset_relocate_pk_bytes(1, 2, "a", "b"),
+                &NoRefusals,
+                &mut conn,
+                &adapter,
+            )
+            .unwrap();
         assert_eq!(
             touched, 1,
             "the primary-key-changing update touches one row"

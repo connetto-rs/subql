@@ -113,7 +113,7 @@ impl<'db, DB: DatabaseLike> PgAdapter<'db, DB> {
     pub fn new(catalog: &'db DB) -> Result<Self, crate::CatalogError> {
         Ok(Self {
             catalog,
-            columns: ColumnIndex::new(catalog)?,
+            columns: ColumnIndex::new::<crate::backend::Postgres>(catalog)?,
         })
     }
 
@@ -215,8 +215,9 @@ where
     B: AsRef<[u8]> + Sync,
 {
     fn column_name(&self, table_name: &str, column_index: usize) -> &str {
-        self.column_at(table_name, column_index)
-            .map_or("", ColumnLike::column_name)
+        self.columns
+            .column_name_at(table_name, column_index)
+            .unwrap_or("")
     }
 
     fn bind<'a>(

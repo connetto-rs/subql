@@ -119,13 +119,14 @@ fn a_guard_refused_table_is_refused_by_the_apply_path() {
     let bytes = PatchSet::<SimpleTable, String, Vec<u8>>::new()
         .insert(insert)
         .build();
-    let err = subql::patchset::apply_diffset_bytes_with_catalog(
-        catalog,
-        &bytes,
-        &refusals,
-        &mut target,
-        &adapter,
-    )
+    let err = subql::patchset::apply_diffset_bytes_with_catalog::<
+        subql::backend::SQLite,
+        _,
+        _,
+        _,
+        _,
+        _,
+    >(catalog, &bytes, &refusals, &mut target, &adapter)
     .unwrap_err();
     match err {
         ApplyError::RefusedTable { table, reasons } => {
@@ -148,14 +149,15 @@ fn a_guard_refused_table_is_refused_by_the_apply_path() {
 
     // The same handle lets the upload that names only the unrefused table
     // apply as before.
-    let applied = subql::patchset::apply_diffset_bytes_with_catalog(
-        catalog,
-        &ledger_insert_bytes(1, 40),
-        &refusals,
-        &mut target,
-        &adapter,
-    )
-    .unwrap();
+    let applied =
+        subql::patchset::apply_diffset_bytes_with_catalog::<subql::backend::SQLite, _, _, _, _, _>(
+            catalog,
+            &ledger_insert_bytes(1, 40),
+            &refusals,
+            &mut target,
+            &adapter,
+        )
+        .unwrap();
     assert_eq!(
         applied, 1,
         "the unrefused table applies through the same handle"

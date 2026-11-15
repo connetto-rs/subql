@@ -12,7 +12,7 @@
 //! [`table_arity`], [`schema_fingerprint`], [`primary_key_columns`],
 //! [`column_scalar_kind`], [`column_comparison`], [`table_has_rls`].
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use sql_traits::{
     prelude::{ColumnLike, DataTypeLike, DatabaseLike, TableLike},
@@ -93,7 +93,17 @@ fn table_id_for_parts<DB: DatabaseLike>(
     u32::try_from(id).ok()
 }
 
-/// Resolve the exact stored name carried by a patchset.
+/// Resolve the table a SQLite session diffset names, comparing the name as
+/// SQLite compares names, without ASCII case.
+///
+/// subql emits a table under the name its engine stores, and a pg2sqlite
+/// replica uploads the name its DDL wrote, so both `orders` and `Orders`
+/// reach a table declared unquoted as `Orders`.
+///
+/// # Errors
+///
+/// [`LookupError::AmbiguousTableLookup`](sql_traits::errors::LookupError::AmbiguousTableLookup)
+/// when the name reaches more than one table.
 #[cfg(any(
     feature = "apply-patchset-postgres",
     feature = "apply-patchset-mysql",
@@ -101,17 +111,17 @@ fn table_id_for_parts<DB: DatabaseLike>(
     feature = "apply-patchset-postgres-async",
     feature = "apply-patchset-mysql-async"
 ))]
-#[must_use]
-pub(crate) fn table_id_by_stored_name<DB: DatabaseLike>(
+pub(crate) fn table_id_by_diffset_name<DB: DatabaseLike>(
     database: &DB,
     table_name: &str,
-) -> Option<TableId> {
-    table_id_for_parts(
-        database,
-        None,
-        table_name,
-        sql_traits::structs::IdentifierCase::Exact,
-    )
+) -> Result<Option<TableId>, sql_traits::errors::LookupError> {
+    let table = database.table_by_target(
+        parts_target(None, table_name),
+        <crate::backend::SQLite as crate::backend::Backend>::WIRE_TABLE_NAME_CASE,
+    )?;
+    Ok(table
+        .and_then(|table| database.table_id(table))
+        .and_then(|id| u32::try_from(id).ok()))
 }
 
 /// Resolve separate schema and relation values under the engine's wire policy.
@@ -203,11 +213,18 @@ pub(crate) fn stored_table_name<B: crate::backend::Backend, DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
 ) -> Result<StoredTableName<'_>, crate::CatalogError> {
+    Ok(stored_name_of::<B, _>(lookup_table(database, table_id)?))
+}
+
+/// The schema and name the database stores for `table`, as
+/// [`stored_table_name`] answers them.
+pub(crate) fn stored_name_of<B: crate::backend::Backend, T: TableLike>(
+    table: &T,
+) -> StoredTableName<'_> {
     use alloc::borrow::Cow;
     use sql_traits::structs::IdentifierCase;
 
-    let table = lookup_table(database, table_id)?;
-    Ok(match B::WRITTEN_TABLE_NAME_CASE {
+    match B::WRITTEN_TABLE_NAME_CASE {
         IdentifierCase::AsWritten => StoredTableName {
             schema: table.stored_table_schema(),
             name: table.stored_table_name(),
@@ -216,7 +233,7 @@ pub(crate) fn stored_table_name<B: crate::backend::Backend, DB: DatabaseLike>(
             schema: table.table_schema().map(Cow::Borrowed),
             name: Cow::Borrowed(table.table_name()),
         },
-    })
+    }
 }
 
 /// Resolve a column name within a table to subql's compact [`ColumnId`].
@@ -410,7 +427,9 @@ pub(crate) fn stored_column_name<B: crate::backend::Backend, C: ColumnLike>(
     }
 }
 
-/// Build a [`SimpleTable`] from the catalog for `table_id`.
+/// Build a [`SimpleTable`] from the catalog for `table_id`, naming the table
+/// and its columns as the engine `B` stores them, which is how its wire
+/// messages name them.
 ///
 /// Reads the column names in order and the primary-key indices from the
 /// catalog, so the catalog is the authoritative source for both. The
@@ -423,22 +442,23 @@ pub(crate) fn stored_column_name<B: crate::backend::Backend, C: ColumnLike>(
 /// # Errors
 /// [`CatalogError`](crate::CatalogError) when the table id or any of its
 /// columns cannot be resolved.
-pub fn simple_table<DB: DatabaseLike>(
+pub fn simple_table<B: crate::backend::Backend, DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
 ) -> Result<SimpleTable, crate::CatalogError> {
     let table = lookup_table(database, table_id)?;
     let arity = table_arity(database, table_id)?;
-    let mut column_refs: Vec<(&str, &str)> = Vec::with_capacity(arity);
+    let mut names = Vec::with_capacity(arity);
     for ordinal in 0..arity {
-        let name = table
-            .column_name_by_id(ordinal, database)
+        let column = table
+            .column_by_id(ordinal, database)
             .ok()
             .flatten()
             .ok_or(crate::CatalogError::UnknownColumn { table_id, ordinal })?;
-        column_refs.push((name, ""));
+        names.push(stored_column_name::<B, _>(column));
     }
-    let table_name = table.table_name().to_string();
+    let column_refs: Vec<(&str, &str)> = names.iter().map(|name| (name.as_ref(), "")).collect();
+    let table_name = stored_name_of::<B, _>(table).name.into_owned();
     let pk_indices: Vec<usize> = primary_key_columns(database, table_id)?
         .into_iter()
         .map(usize::from)
@@ -880,12 +900,9 @@ mod tests {
         );
     }
 
-    /// A name a changeset carried is the catalog's own spelling, so it is
-    /// compared exactly.
-    ///
-    /// The fixture holds both spellings, which is two tables in PostgreSQL.
-    /// Folding the lookup would match both and answer nothing, and letting
-    /// quoting decide would fold the unquoted lookup onto the wrong one.
+    /// A diffset names a table as SQLite does, so a name two PostgreSQL
+    /// tables answer once case is ignored is refused, whichever spelling
+    /// the diffset carried.
     #[cfg(any(
         feature = "apply-patchset-postgres",
         feature = "apply-patchset-mysql",
@@ -894,27 +911,26 @@ mod tests {
         feature = "apply-patchset-mysql-async"
     ))]
     #[test]
-    fn a_changeset_name_reaches_the_table_it_was_read_from() {
+    fn a_diffset_name_two_tables_answer_is_refused() {
         let db = ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(
             r#"CREATE TABLE "Docs" (id INT PRIMARY KEY); CREATE TABLE docs (id INT PRIMARY KEY);"#,
         )
         .unwrap();
-        let quoted = table_id::<Postgres, _>(&db, r#""Docs""#).expect("the quoted table");
-        let folded = table_id::<Postgres, _>(&db, "docs").expect("the folded table");
-        assert_ne!(quoted, folded);
 
-        assert_eq!(table_id_by_stored_name(&db, "Docs"), Some(quoted));
-        assert_eq!(table_id_by_stored_name(&db, "docs"), Some(folded));
-        assert_eq!(
-            table_id_by_stored_name(&db, "DOCS"),
-            None,
-            "a spelling the catalog does not hold reaches nothing"
-        );
+        for spelling in ["Docs", "docs", "DOCS"] {
+            assert!(
+                matches!(
+                    table_id_by_diffset_name(&db, spelling),
+                    Err(sql_traits::errors::LookupError::AmbiguousTableLookup { .. })
+                ),
+                "`{spelling}` reaches both tables"
+            );
+        }
     }
 
-    /// subql names a table in the patchsets it emits by the catalog's
-    /// spelling, so a table the catalog wrote unquoted in mixed case is
-    /// reached again when such a patchset comes back.
+    /// subql emits an unquoted `Ledger` as `ledger`, the name PostgreSQL
+    /// stores, and a pg2sqlite replica uploads it as `Ledger`, so both
+    /// reach the table.
     #[cfg(any(
         feature = "apply-patchset-postgres",
         feature = "apply-patchset-mysql",
@@ -923,7 +939,7 @@ mod tests {
         feature = "apply-patchset-mysql-async"
     ))]
     #[test]
-    fn an_emitted_patchset_name_reaches_its_table_again() {
+    fn an_emitted_and_an_uploaded_name_reach_the_table() {
         use sqlite_diff_rs::DynTable;
 
         let db = ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(
@@ -931,9 +947,13 @@ mod tests {
         )
         .unwrap();
         let ledger = table_id::<Postgres, _>(&db, "ledger").expect("ledger exists");
-        let emitted = simple_table(&db, ledger).unwrap();
+        let emitted = simple_table::<Postgres, _>(&db, ledger).unwrap();
 
-        assert_eq!(table_id_by_stored_name(&db, emitted.name()), Some(ledger));
+        assert_eq!(emitted.name(), "ledger");
+        let resolve = |name: &str| table_id_by_diffset_name(&db, name).expect("one table at most");
+        assert_eq!(resolve(emitted.name()), Some(ledger));
+        assert_eq!(resolve("Ledger"), Some(ledger));
+        assert_eq!(resolve("journal"), None);
     }
 
     /// The two spellings no lookup could reach before the comparison was
@@ -1508,7 +1528,7 @@ mod tests {
             Err(crate::CatalogError::UnknownTable(missing))
         );
         assert_eq!(
-            simple_table(&db, missing).unwrap_err(),
+            simple_table::<Postgres, _>(&db, missing).unwrap_err(),
             crate::CatalogError::UnknownTable(missing)
         );
         assert!(matches!(

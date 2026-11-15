@@ -5,33 +5,58 @@
 //! whole schema, so each adapter builds this index at construction and
 //! answers every lookup with one hash lookup and one slice index.
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::hash::{BuildHasher as _, Hasher as _};
 
 use diesel::result::Error as DieselError;
 use sql_traits::prelude::{DatabaseLike, TableLike};
+use sql_traits::structs::IdentifierCase;
 use sqlite_diff_rs::Value as WireValue;
 
-/// The columns of every catalog table, keyed by the table's bare stored
-/// name.
+/// The columns of every catalog table, keyed by the table's bare name as
+/// the engine given to [`ColumnIndex::new`] stores it, and compared as that
+/// engine compares table names.
 ///
-/// When two schemas store the same bare name, the first table the catalog
+/// When two tables answer the same name, the first table the catalog
 /// yields wins, matching the linear scan this index replaced.
 #[derive(Debug)]
 pub struct ColumnIndex<'db, DB: DatabaseLike> {
-    tables: hashbrown::HashMap<&'db str, Vec<&'db DB::Column>>,
+    /// Whether names compare without ASCII case, as SQLite compares them.
+    caseless: bool,
+    hasher: hashbrown::DefaultHashBuilder,
+    tables: hashbrown::HashTable<IndexedTable<'db, DB>>,
+}
+
+/// One table's stored name and its columns in ordinal order.
+#[derive(Debug)]
+struct IndexedTable<'db, DB: DatabaseLike> {
+    name: Cow<'db, str>,
+    columns: Vec<IndexedColumn<'db, DB>>,
+}
+
+/// A column and the name the engine stores for it.
+#[derive(Debug)]
+struct IndexedColumn<'db, DB: DatabaseLike> {
+    column: &'db DB::Column,
+    name: Cow<'db, str>,
 }
 
 impl<'db, DB: DatabaseLike> ColumnIndex<'db, DB> {
-    /// Walk the catalog once and index it.
+    /// Walk the catalog once and index it under the names the engine `B`
+    /// stores.
     ///
     /// # Errors
     /// [`CatalogError::Lookup`](crate::CatalogError::Lookup) when the
     /// catalog fails to yield a table's columns.
-    pub fn new(catalog: &'db DB) -> Result<Self, crate::CatalogError> {
-        let mut tables: hashbrown::HashMap<&'db str, Vec<&'db DB::Column>> =
-            hashbrown::HashMap::new();
+    pub fn new<B: crate::backend::Backend>(catalog: &'db DB) -> Result<Self, crate::CatalogError> {
+        let mut index = Self {
+            caseless: matches!(B::WIRE_TABLE_NAME_CASE, IdentifierCase::Folded),
+            hasher: hashbrown::DefaultHashBuilder::default(),
+            tables: hashbrown::HashTable::new(),
+        };
         for table in catalog.tables() {
             let columns = table
                 .columns(catalog)
@@ -42,17 +67,57 @@ impl<'db, DB: DatabaseLike> ColumnIndex<'db, DB> {
                         .unwrap_or(u32::MAX),
                     error,
                 })?
+                .map(|column| IndexedColumn {
+                    column,
+                    name: crate::catalog_helpers::stored_column_name::<B, _>(column),
+                })
                 .collect();
-            tables.entry(table.table_name()).or_insert(columns);
+            let name = crate::catalog_helpers::stored_name_of::<B, _>(table).name;
+            if index.table(&name).is_none() {
+                let hash = name_hash(&index.hasher, &name);
+                index
+                    .tables
+                    .insert_unique(hash, IndexedTable { name, columns }, |entry| {
+                        name_hash(&index.hasher, &entry.name)
+                    });
+            }
         }
-        Ok(Self { tables })
+        Ok(index)
     }
 
     /// The column at `index` of `table_name`, or `None` when the catalog
     /// knows no such table or the index is out of range.
     pub fn column_at(&self, table_name: &str, index: usize) -> Option<&'db DB::Column> {
-        self.tables.get(table_name)?.get(index).copied()
+        Some(self.table(table_name)?.columns.get(index)?.column)
     }
+
+    /// The name the engine stores for the column at `index` of
+    /// `table_name`, which is the name its SQL quotes, or `None` where
+    /// [`Self::column_at`] answers `None`.
+    pub fn column_name_at(&self, table_name: &str, index: usize) -> Option<&str> {
+        Some(&self.table(table_name)?.columns.get(index)?.name)
+    }
+
+    fn table(&self, table_name: &str) -> Option<&IndexedTable<'db, DB>> {
+        self.tables
+            .find(name_hash(&self.hasher, table_name), |entry| {
+                if self.caseless {
+                    entry.name.eq_ignore_ascii_case(table_name)
+                } else {
+                    entry.name == table_name
+                }
+            })
+    }
+}
+
+/// Hash `name` without ASCII case, so names that compare equal under
+/// either rule land in one bucket.
+fn name_hash(hasher: &hashbrown::DefaultHashBuilder, name: &str) -> u64 {
+    let mut state = hasher.build_hasher();
+    for byte in name.bytes() {
+        state.write_u8(byte.to_ascii_lowercase());
+    }
+    state.finish()
 }
 
 /// The refusal for a bind against a column the catalog does not know.
@@ -193,7 +258,7 @@ mod tests {
             "the fixture's two tables must differ for the tie-break to be visible"
         );
 
-        let index = ColumnIndex::new(&db).expect("the catalog indexes");
+        let index = ColumnIndex::new::<crate::backend::Postgres>(&db).expect("the catalog indexes");
         let indexed: Vec<&str> = (0..first.len())
             .map(|position| {
                 index
@@ -207,5 +272,29 @@ mod tests {
             index.column_at("items", first.len()).is_none(),
             "a position past the winning table's width is out of range"
         );
+    }
+
+    const MIXED_CASE: &str = "CREATE TABLE Orders (Id INT PRIMARY KEY, Status TEXT);";
+
+    /// PostgreSQL stores an unquoted `Orders` as `orders`, the name its change
+    /// messages carry.
+    #[test]
+    fn a_postgres_index_answers_the_folded_name_only() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(MIXED_CASE).expect("the fixture DDL parses");
+        let index = ColumnIndex::new::<crate::backend::Postgres>(&db).expect("the catalog indexes");
+        assert_eq!(index.column_name_at("orders", 1), Some("status"));
+        assert!(
+            index.column_at("Orders", 1).is_none(),
+            "PostgreSQL compares a stored name exactly"
+        );
+    }
+
+    /// SQLite keeps the written name and compares names without ASCII case.
+    #[test]
+    fn a_sqlite_index_answers_any_ascii_case_and_keeps_the_written_name() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(MIXED_CASE).expect("the fixture DDL parses");
+        let index = ColumnIndex::new::<crate::backend::SQLite>(&db).expect("the catalog indexes");
+        assert_eq!(index.column_name_at("ORDERS", 1), Some("Status"));
+        assert_eq!(index.column_name_at("orders", 1), Some("Status"));
     }
 }
