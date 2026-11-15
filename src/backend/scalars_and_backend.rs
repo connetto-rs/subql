@@ -234,6 +234,21 @@ pub enum TypeNames {
     Postgres,
 }
 
+/// How a backend spells a `CHECK` constraint's expression, so a catalog's
+/// `CHECK` and a live table's compare as one when the engine stores them as
+/// one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckTexts {
+    /// The expression as written.
+    Declared,
+    /// sqlparser-canonicalize's canonical text, with sql-traits'
+    /// `SemanticProofs` spelling the casts, constants and `IN` rewrites
+    /// PostgreSQL's deparse writes, so `s <> ''` and `(s <> ''::text)` are
+    /// one `CHECK`. An expression without a canonical text keeps its
+    /// written one, so a change to it still differs.
+    Postgres,
+}
+
 /// One SQL database subql observes.
 ///
 /// An implementation names a database (via its sqlparser dialect) and
@@ -346,6 +361,15 @@ pub trait Backend: 'static {
     /// PostgreSQL's normalization would read a MySQL or SQLite `FLOAT`,
     /// which MySQL stores in four bytes, as `DOUBLE PRECISION`.
     const TYPE_NAMES: TypeNames;
+
+    /// How a `CHECK` expression is spelled when a catalog shape meets a
+    /// live one.
+    ///
+    /// Required because the engines disagree. PostgreSQL answers its own
+    /// deparse of a stored `CHECK`, while SQLite compares two columns under
+    /// the left one's collation, so the canonical text, which orders
+    /// operands, would read two different SQLite `CHECK`s as one.
+    const CHECK_TEXTS: CheckTexts;
 
     /// The width an arithmetic result is held at, given each operand's
     /// width, or `None` when the operation is not on floats.

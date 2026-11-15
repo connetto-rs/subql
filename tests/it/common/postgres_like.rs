@@ -24,6 +24,8 @@ macro_rules! postgres_like_backend {
 
             const TYPE_NAMES: subql::backend::TypeNames = subql::backend::TypeNames::Postgres;
 
+            const CHECK_TEXTS: subql::backend::CheckTexts = subql::backend::CheckTexts::Postgres;
+
             /// This backend speaks the PostgreSQL dialect, so it takes
             /// PostgreSQL's `LIKE` escape rule with it.
             const LIKE_DEFAULT_ESCAPE: Option<char> = Some('\\');

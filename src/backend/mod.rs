@@ -68,7 +68,7 @@ pub use scalar_value::{
     TextRule, TextWidth, TrailingSpaces, Value, ValueKind, ValueKindOf, VarianceSeed,
 };
 pub use scalars_and_backend::{
-    Backend, JsonDocument, ScalarCore, ScalarKey, ScalarText, ScalarTruth, SqliteJson,
+    Backend, CheckTexts, JsonDocument, ScalarCore, ScalarKey, ScalarText, ScalarTruth, SqliteJson,
     SqliteJsonStorage, TypeNames,
 };
 pub use shipped::{

@@ -5,7 +5,8 @@
 //! the live table as the database has it now. It carries the columns in
 //! order, each with its declared type, nullability and default presence,
 //! the primary key columns in key order, the `CHECK` constraint
-//! expressions in declaration order, and the replica identity where the
+//! expressions in declaration order, spelled under the backend's
+//! [`Backend::CHECK_TEXTS`], and the replica identity where the
 //! backend has one. A catalog side built from a parser catalog has no
 //! replica identity, since a `CREATE TABLE` never declares one.
 
@@ -14,14 +15,18 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use sql_traits::prelude::{ColumnLike, DatabaseLike, TableLike};
+use sql_traits::prelude::{ColumnLike, DatabaseLike, ExpressionScope, SemanticProofs, TableLike};
+use sql_traits::structs::IdentifierCase;
 use sql_traits::traits::{
     ArrayDimension, CharacterLengthUnit, CheckConstraintLike, ColumnCollation, DataTypeLike,
     DialectLike, EnumWidth, EnumerationKind, IntervalFields, StructureKind, StructuredField,
     TypeMatch, TypeMatchLike,
 };
+use sqlparser::ast::Expr;
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser_canonicalize::Canonicalizer;
 
-use crate::backend::{Backend, TypeNames};
+use crate::backend::{Backend, CheckTexts, TypeNames};
 
 /// The replica identity a backend applies to a table's updates and
 /// deletes, where the backend has one.
@@ -269,7 +274,8 @@ pub struct TableShape {
     columns: Vec<ColumnShape>,
     /// The primary key's column names, in the order the key declares them.
     primary_key: Vec<String>,
-    /// The `CHECK` constraint expressions, in declaration order.
+    /// The `CHECK` constraint expressions, in declaration order, spelled
+    /// under the backend's [`Backend::CHECK_TEXTS`].
     checks: Vec<String>,
     /// The replica identity, where the backend has one.
     replica_identity: Option<ReplicaIdentity>,
@@ -312,7 +318,7 @@ impl TableShape {
             .collect();
         let checks = table
             .check_constraints(database)?
-            .map(|check| check.expression(database).to_string())
+            .map(|check| check_text::<B, DB>(table, database, check.expression(database)))
             .collect();
         Ok(Self {
             columns,
@@ -351,7 +357,8 @@ impl TableShape {
         &self.primary_key
     }
 
-    /// The `CHECK` constraint expressions, in declaration order.
+    /// The `CHECK` constraint expressions, in declaration order, spelled
+    /// under the backend's [`Backend::CHECK_TEXTS`].
     #[must_use]
     pub fn checks(&self) -> &[String] {
         &self.checks
@@ -376,6 +383,28 @@ fn column_name<B: Backend, DB: DatabaseLike>(column: &DB::Column) -> String {
     B::COLUMN_NAME_CASE
         .compared_form(column.column_name(), column.column_name_is_quoted())
         .into_owned()
+}
+
+/// The text `expression`, a `CHECK` of `table`, compares under in backend `B`.
+fn check_text<'db, B: Backend, DB: DatabaseLike>(
+    table: &'db DB::Table,
+    database: &'db DB,
+    expression: &Expr,
+) -> String {
+    match B::CHECK_TEXTS {
+        CheckTexts::Declared => expression.to_string(),
+        CheckTexts::Postgres => {
+            let scope = ExpressionScope::Table(table);
+            SemanticProofs::for_expression(expression, &scope, database, IdentifierCase::Folded)
+                .ok()
+                .and_then(|proofs| {
+                    Canonicalizer::new(&PostgreSqlDialect {})
+                        .normalize_with_context(&proofs.view())
+                        .ok()
+                })
+                .unwrap_or_else(|| expression.to_string())
+        }
+    }
 }
 
 #[cfg(test)]

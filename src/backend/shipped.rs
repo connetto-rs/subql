@@ -235,6 +235,10 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> Backend for Postgres<V> {
     /// PostgreSQL's catalog answers its own spelling of every type.
     const TYPE_NAMES: crate::backend::TypeNames = crate::backend::TypeNames::Postgres;
 
+    /// PostgreSQL answers its deparse of a stored `CHECK`, with casts and
+    /// rewrites the declared one does not write.
+    const CHECK_TEXTS: crate::backend::CheckTexts = crate::backend::CheckTexts::Postgres;
+
     /// Measured on 16.11. Equality under a deterministic collation is byte
     /// equality, including for the database default, since `CREATE
     /// DATABASE` cannot select a nondeterministic collation. Ordering is
@@ -549,6 +553,10 @@ impl<C: MySqlTableNameCase> Backend for MySql<C> {
     /// A bare MySQL `FLOAT` is single precision, which PostgreSQL's names
     /// would read as double.
     const TYPE_NAMES: crate::backend::TypeNames = crate::backend::TypeNames::Declared;
+
+    /// No MySQL live read spells a `CHECK` yet, so it keeps the declared
+    /// text.
+    const CHECK_TEXTS: crate::backend::CheckTexts = crate::backend::CheckTexts::Declared;
 
     /// Measured: MySQL answers `NULL` with warning 1365, even with
     /// `ERROR_FOR_DIVISION_BY_ZERO` in `sql_mode`, which raises on writes.
@@ -994,6 +1002,9 @@ impl Backend for SQLite {
 
     /// SQLite stores the declared type as written.
     const TYPE_NAMES: crate::backend::TypeNames = crate::backend::TypeNames::Declared;
+
+    /// SQLite stores the declared `CREATE TABLE` text.
+    const CHECK_TEXTS: crate::backend::CheckTexts = crate::backend::CheckTexts::Declared;
 
     fn compare_cross_kind_numeric(
         left: &Value<Self>,

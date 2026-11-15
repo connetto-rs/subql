@@ -1318,7 +1318,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#42605ce3fb54e013338a32393e7cb82ea0d4acce"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#030d0688c3cf37a71e9d87d9702b2d70427eaae9"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -1326,6 +1326,7 @@ dependencies = [
  "sha2",
  "sql-values 0.5.1",
  "sqlparser",
+ "sqlparser-canonicalize",
  "sqlparser-plpgsql",
  "thiserror",
  "unicode-normalization",
@@ -1400,7 +1401,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-canonicalize"
 version = "0.2.1"
-source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#be62ac98064b3b17f0479927d24df05c539dc96a"
+source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#1fde5fd1d49cd1188fe92047fef6d67a6e3b12bd"
 dependencies = [
  "seahash",
  "sqlparser",
