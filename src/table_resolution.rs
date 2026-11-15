@@ -137,6 +137,29 @@ mod tests {
         );
     }
 
+    /// pgoutput and wal2json report the schema and relation as PostgreSQL
+    /// stores them, so an unquoted catalog name is reached by its folded
+    /// spelling and a quoted one only by its own.
+    #[test]
+    fn wire_parts_match_an_unquoted_catalog_name_as_postgres_stores_it() {
+        let db = ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(
+            r#"CREATE SCHEMA Sales;
+               CREATE TABLE Sales.Orders (id INT);
+               CREATE TABLE Sales."Ledger" (id INT);"#,
+        )
+        .expect("DDL parses");
+        let written = |name| catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, name);
+        let wire = |schema, table| {
+            resolve_table_parts::<crate::backend::Postgres, _>(Some(schema), table, &db).ok()
+        };
+
+        assert_eq!(wire("sales", "orders"), written("sales.orders"));
+        assert_eq!(wire("sales", "Ledger"), written(r#"sales."Ledger""#));
+        assert!(written("sales.orders").is_some() && written(r#"sales."Ledger""#).is_some());
+        assert_eq!(wire("Sales", "Orders"), None);
+        assert_eq!(wire("sales", "ledger"), None);
+    }
+
     #[test]
     fn mysql_wire_names_follow_lower_case_table_names() {
         use crate::backend::{MySql, NamesFoldedAtLookup, NamesStoredLowercased};

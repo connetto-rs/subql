@@ -70,11 +70,12 @@ pub fn table_id_for_name<B: crate::backend::Backend, DB: DatabaseLike>(
     u32::try_from(id).ok()
 }
 
-/// Build a target from identifier values without SQL quote metadata.
+/// Build a target from identifier values an engine stores, which are
+/// literal names and so read as quoted.
 fn parts_target<'a>(schema: Option<&'a str>, name: &'a str) -> TargetName<'a> {
-    let target = TargetName::new(name, false);
+    let target = TargetName::new(name, true);
     match schema {
-        Some(schema) => target.with_schema(schema, false),
+        Some(schema) => target.with_schema(schema, true),
         None => target,
     }
 }
