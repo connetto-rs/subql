@@ -6,7 +6,7 @@ use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, Value};
 use subql::testing::TestEvent;
-use subql::{catalog_helpers, DefaultIds, SubscriptionEngine, SubscriptionRequest};
+use subql::{catalog_helpers, DefaultIds, RegisterError, SubscriptionEngine, SubscriptionRequest};
 
 type Engine = SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB>;
 
@@ -143,4 +143,40 @@ fn a_followed_row_belongs_to_the_table_its_name_resolves_to() {
         followed(DOTTED, &tables, r#""my.reports""#),
         [r#""my.reports""#]
     );
+}
+
+/// A quoted spelling no table is stored under reaches no table, and the
+/// refusal names the reference with its quotes.
+#[test]
+fn a_quoted_spelling_no_table_holds_is_refused_as_written() {
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(TWINS).expect("DDL parses");
+    let mut engine = Engine::new(catalog, PostgreSqlDialect {});
+    assert!(matches!(
+        engine.register(SubscriptionRequest::new(1u64, r#"SELECT * FROM "REPORTS""#)),
+        Err(RegisterError::UnknownTable(name)) if name == r#""REPORTS""#
+    ));
+    assert!(matches!(
+        engine.follow_row(1u64, r#""REPORTS""#, vec![Value::Int(1)]),
+        Err(RegisterError::UnknownTable(name)) if name == r#""REPORTS""#
+    ));
+}
+
+/// A follow of a quoted table refuses a key that cannot name one of its
+/// rows, naming the table as PostgreSQL stores it.
+#[test]
+fn a_follow_of_a_quoted_table_refuses_a_key_it_cannot_match() {
+    let ddl = format!(r#"{TWINS} CREATE TABLE "Notes" (body TEXT);"#);
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(&ddl).expect("DDL parses");
+    let notes = catalog_helpers::table_id::<Postgres, _>(&catalog, r#""Notes""#)
+        .expect("Notes is in the catalog");
+    let mut engine = Engine::new(catalog, PostgreSqlDialect {});
+    assert!(matches!(
+        engine.follow_row(1u64, r#""Reports""#, vec![]),
+        Err(RegisterError::UnsupportedSql(message)) if message
+            == r#"follow_row: table "Reports" has 1 primary-key column(s) but 0 value(s) were supplied"#
+    ));
+    assert!(matches!(
+        engine.follow_row(1u64, r#""Notes""#, vec![Value::Int(1)]),
+        Err(RegisterError::NoPrimaryKey { table_id }) if table_id == notes
+    ));
 }

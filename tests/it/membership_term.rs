@@ -1543,24 +1543,16 @@ mod describe_terms {
         );
     }
 
-    /// rls2fga is handed the subscribed table as PostgreSQL stores it, so a
-    /// quoted `"Reports"` is classified as itself rather than as a `reports`
-    /// the catalog does not hold.
-    #[test]
-    fn a_quoted_mixed_case_table_takes_its_membership_term() {
-        const QUOTED_DDL: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
-         CREATE TABLE project_members(project_id INTEGER REFERENCES projects(id), user_id TEXT, PRIMARY KEY(project_id, user_id));
-         CREATE TABLE \"Reports\"(id INTEGER PRIMARY KEY, project_id INTEGER);";
-        const QUOTED_TERM: &str = "SELECT * FROM \"Reports\" WHERE project_id IN \
-         (SELECT project_id FROM project_members WHERE user_id = current_setting('app.user_id', true))";
-
-        let db = deployment::db(QUOTED_DDL);
-        let reports = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "\"Reports\"")
-            .expect("Reports is in the catalog");
+    /// Register `term` on an engine over `ddl` and insert into `table`, written
+    /// as SQL, a row of the project `term` admits alice to.
+    fn admits_alice(ddl: &str, table: &str, term: &str) {
+        let db = deployment::db(ddl);
+        let reports = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, table)
+            .expect("the subscribed table is in the catalog");
         let mut engine: Engine =
             SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator());
         let request =
-            SubscriptionRequest::new(1u64, QUOTED_TERM).subscriber(Value::String("alice".into()));
+            SubscriptionRequest::new(1u64, term).subscriber(Value::String("alice".into()));
         let described = engine
             .describe_terms(&request)
             .expect("the term is describable");
@@ -1579,6 +1571,36 @@ mod describe_terms {
             ))
             .unwrap();
         assert_eq!(notifs.inserted(), &[1]);
+    }
+
+    /// rls2fga is handed the subscribed table as PostgreSQL stores it, so a
+    /// quoted `"Reports"` is classified as itself rather than as a `reports`
+    /// the catalog does not hold.
+    #[test]
+    fn a_quoted_mixed_case_table_takes_its_membership_term() {
+        admits_alice(
+            "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE project_members(project_id INTEGER REFERENCES projects(id), user_id TEXT, PRIMARY KEY(project_id, user_id));
+             CREATE TABLE \"Reports\"(id INTEGER PRIMARY KEY, project_id INTEGER);",
+            "\"Reports\"",
+            "SELECT * FROM \"Reports\" WHERE project_id IN \
+             (SELECT project_id FROM project_members WHERE user_id = current_setting('app.user_id', true))",
+        );
+    }
+
+    /// A table under a schema reaches rls2fga with its schema, both parts as
+    /// PostgreSQL stores them.
+    #[test]
+    fn a_quoted_table_under_a_schema_takes_its_membership_term() {
+        admits_alice(
+            "CREATE SCHEMA app;
+             CREATE TABLE app.projects(id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE app.project_members(project_id INTEGER REFERENCES app.projects(id), user_id TEXT, PRIMARY KEY(project_id, user_id));
+             CREATE TABLE app.\"Reports\"(id INTEGER PRIMARY KEY, project_id INTEGER);",
+            "app.\"Reports\"",
+            "SELECT * FROM app.\"Reports\" WHERE project_id IN \
+             (SELECT project_id FROM app.project_members WHERE user_id = current_setting('app.user_id', true))",
+        );
     }
 
     /// The membership table is described under the name PostgreSQL stores,

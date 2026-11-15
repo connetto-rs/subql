@@ -1825,7 +1825,7 @@ pub(super) const MAX_EXPR_DEPTH: usize = 128;
 /// Maximum SQL input length (defense-in-depth against pathological inputs).
 pub(super) const MAX_SQL_LEN: usize = 8192;
 
-fn parse_error(error: &sqlparser::parser::ParserError) -> crate::RegisterError {
+pub(crate) fn parse_error(error: &sqlparser::parser::ParserError) -> crate::RegisterError {
     crate::RegisterError::ParseError {
         line: 1,
         column: 0,

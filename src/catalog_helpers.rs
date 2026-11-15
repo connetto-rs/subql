@@ -168,11 +168,9 @@ pub fn table_name<B: crate::backend::Backend, DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
 ) -> Option<String> {
-    Some(
-        stored_table_name::<B, DB>(database, table_id)?
-            .name
-            .into_owned(),
-    )
+    stored_table_name::<B, DB>(database, table_id)
+        .ok()
+        .map(|stored| stored.name.into_owned())
 }
 
 /// A table's schema and name as the database stores them, as
@@ -195,17 +193,21 @@ impl StoredTableName<'_> {
     }
 }
 
-/// The schema and name the database stores for `table_id`, or [`None`]
-/// when the catalog knows no such table.
+/// The schema and name the database stores for `table_id`.
+///
+/// # Errors
+///
+/// [`CatalogError::UnknownTable`](crate::CatalogError::UnknownTable) when the
+/// catalog knows no such table.
 pub(crate) fn stored_table_name<B: crate::backend::Backend, DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
-) -> Option<StoredTableName<'_>> {
+) -> Result<StoredTableName<'_>, crate::CatalogError> {
     use alloc::borrow::Cow;
     use sql_traits::structs::IdentifierCase;
 
-    let table = database.table_by_id(usize::try_from(table_id).ok()?)?;
-    Some(match B::WRITTEN_TABLE_NAME_CASE {
+    let table = lookup_table(database, table_id)?;
+    Ok(match B::WRITTEN_TABLE_NAME_CASE {
         IdentifierCase::AsWritten => StoredTableName {
             schema: table.stored_table_schema(),
             name: table.stored_table_name(),
@@ -1498,6 +1500,14 @@ mod tests {
         assert_eq!(
             simple_table(&db, missing).unwrap_err(),
             crate::CatalogError::UnknownTable(missing)
+        );
+        assert!(matches!(
+            stored_table_name::<crate::backend::Postgres, _>(&db, missing),
+            Err(crate::CatalogError::UnknownTable(id)) if id == missing
+        ));
+        assert_eq!(
+            table_name::<crate::backend::Postgres, _>(&db, missing),
+            None
         );
     }
 
