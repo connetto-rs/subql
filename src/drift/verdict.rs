@@ -801,7 +801,9 @@ mod tests {
         for (catalog_check, live_check) in [("s <> ''", "(s <> 'x'::text)"), ("s ~ 'a'", "s ~ 'b'")]
         {
             let (catalog, live) = postgres(
-                &format!("CREATE TABLE t1 (id INTEGER PRIMARY KEY, s TEXT CHECK ({catalog_check}))"),
+                &format!(
+                    "CREATE TABLE t1 (id INTEGER PRIMARY KEY, s TEXT CHECK ({catalog_check}))"
+                ),
                 &format!("CREATE TABLE t1 (id INTEGER PRIMARY KEY, s TEXT CHECK ({live_check}))"),
             );
             let verdict = judge(&catalog, live.as_ref());
