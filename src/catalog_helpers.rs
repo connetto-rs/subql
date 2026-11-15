@@ -185,6 +185,7 @@ pub(crate) struct StoredTableName<'a> {
 impl StoredTableName<'_> {
     /// The table with both parts quoted, so reading it back under any
     /// engine's comparison reaches the stored names exactly.
+    #[cfg(feature = "membership-term")]
     pub(crate) fn target(&self) -> TargetName<'_> {
         let target = TargetName::new(&self.name, true);
         match self.schema.as_deref() {
