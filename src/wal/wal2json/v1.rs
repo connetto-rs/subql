@@ -121,7 +121,7 @@ impl WireEvent for ChangeV1 {
         let Some((names, values)) = v1_image(self, row) else {
             return Ok(Value::Missing);
         };
-        let Some(name) = catalog_helpers::column_name(db, table_id, col) else {
+        let Some(name) = catalog_helpers::column_name::<Postgres, DB>(db, table_id, col) else {
             return Ok(Value::Missing);
         };
         decode_cell(v1_value(names, values, &name), db, table_id, col)

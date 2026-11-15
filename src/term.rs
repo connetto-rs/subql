@@ -164,7 +164,8 @@ pub struct MembershipTermDescription {
     /// The table whose changed rows move which subscribers the term admits, by
     /// catalog name.
     pub member_table: String,
-    /// The column of `member_table` naming the subscriber a row admits.
+    /// The column of `member_table` naming the subscriber a row admits, as
+    /// the database stores its name.
     pub member_subject: String,
     /// Which of the caller's values a membership row's subject is matched
     /// against, and so which of [`SubscriptionRequest::subscriber`] and
@@ -209,14 +210,16 @@ pub struct MembershipTermDescription {
 /// pairs with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TermColumnPair {
-    /// The compared column of the subscribed table, by catalog name.
+    /// The compared column of the subscribed table, as the database stores
+    /// its name, so a PostgreSQL column declared `ProjectId` is `projectid`
+    /// and one declared `"ProjectId"` is `ProjectId`.
     ///
     /// One of the names
     /// [`SubscriptionRequest::term_values`](crate::SubscriptionRequest::term_values)
     /// is keyed by, since the compared columns are what both sides share.
     pub column: String,
     /// The column of `member_table` [`seed_sql`](MembershipTermDescription::seed_sql)
-    /// projects at this position.
+    /// projects at this position, as the database stores its name.
     pub member_key: String,
     /// The kind the seed column decodes as, which is also the kind
     /// [`column`](Self::column) holds.
@@ -229,7 +232,8 @@ pub struct TermColumnPair {
 /// The kind the caller's values a caller comparison admits have to be built at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallerTermDescription {
-    /// The compared column of the subscribed table, by catalog name.
+    /// The compared column of the subscribed table, as the database stores
+    /// its name.
     pub column: String,
     /// Which of the caller's values the comparison admits, and so which of
     /// [`SubscriptionRequest::subscriber`] and [`SubscriptionRequest::subjects`]
@@ -266,7 +270,7 @@ impl TermDescription {
         let Some(movement) = &plan.moved_by else {
             let compared = kind::<B, DB>(database, table, plan.columns[0])?;
             return Ok(Self::Caller(CallerTermDescription {
-                column: name(database, table, plan.columns[0])?,
+                column: name::<B, DB>(database, table, plan.columns[0])?,
                 caller: plan.caller,
                 kind: carrier_of::<B>(compared),
                 custom: custom_name::<B>(compared),
@@ -277,7 +281,8 @@ impl TermDescription {
         // whose shapes the compiler already checked. A shape a later compiler
         // lifts a term from is refused rather than served with no seed read,
         // since an unseeded term admits nobody in silence.
-        let member_subject = name(database, movement.member_table, movement.member_subject)?;
+        let member_subject =
+            name::<B, DB>(database, movement.member_table, movement.member_subject)?;
         let seed_sql = match &term.expr {
             Expr::In {
                 target: InTarget::Subquery(subquery),
@@ -316,8 +321,8 @@ impl TermDescription {
         for (compared, member_key) in plan.columns.iter().zip(&movement.member_keys) {
             let compared_kind = kind::<B, DB>(database, table, *compared)?;
             pairs.push(TermColumnPair {
-                column: name(database, table, *compared)?,
-                member_key: name(database, movement.member_table, *member_key)?,
+                column: name::<B, DB>(database, table, *compared)?,
+                member_key: name::<B, DB>(database, movement.member_table, *member_key)?,
                 kind: carrier_of::<B>(compared_kind),
                 custom: custom_name::<B>(compared_kind),
             });
@@ -346,13 +351,13 @@ fn table_name_of<DB: DatabaseLike>(database: &DB, table: TableId) -> Result<Stri
     })
 }
 
-/// A column's catalog name, or the refusal for a column the catalog forgot.
-fn name<DB: DatabaseLike>(
+/// A column's stored name, or the refusal for a column the catalog forgot.
+fn name<B: Backend, DB: DatabaseLike>(
     database: &DB,
     table: TableId,
     column: ColumnId,
 ) -> Result<String, RegisterError> {
-    catalog_helpers::column_name(database, table, column).ok_or_else(|| {
+    catalog_helpers::column_name::<B, DB>(database, table, column).ok_or_else(|| {
         RegisterError::MembershipTermRefused(alloc::format!(
             "column {column} of table {table} is not in the catalog under a name, {CANNOT_SAY}"
         ))

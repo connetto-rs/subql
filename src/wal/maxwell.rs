@@ -194,7 +194,7 @@ impl<C: crate::backend::MySqlTableNameCase> WireEvent for MaxwellEvent<C> {
         let Some(image) = image_for(&self.message, row) else {
             return Ok(Value::Missing);
         };
-        let Some(name) = catalog_helpers::column_name(db, table_id, col) else {
+        let Some(name) = catalog_helpers::column_name::<MySql<C>, DB>(db, table_id, col) else {
             return Ok(Value::Missing);
         };
         match image.get(name.as_str()) {

@@ -215,9 +215,13 @@ impl<I: IdTypes, B: Backend> SubscriptionRequest<I, B> {
     /// projects, subject first, because a row two of the caller's subjects
     /// grant has to survive either one of them losing its membership. The
     /// values follow the order of `columns`, which may differ from the filter's
-    /// own: the engine matches by name. With a static diesel schema, prefer
-    /// `term_values_for` (feature `diesel-typed`), which takes the columns
-    /// themselves and cannot misspell a name.
+    /// own: the engine matches by name. Each name is the one the database
+    /// stores, as [`TermColumnPair::column`](crate::term::TermColumnPair::column)
+    /// reports it and diesel's `table!` spells it, so on PostgreSQL a column
+    /// declared `ProjectId` is `projectid` and one declared `"ProjectId"` is
+    /// `ProjectId`. With a static diesel schema, prefer `term_values_for`
+    /// (feature `diesel-typed`), which takes the columns themselves and cannot
+    /// misspell a name.
     ///
     /// Both the columns and the read that yields the rows come from
     /// [`SubscriptionEngine::describe_terms`](crate::SubscriptionEngine::describe_terms),

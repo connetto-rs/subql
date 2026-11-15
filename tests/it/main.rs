@@ -16,6 +16,9 @@ mod durable_evidence;
 #[cfg(feature = "executor-diesel-postgres")]
 mod durable_postgres;
 
+#[cfg(feature = "executor-diesel-postgres")]
+mod stored_column_names_pg;
+
 mod replay_detector;
 
 mod agg_avg_exactness;

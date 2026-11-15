@@ -913,7 +913,7 @@ fn grouped_projection<B: crate::backend::Backend, DB: DatabaseLike>(
     // attributed to anything the caller asked for.
     for column in groups {
         if !projected_groups.contains(column) {
-            let name = catalog_helpers::column_name(database, table_id, *column)
+            let name = catalog_helpers::column_name::<B, DB>(database, table_id, *column)
                 .unwrap_or_else(|| alloc::format!("column {column}"));
             return Err(RegisterError::UnsupportedSql(alloc::format!(
                 "{name} is grouped by but not projected, so a delivered value could not be \
@@ -1413,7 +1413,7 @@ pub(crate) fn render_aggregate_bootstrap<B: crate::backend::Backend, DB: Databas
     let mut items = Vec::with_capacity(groups.len() + if widened && single_total { 5 } else { 4 });
     let mut group_kinds = Vec::with_capacity(groups.len());
     for (slot, column) in groups.iter().enumerate() {
-        let name = catalog_helpers::column_name(database, table_id, *column)?;
+        let name = catalog_helpers::column_name::<B, DB>(database, table_id, *column)?;
         items.push(component(
             Expr::Identifier(super::quoted_ident(dialect, &name)),
             slot,

@@ -58,7 +58,7 @@ pub(super) fn build_table_meta(
                     "table {name} column index {col_idx} missing from catalog"
                 ))
             })?;
-            let column_name = column.column_name().to_string();
+            let column_name = column.stored_column_name().into_owned();
             let declared =
                 catalog_helpers::column_scalar_kind::<Postgres, _>(pg_catalog, table_id, column_id)
                     .and_then(|kind| kind.declared_type());
@@ -80,6 +80,7 @@ pub(super) fn build_table_meta(
             TableMeta {
                 oid: synth_oid(table_id),
                 sqlite_table: name,
+                relation_name: table.stored_table_name().into_owned(),
                 columns,
                 pk_column_indices,
             },

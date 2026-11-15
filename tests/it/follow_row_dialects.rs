@@ -20,9 +20,10 @@ const DDL: &str = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);";
 
 const CONSUMER: u64 = 1;
 
-#[test]
-fn follow_row_matches_its_row_under_postgres() {
-    let db = ParserDB::parse::<PostgreSqlDialect>(DDL).unwrap();
+/// Follow user 7 over the Postgres catalog `ddl` declares, then check that its
+/// row reaches the consumer and another user's does not.
+fn follows_its_row_under_postgres(ddl: &str) {
+    let db = ParserDB::parse::<PostgreSqlDialect>(ddl).unwrap();
     let users = catalog_helpers::table_id::<Postgres, _>(&db, "users").unwrap();
     let mut engine =
         SubscriptionEngine::<TestEvent<Postgres>, DefaultIds, _>::new(db, PostgreSqlDialect {});
@@ -46,6 +47,18 @@ fn follow_row_matches_its_row_under_postgres() {
         engine.consumers(&other).unwrap().inserted().is_empty(),
         "user id 8 was not followed, only id 7"
     );
+}
+
+#[test]
+fn follow_row_matches_its_row_under_postgres() {
+    follows_its_row_under_postgres(DDL);
+}
+
+/// PostgreSQL stores an unquoted `UserId` as `userid`, so that is the column
+/// the followed predicate names.
+#[test]
+fn follow_row_names_an_unquoted_mixed_case_key_as_postgres_stores_it() {
+    follows_its_row_under_postgres("CREATE TABLE users (UserId INT PRIMARY KEY, name TEXT);");
 }
 
 #[test]

@@ -92,7 +92,9 @@ fn column_name_benchmark(c: &mut Criterion) {
     group.bench_function("wide_table_every_ordinal", |b| {
         b.iter(|| {
             for column in 0..u16::try_from(WIDTH).unwrap_or(0) {
-                black_box(catalog_helpers::column_name(&db, table, column));
+                black_box(catalog_helpers::column_name::<subql::backend::Postgres, _>(
+                    &db, table, column,
+                ));
             }
         });
     });

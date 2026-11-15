@@ -129,6 +129,30 @@ mod tests {
         );
     }
 
+    /// wal2json names a column by the spelling PostgreSQL stores, so a
+    /// column the catalog declared unquoted in mixed case is read, and
+    /// compared across the two images, under its folded name.
+    #[test]
+    fn v2_reads_an_unquoted_mixed_case_column_by_its_stored_spelling() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE orders (id INT PRIMARY KEY, Status TEXT);",
+        )
+        .expect("parse DDL");
+        let ev = one_v2(
+            br#"{"action":"U","schema":"public","table":"orders",
+                 "columns":[{"name":"id","type":"integer","value":7},
+                            {"name":"status","type":"text","value":"paid"}],
+                 "identity":[{"name":"id","type":"integer","value":7},
+                             {"name":"status","type":"text","value":"pending"}]}"#,
+        );
+
+        assert_eq!(ev.changed_columns(&db), alloc::vec![1u16]);
+        assert_eq!(
+            ev.value_at(&db, RowKind::New, 1).expect("status present"),
+            Value::String("paid".into())
+        );
+    }
+
     /// Each row image keeps its own decoded cells, whichever is read first.
     #[test]
     fn a_resolved_update_keeps_old_and_new_cells_apart() {

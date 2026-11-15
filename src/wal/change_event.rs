@@ -716,7 +716,7 @@ impl WireEvent for PgChangeEvent {
         let Some(image) = image_for(&self.change, row) else {
             return Ok(Value::Missing);
         };
-        let Some(name) = catalog_helpers::column_name(db, table_id, col) else {
+        let Some(name) = catalog_helpers::column_name::<Postgres, DB>(db, table_id, col) else {
             return Ok(Value::Missing);
         };
         match image.get(&name) {
@@ -848,6 +848,36 @@ mod tests {
         assert_eq!(ev.value_at(&db, RowKind::Pk, 2).unwrap(), Value::Missing);
         // Insert carries no old image.
         assert_eq!(ev.value_at(&db, RowKind::Old, 0).unwrap(), Value::Missing);
+    }
+
+    /// pgoutput names a column by the spelling PostgreSQL stores, so a
+    /// column the catalog declared unquoted in mixed case reads from its
+    /// folded key.
+    #[test]
+    fn an_unquoted_mixed_case_column_reads_from_its_stored_spelling() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE orders (id INT PRIMARY KEY, Status TEXT);",
+        )
+        .expect("parse DDL");
+        let ev = at(ChangeEvent {
+            event_type: EventType::Insert {
+                schema: "public".into(),
+                table: "orders".into(),
+                relation_oid: 1,
+                data: row(vec![
+                    ("id", ColumnValue::text("7")),
+                    ("status", ColumnValue::text("paid")),
+                ]),
+            },
+            lsn: Lsn::new(0x10),
+            metadata: None,
+            xid: None,
+        });
+
+        assert_eq!(
+            ev.value_at(&db, RowKind::New, 1).unwrap(),
+            Value::String("paid".into())
+        );
     }
 
     #[test]

@@ -115,6 +115,9 @@ pub(super) struct TableMeta {
     /// SQLite table name; matches the PG catalog's name after pg2sqlite
     /// preserves identifiers verbatim for basic `CREATE TABLE`.
     pub(super) sqlite_table: String,
+    /// The table's name as PostgreSQL stores it, which a real server's
+    /// `Relation` message carries.
+    pub(super) relation_name: String,
     /// Column metadata in column order, index-aligned with the PG
     /// catalog.
     pub(super) columns: Vec<ColumnMeta>,
@@ -127,6 +130,9 @@ pub(super) struct TableMeta {
 
 #[derive(Clone, Debug)]
 pub(super) struct ColumnMeta {
+    /// The column's name as PostgreSQL stores it, which a real server's
+    /// messages carry. SQLite reaches the same column by it, since it
+    /// compares names without regard to case.
     pub(super) name: String,
     pub(super) pg_type_oid: Oid,
     /// The column's builtin type, `None` when the catalog declares none.
@@ -518,7 +524,7 @@ impl PgSqliteEmuSource {
             let schema = RelationSchema {
                 relation_oid: meta.oid,
                 namespace: "",
-                relation_name: meta.sqlite_table.as_str(),
+                relation_name: meta.relation_name.as_str(),
                 columns: cols.as_slice(),
             };
             let message = op_to_message(&op, &schema, fallback.as_deref()).map_err(|e| {
@@ -547,7 +553,7 @@ impl PgSqliteEmuSource {
         let schema = RelationSchema {
             relation_oid: meta.oid,
             namespace: "",
-            relation_name: meta.sqlite_table.as_str(),
+            relation_name: meta.relation_name.as_str(),
             columns: cols.as_slice(),
         };
         Some(relation_message(&schema))
@@ -857,6 +863,38 @@ mod tests {
             "commit follows"
         );
         assert!(src.poll_next_item().unwrap().is_none());
+    }
+
+    /// The emulated stream names a table and its columns as PostgreSQL stores
+    /// them, so a catalog that wrote them unquoted in mixed case is announced
+    /// and read under the folded names a real server sends.
+    #[test]
+    fn an_unquoted_mixed_case_table_streams_under_its_stored_names() {
+        let conn = SqliteConnection::establish(":memory:").expect("open in-memory sqlite");
+        let mut src = PgSqliteEmuSource::new(
+            conn,
+            "CREATE TABLE Orders (Id INT PRIMARY KEY, Status TEXT);",
+        )
+        .expect("source construction");
+        sql_query("INSERT INTO Orders (Id, Status) VALUES (1, 'paid')")
+            .execute(src.connection())
+            .unwrap();
+        let relation = src
+            .poll_next_item()
+            .unwrap()
+            .and_then(SourceItem::into_relation)
+            .expect("the table's relation leads the stream");
+        let ev = src
+            .poll_next_item()
+            .unwrap()
+            .and_then(SourceItem::into_event)
+            .expect("one event pending");
+
+        assert_eq!(relation.table(), "orders");
+        assert_eq!(
+            ev.value_at(src.pg_catalog(), RowKind::New, 1).unwrap(),
+            Value::String("paid".into())
+        );
     }
 
     #[test]

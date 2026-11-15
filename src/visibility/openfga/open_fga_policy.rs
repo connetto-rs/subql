@@ -3639,6 +3639,45 @@ GRANT DELETE ON docs TO writer;";
         assert_eq!(questions.len(), 1, "the row is not asked about");
     }
 
+    /// A column granted on its own is asked under its own relation when the
+    /// catalog wrote it unquoted in mixed case, since the model names it as
+    /// PostgreSQL stores it.
+    #[test]
+    fn an_unquoted_mixed_case_granted_column_asks_its_own_relation() {
+        let (policy, docs) = column_policy_over::<NeverAsked, Reads>(
+            "CREATE ROLE app_login LOGIN;
+             CREATE ROLE keeper NOLOGIN;
+             CREATE ROLE reader NOLOGIN;
+             CREATE TABLE docs (id INTEGER PRIMARY KEY, Title TEXT, owner_id TEXT);
+             ALTER TABLE docs OWNER TO keeper;
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY docs_read ON docs FOR SELECT USING (true);
+             GRANT SELECT (Title) ON docs TO reader;",
+            &["reader"],
+            NeverAsked,
+        );
+        let event = column_row(docs);
+        let row = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+        let select = by_column(&policy, docs, ActionStatement::Select);
+        let Asked::Ask(plan) = policy.read_plan(docs).unwrap() else {
+            panic!("a granted read is asked");
+        };
+        let reader = Reads {
+            names: &["user:alice"],
+            role: "reader",
+            read: Some(&[1]),
+        };
+
+        let questions = policy
+            .read_questions(&row, &plan, core::slice::from_ref(&reader))
+            .unwrap();
+
+        assert_eq!(
+            gate_questions(&questions, &select.gate),
+            [(0, column_relation(select, ColumnCommand::Select, "title"))]
+        );
+    }
+
     /// A `DELETE` without a `WHERE` reads no column, so it asks no column.
     #[test]
     fn a_write_reading_no_column_asks_no_column() {

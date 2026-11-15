@@ -289,7 +289,7 @@ impl WireEvent for Wal2JsonV2Event {
         let Some(columns) = v2_image(&self.message, row) else {
             return Ok(Value::Missing);
         };
-        let Some(name) = catalog_helpers::column_name(db, table_id, col) else {
+        let Some(name) = catalog_helpers::column_name::<Postgres, DB>(db, table_id, col) else {
             return Ok(Value::Missing);
         };
         decode_cell(column_value(columns, &name), db, table_id, col)

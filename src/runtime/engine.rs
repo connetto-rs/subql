@@ -969,13 +969,18 @@ where
             let stated: Vec<crate::ColumnId> = column_names
                 .iter()
                 .map(|name| {
-                    catalog_helpers::column_id::<E::Backend, _>(&self.database, table_id, name)
-                        .ok_or_else(|| {
-                            RegisterError::MembershipTermRefused(format!(
+                    catalog_helpers::column_id_for_name::<E::Backend, _>(
+                        &self.database,
+                        table_id,
+                        name,
+                        true,
+                    )
+                    .ok_or_else(|| {
+                        RegisterError::MembershipTermRefused(format!(
                             "this subscription states the values it matches for column {name:?}, \
                              which table {table_id} does not carry."
                         ))
-                        })
+                    })
                 })
                 .collect::<Result<_, _>>()?;
             // Stated rows name moving terms, independently of self-seeding caller slots.
@@ -3288,12 +3293,12 @@ where
         );
         let mut clauses = Vec::with_capacity(pk_cols.len());
         for (i, col_id) in pk_cols.iter().enumerate() {
-            let name = catalog_helpers::column_name(&self.database, table_id, *col_id).ok_or_else(
-                || RegisterError::UnknownColumn {
+            let name =
+                catalog_helpers::column_name::<E::Backend, DB>(&self.database, table_id, *col_id)
+                    .ok_or_else(|| RegisterError::UnknownColumn {
                     table_id,
                     column: format!("<primary-key ordinal {col_id}>"),
-                },
-            )?;
+                })?;
             let column = crate::compiler::quoted_ident(&self.dialect, &name).to_string();
             clauses.push(if dollar_binds {
                 format!("{column} = ${}", i + 1)
