@@ -140,6 +140,21 @@ pub(crate) fn contract_table_id<DB: DatabaseLike>(
     )
 }
 
+/// Resolve a column a visibility contract names, by the spelling the
+/// database stores, which is what a quoted identifier names.
+///
+/// rls2fga carries a column's stored spelling, so on PostgreSQL a quoted
+/// `"Owner"` arrives as `Owner` and an unquoted `Owner` as `owner`. Read as
+/// SQL text, `Owner` folds and reaches the `owner` column instead.
+#[cfg(feature = "visibility-records")]
+pub(crate) fn contract_column_id<B: crate::backend::Backend, DB: DatabaseLike>(
+    database: &DB,
+    table: TableId,
+    column: &str,
+) -> Option<ColumnId> {
+    column_id_for_name::<B, DB>(database, table, column, true)
+}
+
 /// The name the catalog stores for `table_id`, or [`None`] when it knows no such
 /// table.
 ///

@@ -1037,7 +1037,7 @@ fn resolve_key<B: crate::backend::Backend, DB: DatabaseLike>(
     }
     columns
         .iter()
-        .map(|column| catalog_helpers::column_id::<B, _>(db, table, column.as_str()))
+        .map(|column| catalog_helpers::contract_column_id::<B, _>(db, table, column.as_str()))
         .collect()
 }
 

@@ -158,7 +158,7 @@ fn caller_plan<B: crate::backend::Backend, DB: DatabaseLike>(
     // other guard admits records only for rows the term never re-checks.
     let enforced_by_the_lookup = |guard: &Guard| {
         matches!(guard, Guard::NotNull(column)
-            if catalog_helpers::column_id::<B, _>(database, table, column.as_str())
+            if catalog_helpers::contract_column_id::<B, _>(database, table, column.as_str())
                 == Some(term.columns[0]))
     };
     if !guards.iter().all(enforced_by_the_lookup) {
@@ -340,7 +340,7 @@ fn column_of<B: crate::backend::Backend, DB: DatabaseLike>(
 ) -> Option<u16> {
     match source {
         ValueSource::Column(name) => {
-            catalog_helpers::column_id::<B, _>(database, table, name.as_str())
+            catalog_helpers::contract_column_id::<B, _>(database, table, name.as_str())
         }
         _ => None,
     }
