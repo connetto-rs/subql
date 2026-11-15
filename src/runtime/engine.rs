@@ -1115,13 +1115,18 @@ where
                     .to_string(),
             )
         })?;
-        let table_name =
-            catalog_helpers::table_name(&self.database, table_id).ok_or_else(|| {
-                RegisterError::MembershipTermRefused(format!(
-                    "table {table_id} is not in the catalog under a name, so the relationship a \
+        // rls2fga reads the table as SQL text, so both parts go quoted and
+        // reach the stored names rather than folding a written one.
+        let guarded_table =
+            catalog_helpers::stored_table_name::<E::Backend, DB>(&self.database, table_id)
+                .ok_or_else(|| {
+                    RegisterError::MembershipTermRefused(format!(
+                "table {table_id} is not in the catalog under a name, so the relationship a \
                  membership subquery names cannot be classified"
-                ))
-            })?;
+            ))
+                })?
+                .target()
+                .to_string();
 
         terms
             .iter()
@@ -1129,7 +1134,7 @@ where
                 crate::term_compile::plan_term::<E::Backend, _>(
                     term,
                     table_id,
-                    &table_name,
+                    &guarded_table,
                     &self.database,
                     translator,
                     acting_role,
@@ -3255,7 +3260,9 @@ where
     /// change to that row. This is the building block for following an inserted
     /// row once its (possibly auto-generated) key is known.
     ///
-    /// `pk` must supply one value per primary-key column, in declaration order.
+    /// `table` is read as SQL text, so an unquoted name folds where the engine
+    /// folds one and a quoted name is taken as written. `pk` must supply one
+    /// value per primary-key column, in declaration order.
     ///
     /// # Errors
     /// [`RegisterError::UnknownTable`] if `table` is unknown,
@@ -3270,13 +3277,38 @@ where
     ) -> Result<Registered<E::Backend>, RegisterError> {
         let table_id = catalog_helpers::table_id::<E::Backend, _>(&self.database, table)
             .ok_or_else(|| RegisterError::UnknownTable(table.to_string()))?;
+        self.follow_row_of(consumer_id, table_id, pk)
+    }
+
+    /// Follow the row of `table_id` whose primary key is `pk`, as
+    /// [`Self::follow_row`] does once it knows the table.
+    ///
+    /// The derived SELECT names the table by the schema and name the database
+    /// stores, each quoted, so it reads back to `table_id` whatever spelling
+    /// the caller named it by.
+    pub(crate) fn follow_row_of(
+        &mut self,
+        consumer_id: I::ConsumerId,
+        table_id: TableId,
+        pk: Vec<crate::backend::Value<E::Backend>>,
+    ) -> Result<Registered<E::Backend>, RegisterError> {
+        let stored = catalog_helpers::stored_table_name::<E::Backend, DB>(&self.database, table_id)
+            .ok_or_else(|| RegisterError::UnknownTable(format!("<table id {table_id}>")))?;
+        let table = crate::compiler::quoted_ident(&self.dialect, &stored.name);
+        let table = match stored.schema.as_deref() {
+            Some(schema) => format!(
+                "{}.{table}",
+                crate::compiler::quoted_ident(&self.dialect, schema)
+            ),
+            None => table.to_string(),
+        };
         let pk_cols = catalog_helpers::primary_key_columns(&self.database, table_id)?;
         if pk_cols.is_empty() {
             return Err(RegisterError::NoPrimaryKey { table_id });
         }
         if pk.len() != pk_cols.len() {
             return Err(RegisterError::UnsupportedSql(format!(
-                "follow_row: table {table:?} has {} primary-key column(s) but {} value(s) were supplied",
+                "follow_row: table {table} has {} primary-key column(s) but {} value(s) were supplied",
                 pk_cols.len(),
                 pk.len()
             )));
@@ -3306,11 +3338,7 @@ where
                 format!("{column} = ?")
             });
         }
-        let sql = format!(
-            "SELECT * FROM {} WHERE {}",
-            crate::compiler::quoted_ident(&self.dialect, table),
-            clauses.join(" AND ")
-        );
+        let sql = format!("SELECT * FROM {table} WHERE {}", clauses.join(" AND "));
         // Build the tracked key before `pk` is moved into the request binds.
         let key = pk.clone();
         let result = self.register(SubscriptionRequest::new(consumer_id, sql).binds(pk))?;

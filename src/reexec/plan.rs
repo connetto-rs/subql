@@ -225,13 +225,10 @@ where
         if resolved.iter().any(|(seen, _)| *seen == name) {
             continue;
         }
-        let table_name = crate::compiler::parser::SqlTableName::from_object_name(&name)?;
-        let id = crate::table_resolution::resolve_table_reference::<B, DB>(
-            table_name.qualified.as_deref(),
-            &table_name.unqualified,
-            database,
-        )
-        .map_err(|_| RegisterError::UnknownTable(table_name.unqualified.clone()))?;
+        let table_name = crate::table_resolution::SqlTableName::new(&name)?;
+        let id = table_name
+            .resolve::<B, DB>(database)
+            .map_err(|_| RegisterError::UnknownTable(table_name.written()))?;
         if !resolved.iter().any(|(_, table)| *table == id) {
             resolved.push((name, id));
         }
@@ -771,13 +768,10 @@ where
     // shape whose rows can be asked about individually.
     let (select, table_name, order_by) =
         crate::compiler::sql_shape::extract_ungrouped_select_and_table(&mut statement)?;
-    let name = crate::compiler::parser::SqlTableName::from_object_name(&table_name)?;
-    let table = crate::table_resolution::resolve_table_reference::<B, DB>(
-        name.qualified.as_deref(),
-        &name.unqualified,
-        database,
-    )
-    .map_err(|_| RegisterError::UnknownTable(name.unqualified.clone()))?;
+    let name = crate::table_resolution::SqlTableName::new(&table_name)?;
+    let table = name
+        .resolve::<B, DB>(database)
+        .map_err(|_| RegisterError::UnknownTable(name.written()))?;
 
     let key_columns = crate::catalog_helpers::primary_key_columns(database, table)?;
     if key_columns.is_empty() {
@@ -821,7 +815,7 @@ where
     let mut key_idents = Vec::with_capacity(key_columns.len());
     for column in &key_columns {
         let name = crate::catalog_helpers::column_name::<B, DB>(database, table, *column)
-            .ok_or_else(|| RegisterError::UnknownTable(name.unqualified.clone()))?;
+            .ok_or_else(|| RegisterError::UnknownTable(name.written()))?;
         key_idents.push(crate::compiler::quoted_ident(
             dialect as &dyn Dialect,
             &name,
@@ -1420,5 +1414,49 @@ mod key_projection_tests {
             assert_eq!(positions(sql, &[1]), Some(vec![1]), "{sql}");
         }
         assert_eq!(positions("SELECT m.* FROM t", &[1]), None);
+    }
+}
+
+#[cfg(test)]
+mod quoted_table_tests {
+    use super::{build_plan, QueryPlan};
+    use crate::backend::Postgres;
+    use crate::reexec::BoundQuery;
+    use sql_traits::structs::ParserDB;
+    use sqlparser::dialect::PostgreSqlDialect;
+
+    /// `reports` and `"Reports"` are two PostgreSQL tables.
+    const TWINS: &str = r#"CREATE TABLE reports (id INT PRIMARY KEY, title TEXT);
+        CREATE TABLE "Reports" (id INT PRIMARY KEY, title TEXT);"#;
+
+    fn plan(sql: &str, database: &ParserDB) -> QueryPlan<Postgres> {
+        build_plan::<Postgres, _>(
+            &BoundQuery::new(sql.into(), alloc::vec::Vec::new()),
+            &PostgreSqlDialect {},
+            database,
+            None,
+        )
+        .unwrap_or_else(|error| panic!("a read tier serves {sql}: {error}"))
+    }
+
+    #[test]
+    fn a_read_tier_reads_the_quoted_table_and_not_its_folded_twin() {
+        let database = ParserDB::parse::<PostgreSqlDialect>(TWINS).expect("DDL parses");
+        let quoted = crate::catalog_helpers::table_id::<Postgres, _>(&database, r#""Reports""#)
+            .expect("Reports is in the catalog");
+
+        let QueryPlan::Keyed(keyed) = plan(
+            r#"SELECT id, title FROM "Reports" WHERE title = 'x'"#,
+            &database,
+        ) else {
+            panic!("a filter carrying its key is read keyed");
+        };
+        assert_eq!(keyed.table, quoted);
+
+        let QueryPlan::Total(total) = plan(r#"SELECT DISTINCT title FROM "Reports""#, &database)
+        else {
+            panic!("a projection without its key is re-read whole");
+        };
+        assert_eq!(total.tables, [quoted]);
     }
 }

@@ -119,11 +119,13 @@ mod tests {
         // the qualified side, i.e. resolution succeeds to
         // `public.users`. To exercise the ambiguity error we instead
         // delegate to `resolve_table_reference` with two distinct
-        // table-name strings (one playing the role of qualified, the
-        // other unqualified).
+        // table names (one playing the role of qualified, the other
+        // unqualified).
         let err = resolve_table_reference::<crate::backend::Postgres, _>(
-            Some("public.users"),
-            "other.users",
+            Some(
+                &sql_traits::structs::TargetName::new("users", false).with_schema("public", false),
+            ),
+            &sql_traits::structs::TargetName::new("users", false).with_schema("other", false),
             &catalog,
         )
         .expect_err("ambiguous lookup must fail");

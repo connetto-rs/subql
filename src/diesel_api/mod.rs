@@ -232,32 +232,38 @@ impl<C: crate::backend::MySqlTableNameCase> BindDecode<crate::backend::MySql<C>>
     }
 }
 
-/// Recover the bare table name an insert targets straight from its diesel table
+/// The catalog table an insert targets, read straight off its diesel table
 /// type, so a follow never restates (and so cannot mistype) the table it writes.
 ///
-/// Renders the table's identifier with the backend's own quoting (`"t"` on
-/// Postgres/SQLite, `` `t` `` on MySQL), strips that quoting, and takes the final
-/// dotted segment so a schema-qualified table (`"public"."users"`) resolves to
-/// its bare catalog name (`users`).
-fn insert_target_table_name<T, DB>() -> Result<String, RegisterError>
+/// diesel renders a table by the schema and name the database stores, each
+/// quoted with the backend's own quoting (`"public"."Users"` on Postgres,
+/// `` `Users` `` on MySQL), so the rendered name is read back under the
+/// engine's dialect with its quoting and its qualifier.
+fn insert_target_table<T, C, B, DB>(
+    dialect: &B::Dialect,
+    database: &DB,
+) -> Result<crate::TableId, RegisterError>
 where
-    T: Table + QueryFragment<DB> + Default,
-    DB: Backend + Default,
-    <DB as Backend>::QueryBuilder: Default,
+    T: Table + QueryFragment<C> + Default,
+    C: Backend + Default,
+    <C as Backend>::QueryBuilder: Default,
+    B: crate::backend::Backend,
+    DB: DatabaseLike,
 {
-    let rendered = render_sql::<DB, T>(&T::default(), "table")?;
-    let bare = rendered
-        .rsplit('.')
-        .next()
-        .unwrap_or(rendered.as_str())
-        .trim_matches(|c| c == '"' || c == '`')
-        .to_string();
-    if bare.is_empty() {
-        return Err(RegisterError::UnsupportedSql(format!(
-            "could not determine the target table name from the diesel insert (rendered {rendered:?})"
-        )));
-    }
-    Ok(bare)
+    let rendered = render_sql::<C, T>(&T::default(), "table")?;
+    let name = sqlparser::parser::Parser::new(dialect)
+        .try_with_sql(&rendered)
+        .and_then(|mut parser| parser.parse_object_name(false))
+        .map_err(|error| {
+            RegisterError::UnsupportedSql(format!(
+                "could not read the target table name from the diesel insert \
+                 (rendered {rendered:?}): {error}"
+            ))
+        })?;
+    let table = crate::table_resolution::SqlTableName::new(&name)?;
+    table
+        .resolve::<B, DB>(database)
+        .map_err(|_| RegisterError::UnknownTable(table.written()))
 }
 
 /// Error from [`SubscriptionEngine::register_follow_insert`].
@@ -338,7 +344,8 @@ where
         PkReturningInsert<T, U, Op>: Query + QueryFragment<C::Backend> + QueryId,
     {
         let table =
-            insert_target_table_name::<T, C::Backend>().map_err(FollowInsertError::Register)?;
+            insert_target_table::<T, C::Backend, E::Backend, DB>(self.dialect(), self.database())
+                .map_err(FollowInsertError::Register)?;
 
         let insert = insert.returning(T::default().primary_key());
 
@@ -367,7 +374,7 @@ where
         let mut results = alloc::vec::Vec::with_capacity(rows.len());
         for pk in rows {
             results.push(
-                self.follow_row(consumer_id, &table, pk)
+                self.follow_row_of(consumer_id, table, pk)
                     .map_err(FollowInsertError::Register)?,
             );
         }

@@ -161,8 +161,8 @@ pub struct MembershipTermDescription {
     /// [`seed_sql`](Self::seed_sql) projects them and each stated row's values
     /// follow, after the subject it projects first.
     pub pairs: Vec<TermColumnPair>,
-    /// The table whose changed rows move which subscribers the term admits, by
-    /// catalog name.
+    /// The table whose changed rows move which subscribers the term admits, as
+    /// the database stores its name.
     pub member_table: String,
     /// The column of `member_table` naming the subscriber a row admits, as
     /// the database stores its name.
@@ -329,7 +329,7 @@ impl TermDescription {
         }
         Ok(Self::Membership(MembershipTermDescription {
             pairs,
-            member_table: table_name_of(database, movement.member_table)?,
+            member_table: table_name_of::<B, DB>(database, movement.member_table)?,
             member_subject,
             caller: plan.caller,
             subject_kind: carrier_of::<B>(subject),
@@ -342,9 +342,12 @@ impl TermDescription {
 /// The tail every refusal below shares.
 const CANNOT_SAY: &str = "so SubQL cannot say what seeds the membership subquery comparing it";
 
-/// A table's catalog name, or the refusal for a table the catalog forgot.
-fn table_name_of<DB: DatabaseLike>(database: &DB, table: TableId) -> Result<String, RegisterError> {
-    catalog_helpers::table_name(database, table).ok_or_else(|| {
+/// A table's stored name, or the refusal for a table the catalog forgot.
+fn table_name_of<B: Backend, DB: DatabaseLike>(
+    database: &DB,
+    table: TableId,
+) -> Result<String, RegisterError> {
+    catalog_helpers::table_name::<B, DB>(database, table).ok_or_else(|| {
         RegisterError::MembershipTermRefused(alloc::format!(
             "table {table} is not in the catalog under a name, {CANNOT_SAY}"
         ))

@@ -1542,6 +1542,68 @@ mod describe_terms {
             "only projectid holds alice's project, so the row must not reach her"
         );
     }
+
+    /// rls2fga is handed the subscribed table as PostgreSQL stores it, so a
+    /// quoted `"Reports"` is classified as itself rather than as a `reports`
+    /// the catalog does not hold.
+    #[test]
+    fn a_quoted_mixed_case_table_takes_its_membership_term() {
+        const QUOTED_DDL: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
+         CREATE TABLE project_members(project_id INTEGER REFERENCES projects(id), user_id TEXT, PRIMARY KEY(project_id, user_id));
+         CREATE TABLE \"Reports\"(id INTEGER PRIMARY KEY, project_id INTEGER);";
+        const QUOTED_TERM: &str = "SELECT * FROM \"Reports\" WHERE project_id IN \
+         (SELECT project_id FROM project_members WHERE user_id = current_setting('app.user_id', true))";
+
+        let db = deployment::db(QUOTED_DDL);
+        let reports = catalog_helpers::table_id::<subql::backend::Postgres, _>(&db, "\"Reports\"")
+            .expect("Reports is in the catalog");
+        let mut engine: Engine =
+            SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator());
+        let request =
+            SubscriptionRequest::new(1u64, QUOTED_TERM).subscriber(Value::String("alice".into()));
+        let described = engine
+            .describe_terms(&request)
+            .expect("the term is describable");
+        let [subql::term::TermDescription::Membership(term)] = described.as_slice() else {
+            panic!("one membership subquery, got {described:?}");
+        };
+        let column = term.pairs[0].column.clone();
+        engine
+            .register(request.term_values(vec![column], rows_of("alice", vec![Value::Int(7)])))
+            .expect("the term registers");
+
+        let notifs = engine
+            .consumers(&TestEvent::insert(
+                reports,
+                vec![Value::Int(1), Value::Int(7)],
+            ))
+            .unwrap();
+        assert_eq!(notifs.inserted(), &[1]);
+    }
+
+    /// The membership table is described under the name PostgreSQL stores,
+    /// as its columns are, so one declared unquoted as `ProjectMembers` is
+    /// `projectmembers`.
+    #[test]
+    fn an_unquoted_mixed_case_membership_table_is_described_as_postgres_stores_it() {
+        const MIXED_DDL: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY, name TEXT);
+         CREATE TABLE ProjectMembers(project_id INTEGER REFERENCES projects(id), user_id TEXT, PRIMARY KEY(project_id, user_id));
+         CREATE TABLE docs(id INTEGER PRIMARY KEY, project_id INTEGER);";
+        const MIXED_TERM: &str = "SELECT * FROM docs WHERE project_id IN \
+         (SELECT project_id FROM ProjectMembers WHERE user_id = current_setting('app.user_id', true))";
+
+        let engine: Engine =
+            SubscriptionEngine::new(deployment::db(MIXED_DDL), PostgreSqlDialect {})
+                .with_translator(translator());
+        let described = engine
+            .describe_terms(&SubscriptionRequest::new(1u64, MIXED_TERM))
+            .expect("the term is describable");
+        let [subql::term::TermDescription::Membership(term)] = described.as_slice() else {
+            panic!("one membership subquery, got {described:?}");
+        };
+
+        assert_eq!(term.member_table, "projectmembers");
+    }
 }
 
 /// A membership table with row-level security, read by a subscriber that states

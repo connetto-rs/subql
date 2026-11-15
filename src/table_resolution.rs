@@ -1,6 +1,8 @@
-use crate::{catalog_helpers, TableId};
+use crate::{catalog_helpers, RegisterError, TableId};
 use alloc::string::{String, ToString};
 use sql_traits::prelude::DatabaseLike;
+use sql_traits::structs::TargetName;
+use sqlparser::ast::{Ident, ObjectName};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TableResolutionError {
@@ -16,16 +18,72 @@ pub enum TableResolutionError {
     },
 }
 
+/// A table reference a parsed statement wrote, each part keeping the quoting
+/// it was written with.
+///
+/// Rendering the parts back to text and reading that text again would lose
+/// the quoting, so `"Reports"` would reach `reports`, and would read a dot
+/// inside a quoted part as a qualifier.
+pub struct SqlTableName<'a> {
+    written: &'a ObjectName,
+    name: &'a Ident,
+    /// The qualifier, when the reference is a qualifier and a name. A longer
+    /// reference names a catalog subql does not model, and resolves by its
+    /// name alone.
+    schema: Option<&'a Ident>,
+}
+
+impl<'a> SqlTableName<'a> {
+    /// Read the parts of `written`.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::UnsupportedSql`] when a part is not an identifier.
+    pub fn new(written: &'a ObjectName) -> Result<Self, RegisterError> {
+        let missing = || RegisterError::UnsupportedSql("Missing table name".to_string());
+        let mut name = None;
+        let mut schema = None;
+        for part in &written.0 {
+            schema = name.replace(part.as_ident().ok_or_else(missing)?);
+        }
+        Ok(Self {
+            written,
+            name: name.ok_or_else(missing)?,
+            schema: if written.0.len() == 2 { schema } else { None },
+        })
+    }
+
+    /// Resolve the reference under the engine's comparison for written names.
+    pub fn resolve<B: crate::backend::Backend, DB: DatabaseLike>(
+        &self,
+        database: &DB,
+    ) -> Result<TableId, TableResolutionError> {
+        let name = crate::compiler::sql_shape::written_name_part(self.name);
+        let qualified = self.schema.map(|schema| {
+            name.clone()
+                .with_schema(&schema.value, schema.quote_style.is_some())
+        });
+        resolve_table_reference::<B, DB>(qualified.as_ref(), &name, database)
+    }
+
+    /// The reference as the statement wrote it, quoting included.
+    pub fn written(&self) -> String {
+        self.written.to_string()
+    }
+}
+
+/// Resolve a written reference through its qualifier, and through the search
+/// path by its name alone, refusing one the two resolve differently.
 pub fn resolve_table_reference<B: crate::backend::Backend, DB: DatabaseLike>(
-    qualified: Option<&str>,
-    unqualified: &str,
+    qualified: Option<&TargetName<'_>>,
+    unqualified: &TargetName<'_>,
     database: &DB,
 ) -> Result<TableId, TableResolutionError> {
-    let qualified_id =
-        qualified.and_then(|name| catalog_helpers::table_id::<B, DB>(database, name));
-    let unqualified_id = catalog_helpers::table_id::<B, DB>(database, unqualified);
-    resolve_table_ids(qualified_id, unqualified_id, unqualified, || {
-        qualified.map(ToString::to_string)
+    let qualified_id = qualified
+        .and_then(|target| catalog_helpers::table_id_for_name::<B, DB>(database, target.clone()));
+    let unqualified_id = catalog_helpers::table_id_for_name::<B, DB>(database, unqualified.clone());
+    resolve_table_ids(qualified_id, unqualified_id, || {
+        (qualified.map(ToString::to_string), unqualified.to_string())
     })
 }
 
@@ -39,30 +97,40 @@ pub fn resolve_table_parts<B: crate::backend::Backend, DB: DatabaseLike>(
         catalog_helpers::table_id_in_schema::<B, DB>(database, Some(schema), table)
     });
     let unqualified_id = catalog_helpers::table_id_in_schema::<B, DB>(database, None, table);
-    resolve_table_ids(qualified_id, unqualified_id, table, || {
-        schema.map(|schema| alloc::format!("{schema}.{table}"))
+    resolve_table_ids(qualified_id, unqualified_id, || {
+        (
+            schema.map(|schema| alloc::format!("{schema}.{table}")),
+            table.to_string(),
+        )
     })
 }
 
+/// Settle the two lookups, building the names a refusal reports only when
+/// there is one.
 fn resolve_table_ids(
     qualified_id: Option<TableId>,
     unqualified_id: Option<TableId>,
-    unqualified: &str,
-    qualified_name: impl FnOnce() -> Option<String>,
+    names: impl FnOnce() -> (Option<String>, String),
 ) -> Result<TableId, TableResolutionError> {
     match (qualified_id, unqualified_id) {
-        (Some(q), Some(u)) if q != u => Err(TableResolutionError::Ambiguous {
-            qualified: qualified_name().unwrap_or_default(),
-            unqualified: unqualified.to_string(),
-            qualified_id: q,
-            unqualified_id: u,
-        }),
+        (Some(q), Some(u)) if q != u => {
+            let (qualified, unqualified) = names();
+            Err(TableResolutionError::Ambiguous {
+                qualified: qualified.unwrap_or_default(),
+                unqualified,
+                qualified_id: q,
+                unqualified_id: u,
+            })
+        }
         (Some(q), _) => Ok(q),
         (None, Some(u)) => Ok(u),
-        (None, None) => Err(TableResolutionError::Unknown {
-            qualified: qualified_name(),
-            unqualified: unqualified.to_string(),
-        }),
+        (None, None) => {
+            let (qualified, unqualified) = names();
+            Err(TableResolutionError::Unknown {
+                qualified,
+                unqualified,
+            })
+        }
     }
 }
 
@@ -79,8 +147,12 @@ mod tests {
     #[test]
     fn resolves_known_table() {
         let db = parse("CREATE TABLE orders (id INT);");
-        let resolved = resolve_table_reference::<crate::backend::Postgres, _>(None, "orders", &db)
-            .expect("resolution should succeed");
+        let resolved = resolve_table_reference::<crate::backend::Postgres, _>(
+            None,
+            &TargetName::new("orders", false),
+            &db,
+        )
+        .expect("resolution should succeed");
         assert_eq!(
             catalog_helpers::table_id::<crate::backend::Postgres, _>(&db, "orders"),
             Some(resolved)
@@ -194,8 +266,8 @@ mod tests {
         let db = parse("CREATE TABLE elsewhere (id INT);");
 
         let err = resolve_table_reference::<crate::backend::Postgres, _>(
-            Some("public.orders"),
-            "orders",
+            Some(&TargetName::new("orders", false).with_schema("public", false)),
+            &TargetName::new("orders", false),
             &db,
         )
         .expect_err("missing table should fail");
@@ -207,9 +279,12 @@ mod tests {
             } if qualified == "public.orders" && unqualified == "orders"
         ));
 
-        let err_unqualified =
-            resolve_table_reference::<crate::backend::Postgres, _>(None, "orders", &db)
-                .expect_err("unqualified missing table should fail");
+        let err_unqualified = resolve_table_reference::<crate::backend::Postgres, _>(
+            None,
+            &TargetName::new("orders", false),
+            &db,
+        )
+        .expect_err("unqualified missing table should fail");
         assert!(matches!(
             err_unqualified,
             TableResolutionError::Unknown {
