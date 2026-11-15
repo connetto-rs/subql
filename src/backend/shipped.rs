@@ -227,9 +227,10 @@ impl<V: postgres_jsonb_canonical::PgVersion + 'static> Backend for Postgres<V> {
     const WRITTEN_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase =
         sql_traits::structs::IdentifierCase::AsWritten;
 
-    /// PostgreSQL reports the stored schema and relation spellings.
+    /// PostgreSQL reports the schema and relation spellings it stores, which
+    /// an unquoted catalog name matches folded and a quoted one as written.
     const WIRE_TABLE_NAME_CASE: sql_traits::structs::IdentifierCase =
-        sql_traits::structs::IdentifierCase::Exact;
+        sql_traits::structs::IdentifierCase::AsWritten;
 
     /// PostgreSQL's catalog answers its own spelling of every type.
     const TYPE_NAMES: crate::backend::TypeNames = crate::backend::TypeNames::Postgres;

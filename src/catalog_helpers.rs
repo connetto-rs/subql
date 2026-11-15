@@ -70,11 +70,12 @@ pub fn table_id_for_name<B: crate::backend::Backend, DB: DatabaseLike>(
     u32::try_from(id).ok()
 }
 
-/// Build a target from identifier values without SQL quote metadata.
+/// Build a target from identifier values an engine stores, which are
+/// literal names and so read as quoted.
 fn parts_target<'a>(schema: Option<&'a str>, name: &'a str) -> TargetName<'a> {
-    let target = TargetName::new(name, false);
+    let target = TargetName::new(name, true);
     match schema {
-        Some(schema) => target.with_schema(schema, false),
+        Some(schema) => target.with_schema(schema, true),
         None => target,
     }
 }
@@ -123,7 +124,9 @@ pub(crate) fn table_id_in_schema<B: crate::backend::Backend, DB: DatabaseLike>(
     table_id_for_parts(database, schema, table_name, B::WIRE_TABLE_NAME_CASE)
 }
 
-/// Resolve the exact stored table identity carried by a visibility contract.
+/// Resolve the table identity a visibility contract carries, the schema and
+/// name PostgreSQL stores, which an unquoted catalog name matches folded and
+/// a quoted one as written.
 #[cfg(feature = "visibility-records")]
 pub(crate) fn contract_table_id<DB: DatabaseLike>(
     database: &DB,
@@ -133,8 +136,23 @@ pub(crate) fn contract_table_id<DB: DatabaseLike>(
         database,
         table.schema(),
         table.name(),
-        sql_traits::structs::IdentifierCase::Exact,
+        sql_traits::structs::IdentifierCase::AsWritten,
     )
+}
+
+/// Resolve a column a visibility contract names, by the spelling the
+/// database stores, which is what a quoted identifier names.
+///
+/// rls2fga carries a column's stored spelling, so on PostgreSQL a quoted
+/// `"Owner"` arrives as `Owner` and an unquoted `Owner` as `owner`. Read as
+/// SQL text, `Owner` folds and reaches the `owner` column instead.
+#[cfg(feature = "visibility-records")]
+pub(crate) fn contract_column_id<B: crate::backend::Backend, DB: DatabaseLike>(
+    database: &DB,
+    table: TableId,
+    column: &str,
+) -> Option<ColumnId> {
+    column_id_for_name::<B, DB>(database, table, column, true)
 }
 
 /// The name the catalog stores for `table_id`, or [`None`] when it knows no such
@@ -826,6 +844,30 @@ mod tests {
         );
     }
 
+    /// subql names a table in the patchsets it emits by the catalog's
+    /// spelling, so a table the catalog wrote unquoted in mixed case is
+    /// reached again when such a patchset comes back.
+    #[cfg(any(
+        feature = "apply-patchset-postgres",
+        feature = "apply-patchset-mysql",
+        feature = "apply-patchset-sqlite",
+        feature = "apply-patchset-postgres-async",
+        feature = "apply-patchset-mysql-async"
+    ))]
+    #[test]
+    fn an_emitted_patchset_name_reaches_its_table_again() {
+        use sqlite_diff_rs::DynTable;
+
+        let db = ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(
+            "CREATE TABLE Ledger (id INT PRIMARY KEY);",
+        )
+        .unwrap();
+        let ledger = table_id::<Postgres, _>(&db, "ledger").expect("ledger exists");
+        let emitted = simple_table(&db, ledger).unwrap();
+
+        assert_eq!(table_id_by_stored_name(&db, emitted.name()), Some(ledger));
+    }
+
     /// The two spellings no lookup could reach before the comparison was
     /// the caller's.
     ///
@@ -1182,6 +1224,35 @@ mod tests {
 
         assert_ne!(expected, folded);
         assert_eq!(contract_table_id(&db, &contract), Some(expected));
+    }
+
+    /// rls2fga names a table by the schema and name PostgreSQL stores, so a
+    /// contract reaches a table the catalog wrote unquoted in mixed case by
+    /// its folded spelling.
+    #[cfg(feature = "visibility-records")]
+    #[test]
+    fn contract_names_reach_an_unquoted_table_by_its_stored_spelling() {
+        let db = ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(
+            "CREATE SCHEMA App;
+             CREATE TABLE App.Docs (id INT);
+             CREATE TABLE Ledger (id INT);",
+        )
+        .expect("DDL parses");
+        let contract = |schema: Option<&str>, name: &str| {
+            rls2fga_types::TableId::from_stored(schema.map(Into::into), name.into())
+        };
+        let docs = table_id::<Postgres, _>(&db, "app.docs").expect("docs exists");
+        let ledger = table_id::<Postgres, _>(&db, "ledger").expect("ledger exists");
+
+        assert_eq!(
+            contract_table_id(&db, &contract(Some("app"), "docs")),
+            Some(docs)
+        );
+        assert_eq!(
+            contract_table_id(&db, &contract(None, "ledger")),
+            Some(ledger)
+        );
+        assert_eq!(contract_table_id(&db, &contract(Some("App"), "Docs")), None);
     }
 
     #[test]

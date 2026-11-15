@@ -40,9 +40,11 @@ where
     DB: DatabaseLike,
 {
     fn value(&self, column: &str) -> Result<Value<R::Backend>, CellRead> {
-        let Some(id) =
-            catalog_helpers::column_id::<R::Backend, _>(self.db, self.row.table_id(), column)
-        else {
+        let Some(id) = catalog_helpers::contract_column_id::<R::Backend, _>(
+            self.db,
+            self.row.table_id(),
+            column,
+        ) else {
             return Err(CellRead::Absent);
         };
         match self.row.value_at(id) {
@@ -259,8 +261,8 @@ CREATE POLICY docs_owner ON docs USING (owner = current_setting('app.user_id', t
         ColumnRead::new(name(column), kind)
     }
 
-    fn translated_ownership() -> RecordDescription {
-        let db = deployment::db(POLICIED);
+    fn translated_ownership(policied: &str) -> RecordDescription {
+        let db = deployment::db(policied);
         TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
             .build()
@@ -284,7 +286,7 @@ CREATE POLICY docs_owner ON docs USING (owner = current_setting('app.user_id', t
     }
 
     fn description(subject: ValueSource, guards: Vec<Guard>) -> RecordDescription {
-        let mut described = translated_ownership();
+        let mut described = translated_ownership(POLICIED);
         let RecordDerivation::FromRow {
             template,
             guards: existing,
@@ -543,6 +545,38 @@ CREATE POLICY docs_owner ON docs USING (owner = current_setting('app.user_id', t
                 subject: "user:alice".into(),
                 context: None,
             }]
+        );
+    }
+
+    /// rls2fga names a column by the spelling PostgreSQL stores, so a policy
+    /// over a quoted `"Owner"` reads that column, and never the `owner`
+    /// beside it whose name differs only in case.
+    #[test]
+    fn a_quoted_mixed_case_owner_is_read_from_its_own_column() {
+        let policied = "CREATE TABLE docs (id INT PRIMARY KEY, \"Owner\" TEXT, owner TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_owner ON docs USING (\"Owner\" = current_setting('app.user_id', true));";
+        let described = translated_ownership(policied);
+        let db = deployment::db(policied);
+        let docs = catalog_helpers::table_id::<Postgres, _>(&db, "docs").unwrap();
+        let event: TestEvent<Postgres> = TestEvent::insert(
+            docs,
+            vec![
+                Value::Int(4),
+                Value::String("alice".into()),
+                Value::String("mallory".into()),
+            ],
+        )
+        .with_pk_columns([0u16]);
+        let view = EventRow::current(&event, &db).unwrap();
+
+        let got = records_from_row_view(&described, &view, &db).unwrap();
+
+        assert_eq!(
+            got.iter()
+                .map(|record| record.subject.as_str())
+                .collect::<Vec<_>>(),
+            ["user:alice"]
         );
     }
 
