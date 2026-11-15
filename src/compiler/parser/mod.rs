@@ -21,7 +21,7 @@ use crate::backend::{Backend, ScalarFamily, ScalarTruth, Value};
 use crate::compiler::bytecode::ComparisonRef;
 use crate::compiler::sql_shape::{AggSpec, QueryProjection};
 use crate::compiler::ColumnsRead;
-use crate::table_resolution::{resolve_table_reference, TableResolutionError};
+use crate::table_resolution::{SqlTableName, TableResolutionError};
 use crate::term::CompiledTerm;
 use crate::{ColumnId, RegisterError, TableId};
 use alloc::borrow::ToOwned;
@@ -355,38 +355,6 @@ pub struct CompiledQuery<B: Backend> {
     pub columns_read: ColumnsRead,
 }
 
-pub(crate) struct SqlTableName {
-    pub(crate) unqualified: String,
-    pub(crate) qualified: Option<String>,
-}
-
-impl SqlTableName {
-    pub(crate) fn from_object_name(name: &ObjectName) -> Result<Self, RegisterError> {
-        let mut parts = Vec::with_capacity(name.0.len());
-        for part in &name.0 {
-            let ident = part
-                .as_ident()
-                .ok_or_else(|| RegisterError::UnsupportedSql("Missing table name".to_string()))?;
-            parts.push(ident.value.clone());
-        }
-
-        let unqualified = parts
-            .last()
-            .cloned()
-            .ok_or_else(|| RegisterError::UnsupportedSql("Missing table name".to_string()))?;
-        let qualified = if parts.len() > 1 {
-            Some(parts.join("."))
-        } else {
-            None
-        };
-
-        Ok(Self {
-            unqualified,
-            qualified,
-        })
-    }
-}
-
 /// Parse and compile a subscription SQL statement into bytecode.
 ///
 /// # Arguments
@@ -448,7 +416,7 @@ where
     DB: DatabaseLike,
 {
     let stmt = sql_shape::parse_single_statement(sql, dialect as &dyn Dialect)?;
-    let (table_name, where_clause) = extract_table_and_where(&stmt)?;
+    let (table_name, where_clause) = sql_shape::extract_single_table_and_where(&stmt)?;
     let columns_read = ColumnsRead::of::<B, DB>(&stmt, database);
     let where_clause = resolve_where_placeholders::<B>(where_clause, binds)?;
     let where_clause = if let Some(rule) = read_rule {
@@ -667,7 +635,7 @@ where
     DB: DatabaseLike,
 {
     let stmt = sql_shape::parse_single_statement(sql, dialect as &dyn Dialect)?;
-    let (table_name, where_clause) = extract_table_and_where(&stmt)?;
+    let (table_name, where_clause) = sql_shape::extract_single_table_and_where(&stmt)?;
     let where_clause = resolve_where_placeholders::<B>(where_clause, binds)?;
     let table_id = resolve_table_id::<B, DB>(&table_name, database)?;
     let where_program: BytecodeProgram<B> = if let Some(expr) = where_clause.as_ref() {
@@ -713,36 +681,26 @@ where
 }
 
 fn resolve_table_id<B: Backend, DB: DatabaseLike>(
-    table_name: &SqlTableName,
+    table_name: &ObjectName,
     database: &DB,
 ) -> Result<TableId, RegisterError> {
-    resolve_table_reference::<B, DB>(
-        table_name.qualified.as_deref(),
-        &table_name.unqualified,
-        database,
-    )
-    .map_err(|err| match err {
-        TableResolutionError::Ambiguous {
-            qualified,
-            unqualified,
-            ..
-        } => RegisterError::AmbiguousTable {
-            reference: qualified.clone(),
-            qualified,
-            unqualified,
-        },
-        TableResolutionError::Unknown {
-            qualified,
-            unqualified,
-        } => RegisterError::UnknownTable(qualified.unwrap_or(unqualified)),
-    })
-}
-
-fn extract_table_and_where(
-    stmt: &Statement,
-) -> Result<(SqlTableName, Option<Expr>), RegisterError> {
-    let (table_name, where_clause) = sql_shape::extract_single_table_and_where(stmt)?;
-    Ok((SqlTableName::from_object_name(&table_name)?, where_clause))
+    let table_name = SqlTableName::new(table_name)?;
+    table_name
+        .resolve::<B, DB>(database)
+        .map_err(|err| match err {
+            TableResolutionError::Ambiguous {
+                qualified,
+                unqualified,
+                ..
+            } => RegisterError::AmbiguousTable {
+                reference: qualified.clone(),
+                qualified,
+                unqualified,
+            },
+            TableResolutionError::Unknown { .. } => {
+                RegisterError::UnknownTable(table_name.written())
+            }
+        })
 }
 
 /// Convert a resolved bind [`Value<B>`] into a sqlparser literal so
@@ -1174,7 +1132,8 @@ mod tests {
         let sql = format!("SELECT * FROM orders WHERE {condition}");
         let stmt = crate::compiler::sql_shape::parse_single_statement(&sql, &ClickHouseDialect {})
             .unwrap();
-        let (table_name, where_clause) = super::extract_table_and_where(&stmt).unwrap();
+        let (table_name, where_clause) =
+            crate::compiler::sql_shape::extract_single_table_and_where(&stmt).unwrap();
         let table_id = super::resolve_table_id::<Postgres, _>(&table_name, &database).unwrap();
         super::compile_expression::<Postgres, _>(
             &where_clause.unwrap(),

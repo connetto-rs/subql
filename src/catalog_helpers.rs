@@ -155,15 +155,66 @@ pub(crate) fn contract_column_id<B: crate::backend::Backend, DB: DatabaseLike>(
     column_id_for_name::<B, DB>(database, table, column, true)
 }
 
-/// The name the catalog stores for `table_id`, or [`None`] when it knows no such
-/// table.
+/// The name the database stores for `table_id`, unqualified, or [`None`]
+/// when the catalog knows no such table.
 ///
-/// The inverse of [`table_id`] for the one caller that has to hand a table's
-/// name to something outside subql. Unqualified, as the catalog stores it.
+/// PostgreSQL folds an unquoted name to lowercase and keeps a quoted one as
+/// written, so a table declared `Reports` is `reports` and one declared
+/// `"Reports"` is `Reports`. An engine whose
+/// [`Backend::WRITTEN_TABLE_NAME_CASE`](crate::backend::Backend::WRITTEN_TABLE_NAME_CASE)
+/// ignores quoting is answered every name as written.
 #[must_use]
-pub fn table_name<DB: DatabaseLike>(database: &DB, table_id: TableId) -> Option<String> {
-    let index = usize::try_from(table_id).ok()?;
-    Some(database.table_by_id(index)?.table_name().to_string())
+pub fn table_name<B: crate::backend::Backend, DB: DatabaseLike>(
+    database: &DB,
+    table_id: TableId,
+) -> Option<String> {
+    Some(
+        stored_table_name::<B, DB>(database, table_id)?
+            .name
+            .into_owned(),
+    )
+}
+
+/// A table's schema and name as the database stores them, as
+/// [`table_name`] answers the name.
+pub(crate) struct StoredTableName<'a> {
+    pub(crate) schema: Option<alloc::borrow::Cow<'a, str>>,
+    pub(crate) name: alloc::borrow::Cow<'a, str>,
+}
+
+impl StoredTableName<'_> {
+    /// The table with both parts quoted, so reading it back under any
+    /// engine's comparison reaches the stored names exactly.
+    #[cfg(feature = "membership-term")]
+    pub(crate) fn target(&self) -> TargetName<'_> {
+        let target = TargetName::new(&self.name, true);
+        match self.schema.as_deref() {
+            Some(schema) => target.with_schema(schema, true),
+            None => target,
+        }
+    }
+}
+
+/// The schema and name the database stores for `table_id`, or [`None`]
+/// when the catalog knows no such table.
+pub(crate) fn stored_table_name<B: crate::backend::Backend, DB: DatabaseLike>(
+    database: &DB,
+    table_id: TableId,
+) -> Option<StoredTableName<'_>> {
+    use alloc::borrow::Cow;
+    use sql_traits::structs::IdentifierCase;
+
+    let table = database.table_by_id(usize::try_from(table_id).ok()?)?;
+    Some(match B::WRITTEN_TABLE_NAME_CASE {
+        IdentifierCase::AsWritten => StoredTableName {
+            schema: table.stored_table_schema(),
+            name: table.stored_table_name(),
+        },
+        IdentifierCase::Folded | IdentifierCase::Exact => StoredTableName {
+            schema: table.table_schema().map(Cow::Borrowed),
+            name: Cow::Borrowed(table.table_name()),
+        },
+    })
 }
 
 /// Resolve a column name within a table to subql's compact [`ColumnId`].

@@ -28,6 +28,7 @@ use crate::{catalog_helpers, RegisterError, TableId};
 ///
 /// The role settles the read rules of the membership table the term reads
 /// through. Without one, any row-level security on that table refuses the term.
+/// `guarded_table` names `table` as SQL text, which `rls2fga` reads back.
 ///
 /// # Errors
 ///
@@ -37,7 +38,7 @@ use crate::{catalog_helpers, RegisterError, TableId};
 pub fn plan_term<B: crate::backend::Backend, DB: DatabaseLike>(
     term: &CompiledTerm,
     table: TableId,
-    table_name: &str,
+    guarded_table: &str,
     database: &DB,
     translator: &Translator,
     acting_role: Option<&str>,
@@ -50,7 +51,7 @@ pub fn plan_term<B: crate::backend::Backend, DB: DatabaseLike>(
         &term.expr,
         database,
         &registry,
-        table_name,
+        guarded_table,
         translator.min_confidence(),
         acting_role,
     )

@@ -432,6 +432,8 @@ mod stopped_subscription_reads;
 
 mod quoted_parentheses;
 
+mod quoted_table_names;
+
 mod semantics_nan;
 
 mod semantics_bool_order;

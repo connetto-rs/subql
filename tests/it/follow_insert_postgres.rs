@@ -30,6 +30,14 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    #[sql_name = "Users"]
+    quoted_users (id) {
+        id -> Integer,
+        name -> Text,
+    }
+}
+
 #[test]
 #[ignore = "requires Docker"]
 fn register_follow_insert_decodes_minted_pk() {
@@ -79,4 +87,38 @@ fn register_follow_insert_decodes_minted_pk() {
     assert_eq!(bob[0].subscription_id, bob_pk.subscription_id);
 
     assert_ne!(ann[0].subscription_id, bob[0].subscription_id);
+}
+
+/// diesel names a table by the spelling the database stores and quotes it,
+/// so a follow on an insert into `"Users"` follows the row of `"Users"`.
+#[test]
+#[ignore = "requires Docker"]
+fn register_follow_insert_follows_a_quoted_mixed_case_table() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut conn = db.connect();
+    diesel::sql_query(r#"CREATE TABLE "Users" (id SERIAL PRIMARY KEY, name TEXT)"#)
+        .execute(&mut conn)
+        .expect("CREATE TABLE \"Users\"");
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(
+        r#"CREATE TABLE "Users" (id INT PRIMARY KEY, name TEXT);"#,
+    )
+    .expect("catalog");
+    let mut engine = SubscriptionEngine::<TestEvent<Postgres>, DefaultIds, _>::new(
+        catalog,
+        PostgreSqlDialect {},
+    );
+
+    let ann = engine
+        .register_follow_insert(
+            1,
+            diesel::insert_into(quoted_users::table).values(quoted_users::name.eq("ann")),
+            &mut conn,
+        )
+        .expect("follow insert ann");
+    let explicit = engine
+        .follow_row(1, r#""Users""#, vec![Value::Int(1)])
+        .unwrap();
+    assert_eq!(ann.len(), 1);
+    assert_eq!(ann[0].subscription_id, explicit.subscription_id);
 }

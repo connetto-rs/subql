@@ -2600,7 +2600,7 @@ pub(super) fn written_table_name(name: &ObjectName) -> Option<TargetName<'_>> {
 
 /// One identifier as the catalog reads it: its text and whether it was
 /// quoted, which is what decides case sensitivity.
-fn written_name_part(ident: &Ident) -> TargetName<'_> {
+pub(crate) fn written_name_part(ident: &Ident) -> TargetName<'_> {
     TargetName::new(&ident.value, ident.quote_style.is_some())
 }
 
