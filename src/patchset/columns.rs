@@ -297,4 +297,26 @@ mod tests {
         assert_eq!(index.column_name_at("ORDERS", 1), Some("Status"));
         assert_eq!(index.column_name_at("orders", 1), Some("Status"));
     }
+
+    /// Tables indexed before the index grows stay reachable under any ASCII
+    /// case afterwards.
+    #[test]
+    fn every_table_is_found_after_the_index_grows() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE Alpha (A INT); CREATE TABLE Beta (B INT); \
+             CREATE TABLE Gamma (C INT); CREATE TABLE Delta (D INT); \
+             CREATE TABLE Epsilon (E INT);",
+        )
+        .expect("the fixture DDL parses");
+        let index = ColumnIndex::new::<crate::backend::SQLite>(&db).expect("the catalog indexes");
+        for (table, column) in [
+            ("ALPHA", "A"),
+            ("beta", "B"),
+            ("GAMMA", "C"),
+            ("delta", "D"),
+            ("EPSILON", "E"),
+        ] {
+            assert_eq!(index.column_name_at(table, 0), Some(column), "`{table}`");
+        }
+    }
 }

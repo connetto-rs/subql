@@ -1054,6 +1054,34 @@ mod tests {
         );
     }
 
+    /// An upload naming `items` reaches both `items` and `"Items"` under
+    /// SQLite's caseless names, so it is refused before any op applies.
+    #[test]
+    fn an_upload_name_two_catalog_tables_answer_is_refused() {
+        let (_, mut conn) = catalog_fixture();
+        let catalog = ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(
+            "CREATE TABLE items (id BIGINT PRIMARY KEY, name TEXT, qty BIGINT); \
+             CREATE TABLE \"Items\" (id BIGINT PRIMARY KEY, name TEXT, qty BIGINT);",
+        )
+        .unwrap();
+        let adapter = SqliteAdapter::new(&catalog).expect("the catalog indexes");
+
+        let err = super::apply_diffset_bytes_with_catalog::<crate::backend::SQLite, _, _, _, _, _>(
+            &catalog,
+            &insert_bytes(1, "a", 10),
+            &NoRefusals,
+            &mut conn,
+            &adapter,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("more than one catalog table answers"),
+            "the refusal names the ambiguity, got {err:?}"
+        );
+        assert!(items(&mut conn).is_empty(), "no op applied");
+    }
+
     const TWO_TABLE_DDL: &str =
         "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER); \
                                  CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);";

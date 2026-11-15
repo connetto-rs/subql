@@ -1260,14 +1260,14 @@ mod tests {
         )
         .unwrap();
         let line = r#"{"action":"I","schema":"public","table":"orders","columns":[{"name":"id","type":"integer","value":1},{"name":"status","type":"text","value":"new"}]}"#;
-        let ps = patchset_ops(&db, line);
-        let ops = ps.ops();
-        let PatchsetOp::Insert { values, .. } = &ops[0] else {
-            panic!("expected an insert op, got {:?}", ops[0]);
-        };
-        assert_eq!(ops[0].table().name(), "orders");
+        let bytes = wal2json_patchset(&db, &[parse_v2(line).unwrap()]).unwrap();
+        let tables: Vec<String> = parse_patchset(&bytes)
+            .iter()
+            .map(|op| op.table().name().clone())
+            .collect();
+        assert_eq!(tables, ["orders"]);
         assert_eq!(
-            values.to_vec(),
+            only_insert_values(&bytes),
             vec![WireValue::Integer(1), WireValue::Text("new".to_string())]
         );
     }
