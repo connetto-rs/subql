@@ -37,7 +37,7 @@ enum ReconstructedDiff {
 /// The `refusals` view is consulted over the parsed ops before any
 /// reconstruction or application: an upload naming a refused table is
 /// refused as a whole, with the typed reason.
-fn reconstruct_diff<DB: DatabaseLike, R: RefusalView>(
+fn reconstruct_diff<B: crate::backend::Backend, DB: DatabaseLike, R: RefusalView>(
     catalog: &DB,
     bytes: &[u8],
     refusals: &R,
@@ -49,13 +49,13 @@ fn reconstruct_diff<DB: DatabaseLike, R: RefusalView>(
     })? {
         ParsedDiffSet::Patchset(diff) => {
             check_refusals(refusals, diff.iter().map(|op| op.table().name().as_str()))?;
-            reconstruct_patchset(catalog, &diff)
+            reconstruct_patchset::<B, DB>(catalog, &diff)
                 .map(ReconstructedDiff::Patchset)
                 .map_err(ApplyError::from)
         }
         ParsedDiffSet::Changeset(diff) => {
             check_refusals(refusals, diff.iter().map(|op| op.table().name().as_str()))?;
-            reconstruct_changeset(catalog, &diff)
+            reconstruct_changeset::<B, DB>(catalog, &diff)
                 .map(ReconstructedDiff::Changeset)
                 .map_err(ApplyError::from)
         }
@@ -72,6 +72,10 @@ fn reconstruct_diff<DB: DatabaseLike, R: RefusalView>(
 /// come from `catalog` by name, never the uploaded flags, so a client
 /// cannot steer the WHERE clause.
 ///
+/// An uploaded table name resolves as SQLite compares names, without ASCII
+/// case, and a name two catalog tables answer is refused. The statements
+/// name each table and column as the engine `B` stores them.
+///
 /// `refusals` is consulted before any op applies: an upload naming a
 /// table it refuses is refused as a whole with
 /// [`ApplyError::RefusedTable`], carrying the table and its reasons.
@@ -83,7 +87,7 @@ fn reconstruct_diff<DB: DatabaseLike, R: RefusalView>(
 /// [`QueryBuilderError`](diesel::result::Error::QueryBuilderError) when
 /// the bytes fail to parse or name an unknown table, or the first bind or
 /// execution error, rolling back the transaction.
-pub fn apply_diffset_bytes_with_catalog<DB, DBend, Conn, A, R>(
+pub fn apply_diffset_bytes_with_catalog<B, DB, DBend, Conn, A, R>(
     catalog: &DB,
     bytes: &[u8],
     refusals: &R,
@@ -91,6 +95,7 @@ pub fn apply_diffset_bytes_with_catalog<DB, DBend, Conn, A, R>(
     adapter: &A,
 ) -> Result<usize, ApplyError>
 where
+    B: crate::backend::Backend,
     DB: DatabaseLike,
     DBend:
         Backend + HasSqlType<BigInt> + HasSqlType<Double> + HasSqlType<Text> + HasSqlType<Binary>,
@@ -102,7 +107,7 @@ where
     str: ToSql<Text, DBend>,
     [u8]: ToSql<Binary, DBend>,
 {
-    let reconstructed = reconstruct_diff(catalog, bytes, refusals)?;
+    let reconstructed = reconstruct_diff::<B, DB, R>(catalog, bytes, refusals)?;
     let applied = match reconstructed {
         ReconstructedDiff::Patchset(patchset) => patchset
             .iter()
@@ -132,7 +137,7 @@ where
     feature = "apply-patchset-postgres-async",
     feature = "apply-patchset-mysql-async"
 ))]
-pub fn apply_diffset_bytes_async_with_catalog<'a, DB, DBend, Conn, A, R>(
+pub fn apply_diffset_bytes_async_with_catalog<'a, B, DB, DBend, Conn, A, R>(
     catalog: &DB,
     bytes: &[u8],
     refusals: &R,
@@ -140,6 +145,7 @@ pub fn apply_diffset_bytes_async_with_catalog<'a, DB, DBend, Conn, A, R>(
     adapter: &'a A,
 ) -> impl core::future::Future<Output = Result<usize, ApplyError>> + Send + 'a
 where
+    B: crate::backend::Backend,
     DB: DatabaseLike,
     DBend:
         Backend + HasSqlType<BigInt> + HasSqlType<Double> + HasSqlType<Text> + HasSqlType<Binary>,
@@ -153,7 +159,7 @@ where
 {
     // Reconstruct synchronously up front so the future owns its batch and
     // never borrows `catalog` or the refused view.
-    let reconstructed = reconstruct_diff(catalog, bytes, refusals);
+    let reconstructed = reconstruct_diff::<B, DB, R>(catalog, bytes, refusals);
     async move {
         let applied = match reconstructed? {
             ReconstructedDiff::Patchset(patchset) => {
@@ -180,13 +186,13 @@ where
 ///
 /// A patchset stores one value per primary-key column, so it cannot
 /// express a primary-key change (a changeset can).
-fn reconstruct_patchset<DB: DatabaseLike>(
+fn reconstruct_patchset<B: crate::backend::Backend, DB: DatabaseLike>(
     catalog: &DB,
     diff: &DiffSet<PatchsetFormat, TableSchema<String>, String, Vec<u8>>,
 ) -> QueryResult<PatchSet<SimpleTable, String, Vec<u8>>> {
     let mut builder = PatchSet::<SimpleTable, String, Vec<u8>>::new();
     for op in diff.iter() {
-        let table = catalog_table(catalog, op.table().name())?;
+        let table = catalog_table::<B, DB>(catalog, op.table().name())?;
         match op {
             PatchsetOp::Insert { values, .. } => {
                 let mut insert = Insert::from(table);
@@ -234,13 +240,13 @@ fn reconstruct_patchset<DB: DatabaseLike>(
 /// every column, so a primary-key change renders the old key in the WHERE
 /// and the new key in the SET. An unchanged pk column (old present, no
 /// new) becomes old equal to new, staying in the WHERE and out of the SET.
-fn reconstruct_changeset<DB: DatabaseLike>(
+fn reconstruct_changeset<B: crate::backend::Backend, DB: DatabaseLike>(
     catalog: &DB,
     diff: &DiffSet<ChangesetFormat, TableSchema<String>, String, Vec<u8>>,
 ) -> QueryResult<ChangeSet<SimpleTable, String, Vec<u8>>> {
     let mut builder = ChangeSet::<SimpleTable, String, Vec<u8>>::new();
     for op in diff.iter() {
-        let table = catalog_table(catalog, op.table().name())?;
+        let table = catalog_table::<B, DB>(catalog, op.table().name())?;
         match op {
             ChangesetOp::Insert { values, .. } => {
                 let mut insert = Insert::from(table);
@@ -282,15 +288,24 @@ fn reconstruct_changeset<DB: DatabaseLike>(
     Ok(builder)
 }
 
-/// Resolve a [`SimpleTable`] for `name` from `catalog`.
-fn catalog_table<DB: DatabaseLike>(catalog: &DB, name: &str) -> QueryResult<SimpleTable> {
-    let table_id =
-        crate::catalog_helpers::table_id_by_stored_name(catalog, name).ok_or_else(|| {
+/// Resolve the table an op names into a [`SimpleTable`] named as the
+/// engine `B` stores it, comparing the name as SQLite compares names.
+fn catalog_table<B: crate::backend::Backend, DB: DatabaseLike>(
+    catalog: &DB,
+    name: &str,
+) -> QueryResult<SimpleTable> {
+    let table_id = crate::catalog_helpers::table_id_by_diffset_name(catalog, name)
+        .map_err(|error| {
+            ingest_error(alloc::format!(
+                "uploaded patchset names table `{name}`, which more than one catalog table answers: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
             ingest_error(alloc::format!(
                 "uploaded patchset names table `{name}`, which is absent from the catalog"
             ))
         })?;
-    crate::catalog_helpers::simple_table(catalog, table_id).map_err(|error| {
+    crate::catalog_helpers::simple_table::<B, DB>(catalog, table_id).map_err(|error| {
         ingest_error(alloc::format!(
             "catalog table `{name}` could not be resolved to a schema: {error}"
         ))

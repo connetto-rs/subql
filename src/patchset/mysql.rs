@@ -41,7 +41,7 @@ impl<'db, DB: DatabaseLike> MysqlAdapter<'db, DB> {
     pub fn new(catalog: &'db DB) -> Result<Self, crate::CatalogError> {
         Ok(Self {
             catalog,
-            columns: ColumnIndex::new(catalog)?,
+            columns: ColumnIndex::new::<crate::backend::MySql>(catalog)?,
         })
     }
 }
@@ -54,8 +54,8 @@ where
 {
     fn column_name(&self, table_name: &str, column_index: usize) -> &str {
         self.columns
-            .column_at(table_name, column_index)
-            .map_or("", ColumnLike::column_name)
+            .column_name_at(table_name, column_index)
+            .unwrap_or("")
     }
 
     fn bind<'a>(

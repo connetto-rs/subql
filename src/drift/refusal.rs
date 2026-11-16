@@ -22,7 +22,8 @@ use super::verdict::Incompatibility;
 /// holds only for the call.
 pub trait RefusalView {
     /// The reasons `table` is refused, or `None` when the view does not
-    /// refuse it.
+    /// refuse it. `table` is the name an upload carries, which reaches its
+    /// catalog table as SQLite compares names, without ASCII case.
     fn refusal(&self, table: &str) -> Option<Vec<Incompatibility>>;
 }
 

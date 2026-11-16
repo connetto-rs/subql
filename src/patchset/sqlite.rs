@@ -17,7 +17,7 @@ use alloc::boxed::Box;
 
 use diesel::result::Error as DieselError;
 use diesel::sqlite::Sqlite;
-use sql_traits::prelude::{ColumnLike, DatabaseLike};
+use sql_traits::prelude::DatabaseLike;
 use sqlite_diff_rs::{Adapter, Binder, DefaultBinder, Value};
 
 use super::columns::{unknown_column_error, ColumnIndex};
@@ -44,7 +44,7 @@ impl<'db, DB: DatabaseLike> SqliteAdapter<'db, DB> {
     /// yield a table's columns.
     pub fn new(catalog: &'db DB) -> Result<Self, crate::CatalogError> {
         Ok(Self {
-            columns: ColumnIndex::new(catalog)?,
+            columns: ColumnIndex::new::<crate::backend::SQLite>(catalog)?,
         })
     }
 }
@@ -57,8 +57,8 @@ where
 {
     fn column_name(&self, table_name: &str, column_index: usize) -> &str {
         self.columns
-            .column_at(table_name, column_index)
-            .map_or("", ColumnLike::column_name)
+            .column_name_at(table_name, column_index)
+            .unwrap_or("")
     }
 
     fn bind<'a>(
