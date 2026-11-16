@@ -1118,13 +1118,7 @@ where
         // rls2fga reads the table as SQL text, so both parts go quoted and
         // reach the stored names rather than folding a written one.
         let guarded_table =
-            catalog_helpers::stored_table_name::<E::Backend, DB>(&self.database, table_id)
-                .ok_or_else(|| {
-                    RegisterError::MembershipTermRefused(format!(
-                "table {table_id} is not in the catalog under a name, so the relationship a \
-                 membership subquery names cannot be classified"
-            ))
-                })?
+            catalog_helpers::stored_table_name::<E::Backend, DB>(&self.database, table_id)?
                 .target()
                 .to_string();
 
@@ -3292,8 +3286,8 @@ where
         table_id: TableId,
         pk: Vec<crate::backend::Value<E::Backend>>,
     ) -> Result<Registered<E::Backend>, RegisterError> {
-        let stored = catalog_helpers::stored_table_name::<E::Backend, DB>(&self.database, table_id)
-            .ok_or_else(|| RegisterError::UnknownTable(format!("<table id {table_id}>")))?;
+        let stored =
+            catalog_helpers::stored_table_name::<E::Backend, DB>(&self.database, table_id)?;
         let table = crate::compiler::quoted_ident(&self.dialect, &stored.name);
         let table = match stored.schema.as_deref() {
             Some(schema) => format!(

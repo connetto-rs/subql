@@ -225,10 +225,7 @@ where
         if resolved.iter().any(|(seen, _)| *seen == name) {
             continue;
         }
-        let table_name = crate::table_resolution::SqlTableName::new(&name)?;
-        let id = table_name
-            .resolve::<B, DB>(database)
-            .map_err(|_| RegisterError::UnknownTable(table_name.written()))?;
+        let id = crate::table_resolution::SqlTableName::new(&name)?.resolve::<B, DB>(database)?;
         if !resolved.iter().any(|(_, table)| *table == id) {
             resolved.push((name, id));
         }
@@ -769,9 +766,7 @@ where
     let (select, table_name, order_by) =
         crate::compiler::sql_shape::extract_ungrouped_select_and_table(&mut statement)?;
     let name = crate::table_resolution::SqlTableName::new(&table_name)?;
-    let table = name
-        .resolve::<B, DB>(database)
-        .map_err(|_| RegisterError::UnknownTable(name.written()))?;
+    let table = name.resolve::<B, DB>(database)?;
 
     let key_columns = crate::catalog_helpers::primary_key_columns(database, table)?;
     if key_columns.is_empty() {
@@ -1436,7 +1431,7 @@ mod quoted_table_tests {
             database,
             None,
         )
-        .unwrap_or_else(|error| panic!("a read tier serves {sql}: {error}"))
+        .expect("a read tier serves the statement")
     }
 
     #[test]
@@ -1445,18 +1440,30 @@ mod quoted_table_tests {
         let quoted = crate::catalog_helpers::table_id::<Postgres, _>(&database, r#""Reports""#)
             .expect("Reports is in the catalog");
 
-        let QueryPlan::Keyed(keyed) = plan(
-            r#"SELECT id, title FROM "Reports" WHERE title = 'x'"#,
-            &database,
-        ) else {
-            panic!("a filter carrying its key is read keyed");
-        };
-        assert_eq!(keyed.table, quoted);
+        assert!(matches!(
+            plan(r#"SELECT id, title FROM "Reports" WHERE title = 'x'"#, &database),
+            QueryPlan::Keyed(keyed) if keyed.table == quoted
+        ));
+        assert!(matches!(
+            plan(r#"SELECT DISTINCT title FROM "Reports""#, &database),
+            QueryPlan::Total(total) if total.tables == [quoted]
+        ));
+    }
 
-        let QueryPlan::Total(total) = plan(r#"SELECT DISTINCT title FROM "Reports""#, &database)
-        else {
-            panic!("a projection without its key is re-read whole");
-        };
-        assert_eq!(total.tables, [quoted]);
+    /// `reports` and `"reports"` are one table, so a re-read naming it both
+    /// ways watches it once.
+    #[test]
+    fn a_table_spelled_two_ways_is_one_table_read() {
+        let database = ParserDB::parse::<PostgreSqlDialect>(TWINS).expect("DDL parses");
+        let folded = crate::catalog_helpers::table_id::<Postgres, _>(&database, "reports")
+            .expect("reports is in the catalog");
+
+        assert!(matches!(
+            plan(
+                r#"SELECT DISTINCT a.title FROM reports a JOIN "reports" b ON a.id = b.id"#,
+                &database,
+            ),
+            QueryPlan::Total(total) if total.tables == [folded]
+        ));
     }
 }

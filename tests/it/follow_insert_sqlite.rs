@@ -12,8 +12,11 @@ use diesel::sqlite::SqliteConnection;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::SQLiteDialect;
 use subql::backend::{SQLite, Value};
+use subql::diesel_api::FollowInsertError;
 use subql::testing::TestEvent;
-use subql::{DefaultIds, SubscriptionEngine};
+use subql::{DefaultIds, RegisterError, SubscriptionEngine};
+
+type Engine = SubscriptionEngine<TestEvent<SQLite>, DefaultIds, ParserDB>;
 
 diesel::table! {
     users (id) {
@@ -22,18 +25,25 @@ diesel::table! {
     }
 }
 
+/// An in-memory database holding the table `ddl` creates.
+fn database(ddl: &str) -> SqliteConnection {
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    diesel::sql_query(ddl).execute(&mut conn).expect(ddl);
+    conn
+}
+
+/// An engine over a catalog declaring `ddl`.
+fn engine(ddl: &str) -> Engine {
+    Engine::new(
+        ParserDB::parse::<SQLiteDialect>(ddl).expect("catalog"),
+        SQLiteDialect {},
+    )
+}
+
 #[test]
 fn register_follow_insert_sqlite_decodes_minted_pk() {
-    let mut conn = SqliteConnection::establish(":memory:").unwrap();
-    diesel::sql_query("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)")
-        .execute(&mut conn)
-        .expect("CREATE TABLE users");
-
-    let catalog =
-        ParserDB::parse::<SQLiteDialect>("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
-            .expect("catalog");
-    let mut engine =
-        SubscriptionEngine::<TestEvent<SQLite>, DefaultIds, _>::new(catalog, SQLiteDialect {});
+    let mut conn = database("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)");
+    let mut engine = engine("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);");
 
     // Execute INSERT ... RETURNING id on SQLite; the DB mints id=1; subql reads
     // the returned SqliteValue, decodes the key, and follows it.
@@ -77,16 +87,8 @@ diesel::table! {
 /// it, so a blob-keyed table could be inserted into but never followed.
 #[test]
 fn register_follow_insert_sqlite_decodes_a_blob_key() {
-    let mut conn = SqliteConnection::establish(":memory:").unwrap();
-    diesel::sql_query("CREATE TABLE docs (id BLOB PRIMARY KEY, name TEXT)")
-        .execute(&mut conn)
-        .expect("CREATE TABLE docs");
-
-    let catalog =
-        ParserDB::parse::<SQLiteDialect>("CREATE TABLE docs (id BLOB PRIMARY KEY, name TEXT);")
-            .expect("catalog");
-    let mut engine =
-        SubscriptionEngine::<TestEvent<SQLite>, DefaultIds, _>::new(catalog, SQLiteDialect {});
+    let mut conn = database("CREATE TABLE docs (id BLOB PRIMARY KEY, name TEXT)");
+    let mut engine = engine("CREATE TABLE docs (id BLOB PRIMARY KEY, name TEXT);");
 
     let key = vec![0_u8, 1, 2, 255];
     let followed = engine
@@ -103,4 +105,24 @@ fn register_follow_insert_sqlite_decodes_a_blob_key() {
         .follow_row(1, "docs", vec![Value::Bytes(key)])
         .expect("follow the same row by its blob key");
     assert_eq!(followed[0].subscription_id, by_key.subscription_id);
+}
+
+/// An insert into a table the engine's catalog does not hold is refused
+/// before it runs, naming the table as diesel rendered it.
+#[test]
+fn register_follow_insert_refuses_a_table_outside_the_catalog_before_inserting() {
+    let mut conn = database("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)");
+    let mut engine = engine("CREATE TABLE docs (id BLOB PRIMARY KEY, name TEXT);");
+
+    let refused = engine.register_follow_insert(
+        1,
+        diesel::insert_into(users::table).values(users::name.eq("ann")),
+        &mut conn,
+    );
+    assert!(matches!(
+        refused,
+        Err(FollowInsertError::Register(RegisterError::UnknownTable(name))) if name == "`users`"
+    ));
+    let inserted: i64 = users::table.count().get_result(&mut conn).unwrap();
+    assert_eq!(inserted, 0);
 }

@@ -254,16 +254,8 @@ where
     let name = sqlparser::parser::Parser::new(dialect)
         .try_with_sql(&rendered)
         .and_then(|mut parser| parser.parse_object_name(false))
-        .map_err(|error| {
-            RegisterError::UnsupportedSql(format!(
-                "could not read the target table name from the diesel insert \
-                 (rendered {rendered:?}): {error}"
-            ))
-        })?;
-    let table = crate::table_resolution::SqlTableName::new(&name)?;
-    table
-        .resolve::<B, DB>(database)
-        .map_err(|_| RegisterError::UnknownTable(table.written()))
+        .map_err(|error| crate::compiler::sql_shape::parse_error(&error))?;
+    crate::table_resolution::SqlTableName::new(&name)?.resolve::<B, DB>(database)
 }
 
 /// Error from [`SubscriptionEngine::register_follow_insert`].

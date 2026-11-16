@@ -168,11 +168,9 @@ pub fn table_name<B: crate::backend::Backend, DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
 ) -> Option<String> {
-    Some(
-        stored_table_name::<B, DB>(database, table_id)?
-            .name
-            .into_owned(),
-    )
+    stored_table_name::<B, DB>(database, table_id)
+        .ok()
+        .map(|stored| stored.name.into_owned())
 }
 
 /// A table's schema and name as the database stores them, as
@@ -195,17 +193,21 @@ impl StoredTableName<'_> {
     }
 }
 
-/// The schema and name the database stores for `table_id`, or [`None`]
-/// when the catalog knows no such table.
+/// The schema and name the database stores for `table_id`.
+///
+/// # Errors
+///
+/// [`CatalogError::UnknownTable`](crate::CatalogError::UnknownTable) when the
+/// catalog knows no such table.
 pub(crate) fn stored_table_name<B: crate::backend::Backend, DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
-) -> Option<StoredTableName<'_>> {
+) -> Result<StoredTableName<'_>, crate::CatalogError> {
     use alloc::borrow::Cow;
     use sql_traits::structs::IdentifierCase;
 
-    let table = database.table_by_id(usize::try_from(table_id).ok()?)?;
-    Some(match B::WRITTEN_TABLE_NAME_CASE {
+    let table = lookup_table(database, table_id)?;
+    Ok(match B::WRITTEN_TABLE_NAME_CASE {
         IdentifierCase::AsWritten => StoredTableName {
             schema: table.stored_table_schema(),
             name: table.stored_table_name(),
@@ -1346,18 +1348,28 @@ mod tests {
     /// and MySQL and SQLite store both as written, so each answers the name
     /// its own wire messages carry and its own quoted identifier reaches.
     #[test]
-    fn column_name_answers_the_name_each_engine_stores() {
+    fn names_are_answered_as_each_engine_stores_them() {
         use crate::backend::{MySql, SQLite};
 
-        let db = ParserDB::parse::<GenericDialect>(r#"CREATE TABLE t (Status TEXT, "Kind" TEXT);"#)
-            .expect("DDL parses");
-        let stored = |name: fn(&ParserDB, TableId, ColumnId) -> Option<String>| {
-            [0, 1].map(|column| name(&db, 0, column).expect("the column has a name"))
+        let db = ParserDB::parse::<GenericDialect>(
+            r#"CREATE TABLE Reports (Status TEXT, "Kind" TEXT); CREATE TABLE "Notes" (id INT);"#,
+        )
+        .expect("DDL parses");
+        let reports = table_id::<Postgres, _>(&db, "Reports").expect("Reports exists");
+        let notes = table_id::<Postgres, _>(&db, r#""Notes""#).expect("Notes exists");
+        let columns = |name: fn(&ParserDB, TableId, ColumnId) -> Option<String>| {
+            [0, 1].map(|column| name(&db, reports, column).expect("the column has a name"))
+        };
+        let tables = |name: fn(&ParserDB, TableId) -> Option<String>| {
+            [reports, notes].map(|table| name(&db, table).expect("the table has a name"))
         };
 
-        assert_eq!(stored(column_name::<Postgres, _>), ["status", "Kind"]);
-        assert_eq!(stored(column_name::<MySql, _>), ["Status", "Kind"]);
-        assert_eq!(stored(column_name::<SQLite, _>), ["Status", "Kind"]);
+        assert_eq!(columns(column_name::<Postgres, _>), ["status", "Kind"]);
+        assert_eq!(tables(table_name::<Postgres, _>), ["reports", "Notes"]);
+        assert_eq!(columns(column_name::<MySql, _>), ["Status", "Kind"]);
+        assert_eq!(tables(table_name::<MySql, _>), ["Reports", "Notes"]);
+        assert_eq!(columns(column_name::<SQLite, _>), ["Status", "Kind"]);
+        assert_eq!(tables(table_name::<SQLite, _>), ["Reports", "Notes"]);
     }
 
     #[test]
@@ -1498,6 +1510,14 @@ mod tests {
         assert_eq!(
             simple_table(&db, missing).unwrap_err(),
             crate::CatalogError::UnknownTable(missing)
+        );
+        assert!(matches!(
+            stored_table_name::<crate::backend::Postgres, _>(&db, missing),
+            Err(crate::CatalogError::UnknownTable(id)) if id == missing
+        ));
+        assert_eq!(
+            table_name::<crate::backend::Postgres, _>(&db, missing),
+            None
         );
     }
 

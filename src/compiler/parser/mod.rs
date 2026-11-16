@@ -21,7 +21,7 @@ use crate::backend::{Backend, ScalarFamily, ScalarTruth, Value};
 use crate::compiler::bytecode::ComparisonRef;
 use crate::compiler::sql_shape::{AggSpec, QueryProjection};
 use crate::compiler::ColumnsRead;
-use crate::table_resolution::{SqlTableName, TableResolutionError};
+use crate::table_resolution::SqlTableName;
 use crate::term::CompiledTerm;
 use crate::{ColumnId, RegisterError, TableId};
 use alloc::borrow::ToOwned;
@@ -684,23 +684,7 @@ fn resolve_table_id<B: Backend, DB: DatabaseLike>(
     table_name: &ObjectName,
     database: &DB,
 ) -> Result<TableId, RegisterError> {
-    let table_name = SqlTableName::new(table_name)?;
-    table_name
-        .resolve::<B, DB>(database)
-        .map_err(|err| match err {
-            TableResolutionError::Ambiguous {
-                qualified,
-                unqualified,
-                ..
-            } => RegisterError::AmbiguousTable {
-                reference: qualified.clone(),
-                qualified,
-                unqualified,
-            },
-            TableResolutionError::Unknown { .. } => {
-                RegisterError::UnknownTable(table_name.written())
-            }
-        })
+    SqlTableName::new(table_name)?.resolve::<B, DB>(database)
 }
 
 /// Convert a resolved bind [`Value<B>`] into a sqlparser literal so

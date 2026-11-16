@@ -54,16 +54,35 @@ impl<'a> SqlTableName<'a> {
     }
 
     /// Resolve the reference under the engine's comparison for written names.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError::AmbiguousTable`] when the qualifier and the search path
+    /// reach different tables, and [`RegisterError::UnknownTable`], naming the
+    /// reference as written, when neither reaches one.
     pub fn resolve<B: crate::backend::Backend, DB: DatabaseLike>(
         &self,
         database: &DB,
-    ) -> Result<TableId, TableResolutionError> {
+    ) -> Result<TableId, RegisterError> {
         let name = crate::compiler::sql_shape::written_name_part(self.name);
         let qualified = self.schema.map(|schema| {
             name.clone()
                 .with_schema(&schema.value, schema.quote_style.is_some())
         });
-        resolve_table_reference::<B, DB>(qualified.as_ref(), &name, database)
+        resolve_table_reference::<B, DB>(qualified.as_ref(), &name, database).map_err(|error| {
+            match error {
+                TableResolutionError::Ambiguous {
+                    qualified,
+                    unqualified,
+                    ..
+                } => RegisterError::AmbiguousTable {
+                    reference: qualified.clone(),
+                    qualified,
+                    unqualified,
+                },
+                TableResolutionError::Unknown { .. } => RegisterError::UnknownTable(self.written()),
+            }
+        })
     }
 
     /// The reference as the statement wrote it, quoting included.
