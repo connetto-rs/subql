@@ -101,7 +101,7 @@ impl DriftTableSignal for SqliteSchemaSignal {
         let name = match self {
             Self::SchemaChanged { table, .. } | Self::ChangesLost { table } => table,
         };
-        crate::catalog_helpers::table_id::<SQLite, DB>(catalog, name)
+        crate::catalog_helpers::table_id_in_schema::<SQLite, DB>(catalog, None, name)
     }
 
     fn changes_lost(&self) -> bool {
@@ -342,6 +342,29 @@ mod tests {
             assert_eq!(lost.table(&catalog), expected);
             assert!(!changed.changes_lost());
             assert!(lost.changes_lost());
+        }
+    }
+
+    /// A signal carries its table's name as SQLite stores it, so a name SQL
+    /// would have to quote still reaches the table.
+    #[test]
+    fn a_schema_signal_reaches_a_table_whose_name_sql_would_quote() {
+        let catalog = ParserDB::parse::<SQLiteDialect>(
+            r#"CREATE TABLE "line items" (id INTEGER PRIMARY KEY);
+               CREATE TABLE "my.reports" (id INTEGER PRIMARY KEY);
+               CREATE TABLE "a""b" (id INTEGER PRIMARY KEY);"#,
+        )
+        .expect("catalog");
+        for table in catalog.tables() {
+            let lost = SqliteSchemaSignal::ChangesLost {
+                table: table.table_name().to_string(),
+            };
+            assert_eq!(
+                lost.table(&catalog).and_then(|id| usize::try_from(id).ok()),
+                catalog.table_id(table),
+                "{}",
+                table.table_name()
+            );
         }
     }
 }
