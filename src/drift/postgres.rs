@@ -10,7 +10,7 @@
 //! of one server major version, and every read takes the catalog of the
 //! server it reaches.
 
-use diesel::sql_types::{Array, Bool, Text};
+use diesel::sql_types::Bool;
 use diesel::{ExpressionMethods, OptionalExtension, PgConnection, QueryDsl, RunQueryDsl};
 use pg_diesel::database::{
     CompiledVersions, PgDatabaseBuildError, PgDieselDatabaseBuilder, PgDieselProfile,
