@@ -68,11 +68,11 @@ pub fn pg_database() -> PgDatabase {
     database_on("pg", pg_request)
 }
 
-/// The stock PostgreSQL 18 image, which the drift reader's live catalog is
-/// judged against.
+/// The stock image of PostgreSQL `major`, which the drift reader's live
+/// catalog is judged against.
 #[cfg(feature = "postgres-18")]
-fn pg18_request() -> ContainerRequest<GenericImage> {
-    GenericImage::new("postgres", "18")
+fn stock_pg_request(major: u32) -> ContainerRequest<GenericImage> {
+    GenericImage::new("postgres", major.to_string().as_str())
         .with_wait_for(WaitFor::message_on_stderr("ready to accept connections"))
         .with_exposed_port(5432.tcp())
         .with_mount(Mount::tmpfs_mount("/var/lib/postgresql"))
@@ -81,14 +81,15 @@ fn pg18_request() -> ContainerRequest<GenericImage> {
         .with_env_var("POSTGRES_DB", "postgres")
 }
 
-/// Acquire the shared PostgreSQL 18 server and create a fresh database on it.
+/// Acquire the shared stock PostgreSQL `major` server and create a fresh
+/// database on it.
 #[cfg(feature = "postgres-18")]
-pub fn pg18_database() -> PgDatabase {
-    database_on("pg18", pg18_request)
+pub fn stock_pg_database(major: u32) -> PgDatabase {
+    database_on(&format!("pg{major}"), || stock_pg_request(major))
 }
 
 /// Acquire this run's shared `engine` server and create a fresh database on it.
-fn database_on(engine: &str, request: fn() -> ContainerRequest<GenericImage>) -> PgDatabase {
+fn database_on(engine: &str, request: impl Fn() -> ContainerRequest<GenericImage>) -> PgDatabase {
     let (port, container) = shared_server(
         engine,
         request,

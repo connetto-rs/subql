@@ -281,7 +281,7 @@ pub use parked_reads::{park_a_mysql_read, park_a_read, PARK};
 ))]
 pub use pg::in_transaction;
 #[cfg(feature = "postgres-18")]
-pub use pg::pg18_database;
+pub use pg::stock_pg_database;
 #[cfg(any(feature = "pg-streaming", feature = "postgres-18"))]
 pub use pg::PgDatabase;
 #[cfg(any(feature = "pg-streaming", feature = "pgoutput-emit"))]

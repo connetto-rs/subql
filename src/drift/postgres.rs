@@ -11,7 +11,10 @@
 //! server it reaches.
 
 use diesel::sql_types::Bool;
-use diesel::{ExpressionMethods, OptionalExtension, PgConnection, QueryDsl, RunQueryDsl};
+use diesel::{
+    ExpressionMethods, NullableExpressionMethods, OptionalExtension, PgConnection, QueryDsl,
+    RunQueryDsl,
+};
 use pg_diesel::database::{
     CompiledVersions, PgDatabaseBuildError, PgDieselDatabaseBuilder, PgDieselProfile,
     ServerVersion, VersionCatalog,
@@ -76,11 +79,6 @@ impl PgLiveCatalog {
             publication: publication.into(),
         }
     }
-
-    /// The connection the catalog reads through.
-    pub const fn connection(&mut self) -> &mut PgConnection {
-        &mut self.connection
-    }
 }
 
 impl LiveCatalog for PgLiveCatalog {
@@ -137,7 +135,9 @@ impl LiveCatalog for PgLiveCatalog {
         database: &'d PgDieselDatabase,
         table: TargetName<'_>,
     ) -> Result<Option<&'d PgTable>, PgShapeError> {
-        Ok(database.resolve_target_table(table, <Postgres as Backend>::WRITTEN_TABLE_NAME_CASE)?)
+        database
+            .resolve_target_table(table, <Postgres as Backend>::WRITTEN_TABLE_NAME_CASE)
+            .map_err(PgShapeError::Lookup)
     }
 
     /// The shape sql-traits reads from the loaded table, with the replica
@@ -147,16 +147,15 @@ impl LiveCatalog for PgLiveCatalog {
         database: &PgDieselDatabase,
         table: &PgTable,
     ) -> Result<TableShape, PgShapeError> {
-        let shape = TableShape::from_table::<Postgres, _>(table, database)?;
         let facts = read_facts(
             &mut self.connection,
             &self.publication,
             table.schema(),
             table.table_name(),
         )?;
-        Ok(shape
-            .with_replica_identity(replica_identity(&facts.replica_identity)?)
-            .with_publication(facts.publication()))
+        TableShape::from_table::<Postgres, _>(table, database)
+            .map_err(PgShapeError::Lookup)
+            .and_then(|shape| facts.apply_to(shape))
     }
 }
 
@@ -175,6 +174,14 @@ struct LiveFacts {
 }
 
 impl LiveFacts {
+    /// `shape` with the replica identity and publication these facts state.
+    fn apply_to(self, shape: TableShape) -> Result<TableShape, PgShapeError> {
+        let identity = replica_identity(&self.replica_identity)?;
+        Ok(shape
+            .with_replica_identity(identity)
+            .with_publication(self.publication()))
+    }
+
     fn publication(self) -> Publication {
         let (Some(operations), Some((columns, row_filter))) = (self.operations, self.member) else {
             return Publication::Unpublished;
@@ -211,13 +218,18 @@ macro_rules! facts_under {
             .first::<(Option<Vec<String>>, Option<String>)>($connection)
             .optional()?
     };
-    ($version:ident, $lists:ident, $connection:expr, $namespace:expr, $publication:expr, $schema:expr, $table:expr) => {{
+    ($version:ident, $lists:ident, $connection:expr, $publication:expr, $schema:expr, $table:expr) => {{
         use pg_diesel::$version::schema::pg_catalog::{
             pg_class::pg_class, pg_publication::pg_publication,
             pg_publication_tables::pg_publication_tables,
         };
         let replica_identity = pg_class::table
-            .filter(pg_class::relnamespace.eq($namespace))
+            .filter(
+                pg_class::relnamespace.nullable().eq(pg_namespace::table
+                    .filter(pg_namespace::nspname.eq($schema))
+                    .select(pg_namespace::oid)
+                    .single_value()),
+            )
             .filter(pg_class::relname.eq($table))
             .select(pg_class::relreplident)
             .first::<String>($connection)?;
@@ -256,61 +268,27 @@ fn read_facts(
     schema: &str,
     table: &str,
 ) -> Result<LiveFacts, PgShapeError> {
-    let namespace: u32 = pg_namespace::table
-        .filter(pg_namespace::nspname.eq(schema))
-        .select(pg_namespace::oid)
-        .first(connection)?;
     Ok(match ServerVersion::load(connection)?.major() {
         #[cfg(feature = "postgres-14")]
-        pg_diesel::v14::MAJOR => facts_under!(
-            v14,
-            without_lists,
-            connection,
-            namespace,
-            publication,
-            schema,
-            table
-        ),
+        pg_diesel::v14::MAJOR => {
+            facts_under!(v14, without_lists, connection, publication, schema, table)
+        }
         #[cfg(feature = "postgres-15")]
-        pg_diesel::v15::MAJOR => facts_under!(
-            v15,
-            with_lists,
-            connection,
-            namespace,
-            publication,
-            schema,
-            table
-        ),
+        pg_diesel::v15::MAJOR => {
+            facts_under!(v15, with_lists, connection, publication, schema, table)
+        }
         #[cfg(feature = "postgres-16")]
-        pg_diesel::v16::MAJOR => facts_under!(
-            v16,
-            with_lists,
-            connection,
-            namespace,
-            publication,
-            schema,
-            table
-        ),
+        pg_diesel::v16::MAJOR => {
+            facts_under!(v16, with_lists, connection, publication, schema, table)
+        }
         #[cfg(feature = "postgres-17")]
-        pg_diesel::v17::MAJOR => facts_under!(
-            v17,
-            with_lists,
-            connection,
-            namespace,
-            publication,
-            schema,
-            table
-        ),
+        pg_diesel::v17::MAJOR => {
+            facts_under!(v17, with_lists, connection, publication, schema, table)
+        }
         #[cfg(feature = "postgres-18")]
-        pg_diesel::v18::MAJOR => facts_under!(
-            v18,
-            with_lists,
-            connection,
-            namespace,
-            publication,
-            schema,
-            table
-        ),
+        pg_diesel::v18::MAJOR => {
+            facts_under!(v18, with_lists, connection, publication, schema, table)
+        }
         server => {
             return Err(PgDatabaseBuildError::UnsupportedServerVersion {
                 server,
@@ -329,5 +307,29 @@ fn replica_identity(code: &str) -> Result<ReplicaIdentity, PgShapeError> {
         "i" => Ok(ReplicaIdentity::Index),
         "f" => Ok(ReplicaIdentity::Full),
         other => Err(PgShapeError::UnknownReplicaIdentity(other.to_owned())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sql_traits::structs::ParserDB;
+    use sqlparser::dialect::PostgreSqlDialect;
+
+    #[test]
+    fn a_replica_identity_code_postgresql_does_not_document_is_refused() {
+        let catalog =
+            ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE t1 (id INT)").expect("DDL parses");
+        let table = catalog.tables().next().expect("one table");
+        let shape = TableShape::from_table::<Postgres, _>(table, &catalog).expect("shape builds");
+        let facts = LiveFacts {
+            replica_identity: "x".to_owned(),
+            operations: None,
+            member: None,
+        };
+        assert!(matches!(
+            facts.apply_to(shape),
+            Err(PgShapeError::UnknownReplicaIdentity(code)) if code == "x"
+        ));
     }
 }
