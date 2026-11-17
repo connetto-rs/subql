@@ -1855,6 +1855,76 @@ CREATE POLICY notes_p ON notes USING (owner = current_setting('app.department', 
         assert_eq!(policy.inner().calls(), 0);
     }
 
+    /// One table readable while the request carries a may-be-unset value, and
+    /// one readable while it leaves the value unset.
+    const PRESENCE_GATES: &str = "
+CREATE TABLE set_notes(id INTEGER PRIMARY KEY);
+CREATE TABLE unset_notes(id INTEGER PRIMARY KEY);
+ALTER TABLE set_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE unset_notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY set_read ON set_notes FOR SELECT
+  USING (NULLIF(current_setting('app.installation', true), '') IS NOT NULL);
+CREATE POLICY unset_read ON unset_notes FOR SELECT
+  USING (NULLIF(current_setting('app.installation', true), '') IS NULL);
+";
+
+    /// Whether the request carries a may-be-unset value is decided from what
+    /// the watcher sent. A sent `''` and no value both leave it unset, several
+    /// values answer a single-value parameter with neither state, and a
+    /// watcher that cannot state what it sent is delegated.
+    #[test]
+    fn carrying_a_may_be_unset_value_is_decided_from_the_watchers_values() {
+        let installation =
+            deployments::with_settings([deployments::scalar("app.installation").may_be_unset()]);
+        let (db, relations) = translated_for(PRESENCE_GATES, installation.clone());
+        let tables = ["set_notes", "unset_notes"]
+            .map(|name| catalog_helpers::table_id::<Postgres, _>(&db, name).unwrap());
+        let policy = RowPolicy::new(
+            shared_for(db, &relations, installation),
+            Granting::<Principal>::to("user:silent"),
+        );
+        let watchers = [
+            Principal::identity("user:carrying").answering("app_installation", &["i-1"]),
+            Principal::identity("user:empty").answering("app_installation", &[""]),
+            Principal::identity("user:unset").answering("app_installation", &[]),
+            Principal::identity("user:several").answering("app_installation", &["i-1", "i-2"]),
+            Principal::identity("user:silent"),
+        ];
+        let answers = tables.map(|table| {
+            assert!(policy.answers_locally(table, ActionStatement::Select));
+            let event = insert(table, vec![Value::Int(4)]);
+            let view = EventRow::current(&event, policy.catalog()).unwrap();
+            let mut verdicts = vec![Verdict::Deny; watchers.len()];
+            block_on(policy.may_see(&view, &watchers, &mut verdicts)).unwrap();
+            verdicts
+        });
+
+        assert_eq!(
+            answers,
+            [
+                [
+                    Verdict::Allow,
+                    Verdict::Deny,
+                    Verdict::Deny,
+                    Verdict::Deny,
+                    Verdict::Allow
+                ],
+                [
+                    Verdict::Deny,
+                    Verdict::Allow,
+                    Verdict::Allow,
+                    Verdict::Deny,
+                    Verdict::Allow
+                ],
+            ]
+        );
+        assert_eq!(
+            policy.inner().seen(),
+            2,
+            "only the silent watcher is delegated, once per table"
+        );
+    }
+
     /// A replacement on connetto's own shape is answered from both versions by
     /// the one relation the model defines for it.
     ///

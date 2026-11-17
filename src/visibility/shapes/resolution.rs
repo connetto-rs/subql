@@ -249,6 +249,7 @@ impl<DB: DatabaseLike> Shapes<DB> {
                     parameter,
                     setting_key,
                     is_list,
+                    normalization,
                     // The separator spells the Postgres join and the deployment owns it,
                     // so the index leaves it to the deployment and names the list by the
                     // report.
@@ -257,6 +258,7 @@ impl<DB: DatabaseLike> Shapes<DB> {
                     parameter: parameter.clone(),
                     setting_key: setting_key.clone(),
                     list: *is_list,
+                    normalization: *normalization,
                 }),
                 _ => None,
             })
@@ -490,8 +492,11 @@ fn is_request_gated(decision: &RowDecision) -> bool {
 /// check's kind rather than the caller supplying it.
 fn predicate_needs_a_parameter(predicate: &RequestPredicate) -> bool {
     match predicate {
-        // A value the caller supplies, tested against a constant the policy names.
-        RequestPredicate::Holds(_) => true,
+        // A value the caller supplies, tested against a constant the policy
+        // names or for whether the request carries it at all.
+        RequestPredicate::Holds(_)
+        | RequestPredicate::Carries { .. }
+        | RequestPredicate::Omits { .. } => true,
         // The role the request acts as, stated by the check's kind.
         RequestPredicate::ActsAs { .. } => false,
         RequestPredicate::Any(children) | RequestPredicate::All(children) => {
@@ -1127,13 +1132,13 @@ mod tests {
     use rls2fga_types::TypeName;
     use rls2fga_types::{ActionAnswer, ActionStatement};
     use rls2fga_types::{
-        RecordDerivation, RecordDescription, RelationName, RelationShapes, RequestPredicate,
-        RowDecision,
+        RecordDerivation, RecordDescription, RelationName, RelationShapes, RequestNormalization,
+        RequestPredicate, RowDecision,
     };
     use sql_traits::structs::{Deployment, SessionSetting, SetPacking, SettingValue};
     use sqlparser::ast::DataType;
 
-    use super::{Enumeration, Materialisation, Region, Shapes};
+    use super::{Enumeration, Materialisation, Region, RequiredParameter, Shapes};
     use crate::testing::deployment;
     use crate::visibility::{test_names, test_pooling};
     use crate::{catalog_helpers, ParserDB, TableId};
@@ -1460,6 +1465,47 @@ mod tests {
         assert!(!parameter.list, "one value, not a set");
     }
 
+    /// A gate on whether the request carries a may-be-unset value asks the
+    /// caller for that value, and a lowered read names the function the value
+    /// the caller sends has been through.
+    #[test]
+    fn a_presence_gate_and_a_lowered_read_tell_the_caller_what_to_send() {
+        let presence = shapes_declaring(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY);
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY d ON docs FOR SELECT
+               USING (NULLIF(current_setting('app.installation', true), '') IS NOT NULL);",
+            deployment::with_settings([deployment::scalar("app.installation").may_be_unset()]),
+        );
+        assert!(presence.has_request_gated_recipe(), "{presence:?}");
+        assert_eq!(
+            presence.required_parameters(),
+            [RequiredParameter {
+                parameter: "app_installation".to_string(),
+                setting_key: Some("app.installation".to_string()),
+                list: false,
+                normalization: None,
+            }]
+        );
+
+        let lowered = shapes_declaring(
+            "CREATE TABLE objects(id INTEGER PRIMARY KEY, email TEXT NOT NULL CHECK (email = lower(email)));
+             ALTER TABLE objects ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY o ON objects FOR SELECT
+               USING (email = lower(NULLIF(current_setting('app.verified_email', true), '')));",
+            deployment::with_settings([deployment::scalar("app.verified_email").may_be_unset()]),
+        );
+        assert_eq!(
+            lowered.required_parameters(),
+            [RequiredParameter {
+                parameter: "app_verified_email_lower".to_string(),
+                setting_key: Some("app.verified_email".to_string()),
+                list: false,
+                normalization: Some(RequestNormalization::Lower),
+            }]
+        );
+    }
+
     /// Nested request predicates require parameters exactly when a leaf reads a caller value.
     #[test]
     fn nested_request_predicates_distinguish_roles_from_values() {
@@ -1563,6 +1609,7 @@ mod tests {
                     setting_key,
                     separator,
                     is_list,
+                    normalization: _,
                 } => Some((parameter, setting_key, separator, *is_list)),
                 _ => None,
             })

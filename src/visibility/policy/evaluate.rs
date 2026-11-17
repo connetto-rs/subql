@@ -374,6 +374,27 @@ fn holds<S: Subject + ?Sized>(
         RequestPredicate::Any(children) => {
             any(children.iter().map(|child| holds(child, watcher, values)))
         }
+        RequestPredicate::Carries { request_parameter }
+        | RequestPredicate::Omits { request_parameter } => {
+            values.reset();
+            if !watcher.request_value(request_parameter, values) {
+                return Local::Unresolved;
+            }
+            let mut sent = values.values();
+            // A `''` is the value the policy's `NULLIF` read reads as unset.
+            let carried = match (sent.next(), sent.next()) {
+                // Several values have not answered a parameter declared to
+                // hold one, and are granted by neither state.
+                (Some(_), Some(_)) => return Local::Deny,
+                (Some(one), None) => !one.is_empty(),
+                (None, _) => false,
+            };
+            if carried == matches!(predicate, RequestPredicate::Carries { .. }) {
+                Local::Allow
+            } else {
+                Local::Deny
+            }
+        }
         RequestPredicate::All(children) => {
             all(children.iter().map(|child| holds(child, watcher, values)))
         }

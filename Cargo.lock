@@ -920,7 +920,7 @@ dependencies = [
  "r2d2",
  "serde_json",
  "sqlite-wasm-rs",
- "sqlstate",
+ "sqlstate 0.2.0 (git+https://github.com/diesel-rs/diesel)",
  "time",
  "url",
  "uuid",
@@ -1110,7 +1110,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1825,15 +1825,6 @@ name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
 dependencies = [
  "either",
 ]
@@ -2564,7 +2555,7 @@ dependencies = [
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#8f94d59671d89c589a08e1d0a6f65185f48c311a"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#2fa3e48ee3869b956a97daeab11cf883f58a0a7c"
 dependencies = [
  "sql-traits",
  "sql-values 0.5.1",
@@ -2840,7 +2831,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6e4d69d0fa3e7f6f9cf6b53a0e83e4fc99ba3586f65ce166cff30bd13bb4ad2"
 dependencies = [
  "heck",
- "itertools 0.15.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph",
@@ -2859,7 +2850,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
 dependencies = [
  "anyhow",
- "itertools 0.15.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3187,7 +3178,7 @@ dependencies = [
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#bc05696fa09c7405d6db7e5a2c640e260080060d"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#b060be31237f7cd1982161fbd9c2ed9b9edfb43a"
 dependencies = [
  "openfga-client",
  "prost",
@@ -3203,7 +3194,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#bc05696fa09c7405d6db7e5a2c640e260080060d"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#b060be31237f7cd1982161fbd9c2ed9b9edfb43a"
 dependencies = [
  "serde",
  "sql-values 0.6.0",
@@ -3283,7 +3274,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3654,7 +3645,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#030d0688c3cf37a71e9d87d9702b2d70427eaae9"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#81e1c0b63b145fb35ab3288fc2cfd1ea4ffee8b6"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -3728,7 +3719,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#96a5132234dda33aa75ab6d3ef045038f106703a"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#039ce8a6ac44a717fa136183f2006f34e03fd05d"
 dependencies = [
  "log",
  "recursive",
@@ -3739,8 +3730,9 @@ dependencies = [
 [[package]]
 name = "sqlparser-canonicalize"
 version = "0.2.1"
-source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#1fde5fd1d49cd1188fe92047fef6d67a6e3b12bd"
+source = "git+https://github.com/connetto-rs/sqlparser-canonicalize?branch=main#07e59506f43915ac188a99ce0afa677f14ed82f4"
 dependencies = [
+ "recursive",
  "seahash",
  "sqlparser",
  "thiserror",
@@ -3749,21 +3741,28 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#131423cdac80ceadb72f6a72c9f9faad291fc5d3"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#c4753a3ace55225434db43892863af5757baa90b"
 dependencies = [
  "sqlparser",
+ "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
 ]
 
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#96a5132234dda33aa75ab6d3ef045038f106703a"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#039ce8a6ac44a717fa136183f2006f34e03fd05d"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
 ]
+
+[[package]]
+name = "sqlstate"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "858cea190fe7555971c35a5eb336858f1bf962a2bd7ceb8704fb1759b36af2cd"
 
 [[package]]
 name = "sqlstate"
@@ -3942,10 +3941,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4674,7 +4673,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
