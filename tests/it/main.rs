@@ -289,6 +289,11 @@ mod drift_guard_sqlite;
 // the guard's own reasons, before any op touches the target database.
 #[cfg(all(feature = "sqlite-cdc", feature = "apply-patchset-sqlite"))]
 mod drift_guard_apply_sqlite;
+
+// The PostgreSQL live catalog reads tables from a PostgreSQL 18 server, and
+// each judgment against a parsed catalog names what drifted.
+#[cfg(feature = "postgres-18")]
+mod drift_live_postgres;
 mod engine_removal_bookkeeping;
 mod engine_trait_surface;
 mod engine_unknown_tables;

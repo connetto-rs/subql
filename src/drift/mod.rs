@@ -17,14 +17,23 @@
 //! the guard's refused set through a [`refusal::RefusalView`], so an
 //! upload naming a refused table is refused with the typed reason before
 //! any op applies. The [`live` module](live) turns a connection that loads
-//! its own catalog into the guard's live reader, and the
+//! its own catalog into the guard's live reader. The
 //! [`sqlite` module](sqlite) implements that load for SQLite behind the
-//! `sqlite-cdc` feature.
+//! `sqlite-cdc` feature, and the [`postgres` module](postgres) for
+//! PostgreSQL behind the `postgres-14` to `postgres-18` features.
 
 #[cfg(feature = "std")]
 pub mod guard;
 #[cfg(feature = "std")]
 pub mod live;
+#[cfg(any(
+    feature = "postgres-14",
+    feature = "postgres-15",
+    feature = "postgres-16",
+    feature = "postgres-17",
+    feature = "postgres-18"
+))]
+pub mod postgres;
 pub mod refusal;
 pub mod shape;
 #[cfg(feature = "sqlite-cdc")]
@@ -41,6 +50,14 @@ pub use guard::{
 pub use live::{BlockingLiveReader, BlockingReadError};
 #[cfg(feature = "std")]
 pub use live::{InlineLiveReader, LiveCatalog};
+#[cfg(any(
+    feature = "postgres-14",
+    feature = "postgres-15",
+    feature = "postgres-16",
+    feature = "postgres-17",
+    feature = "postgres-18"
+))]
+pub use postgres::{PgLiveCatalog, PgShapeError};
 pub use refusal::{NoRefusals, RefusalView};
 pub use shape::{ColumnShape, Publication, PublishedChange, ReplicaIdentity, TableShape};
 #[cfg(feature = "sqlite-cdc")]

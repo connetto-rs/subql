@@ -49,6 +49,23 @@ pub trait DriftTableSignal: Send + Sync {
     fn changes_lost(&self) -> bool;
 }
 
+/// A pgoutput `Relation` names its table by the schema and name PostgreSQL
+/// stores, which the catalog answers with its id. pgoutput reports no lost
+/// changes.
+impl DriftTableSignal for crate::wal::PgRelation {
+    fn table<DB: DatabaseLike>(&self, catalog: &DB) -> Option<TableId> {
+        crate::catalog_helpers::table_id_in_schema::<crate::backend::Postgres, DB>(
+            catalog,
+            Some(self.schema()),
+            self.table(),
+        )
+    }
+
+    fn changes_lost(&self) -> bool {
+        false
+    }
+}
+
 /// The item a [`DriftGuard`] surfaces in place of the inner source's
 /// schema message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1218,5 +1235,42 @@ mod tests {
             );
         }
         assert_eq!(refusals.refusal("ledger"), None);
+    }
+
+    /// pgoutput names a relation by the schema and name PostgreSQL stores,
+    /// so a quoted mixed-case name matches only as stored and a relation
+    /// in another schema matches no catalog table.
+    #[test]
+    fn a_pgoutput_relation_names_the_catalog_table_it_stores() {
+        let catalog = parse(
+            "CREATE SCHEMA sales;
+             CREATE TABLE sales.orders (id INTEGER PRIMARY KEY);
+             CREATE TABLE sales.\"Ledger\" (id INTEGER PRIMARY KEY);",
+        );
+        let relation = |schema: &str, name: &str| {
+            crate::wal::PgRelation::new(
+                PgLsn(1),
+                1,
+                schema.into(),
+                name.into(),
+                pg_walstream::ReplicaIdentity::Full,
+                Vec::new(),
+            )
+        };
+        for (schema, name, expected) in [
+            ("sales", "orders", Some(table(&catalog, "sales.orders"))),
+            ("sales", "Ledger", Some(table(&catalog, "sales.\"Ledger\""))),
+            ("sales", "LEDGER", None),
+            ("sales", "ledger", None),
+            ("public", "orders", None),
+        ] {
+            let signal = relation(schema, name);
+            assert_eq!(
+                DriftTableSignal::table(&signal, &catalog),
+                expected,
+                "{schema}.{name}"
+            );
+            assert!(!signal.changes_lost());
+        }
     }
 }

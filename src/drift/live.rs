@@ -49,12 +49,16 @@ pub trait LiveCatalog {
         table: TargetName<'_>,
     ) -> Result<Option<&'d <Self::Database as DatabaseLike>::Table>, Self::Error>;
 
-    /// The shape of `table` in a `database` this connection loaded.
+    /// The shape of `table` in a `database` this connection loaded. A
+    /// backend whose live shape holds facts its catalog does not model
+    /// reads them through the connection.
     ///
     /// # Errors
     ///
-    /// The backend's error when a lookup on the table fails.
+    /// The backend's error when a lookup on the table or a read of those
+    /// facts fails.
     fn table_shape(
+        &mut self,
         database: &Self::Database,
         table: &<Self::Database as DatabaseLike>::Table,
     ) -> Result<TableShape, Self::Error> {
@@ -69,7 +73,7 @@ fn read_shape<C: LiveCatalog>(
 ) -> Result<Option<TableShape>, C::Error> {
     let database = connection.load_tables(core::slice::from_ref(&table))?;
     let shape = C::find_table(&database, table)?
-        .map(|found| C::table_shape(&database, found))
+        .map(|found| connection.table_shape(&database, found))
         .transpose();
     shape
 }

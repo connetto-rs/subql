@@ -28,21 +28,18 @@ use sqlparser_canonicalize::Canonicalizer;
 
 use crate::backend::{Backend, CheckTexts, TypeNames};
 
-/// The replica identity a backend applies to a table's updates and
-/// deletes, where the backend has one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+/// The replica identity a PostgreSQL table records, `pg_class.relreplident`,
+/// which decides the old values its updates and deletes carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum ReplicaIdentity {
-    /// The backend states no identity for the table.
-    #[default]
-    NotSpecified,
-    /// The backend's default identity, key columns only.
+    /// `DEFAULT`, the old values of the primary key's columns, if any.
     Default,
-    /// A user index other than the primary key.
+    /// `NOTHING`, no old values.
+    Nothing,
+    /// `USING INDEX`, the old values of one unique index's columns.
     Index,
-    /// Every column of the key.
-    All,
-    /// Every column of the row.
+    /// `FULL`, the old values of every column.
     Full,
 }
 
