@@ -1036,10 +1036,9 @@ mod tests {
         let catalog = shape_of::<PostgreSqlDialect>(BASE);
         let changed = shape_of::<PostgreSqlDialect>("CREATE TABLE t1 (id INTEGER PRIMARY KEY)");
         for identity in [
-            ReplicaIdentity::NotSpecified,
             ReplicaIdentity::Default,
+            ReplicaIdentity::Nothing,
             ReplicaIdentity::Index,
-            ReplicaIdentity::All,
         ] {
             let live = changed.clone().with_replica_identity(identity);
             assert_eq!(

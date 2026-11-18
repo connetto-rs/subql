@@ -65,9 +65,34 @@ pub struct PgDatabase {
 
 /// Acquire the shared Postgres and create a fresh database on it.
 pub fn pg_database() -> PgDatabase {
+    database_on("pg", pg_request)
+}
+
+/// The stock image of PostgreSQL `major`, which the drift reader's live
+/// catalog is judged against.
+#[cfg(feature = "postgres-18")]
+fn stock_pg_request(major: u32) -> ContainerRequest<GenericImage> {
+    GenericImage::new("postgres", major.to_string().as_str())
+        .with_wait_for(WaitFor::message_on_stderr("ready to accept connections"))
+        .with_exposed_port(5432.tcp())
+        .with_mount(Mount::tmpfs_mount("/var/lib/postgresql"))
+        .with_env_var("POSTGRES_USER", "subql_test")
+        .with_env_var("POSTGRES_PASSWORD", PASSWORD)
+        .with_env_var("POSTGRES_DB", "postgres")
+}
+
+/// Acquire the shared stock PostgreSQL `major` server and create a fresh
+/// database on it.
+#[cfg(feature = "postgres-18")]
+pub fn stock_pg_database(major: u32) -> PgDatabase {
+    database_on(&format!("pg{major}"), || stock_pg_request(major))
+}
+
+/// Acquire this run's shared `engine` server and create a fresh database on it.
+fn database_on(engine: &str, request: impl Fn() -> ContainerRequest<GenericImage>) -> PgDatabase {
     let (port, container) = shared_server(
-        "pg",
-        pg_request,
+        engine,
+        request,
         5432,
         |port| pg_admin(port).is_ok(),
         Duration::from_mins(3),

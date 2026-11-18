@@ -909,7 +909,9 @@ dependencies = [
  "chrono",
  "diesel_derives",
  "downcast-rs",
+ "ipnetwork",
  "itoa",
+ "libc",
  "libsqlite3-sys",
  "mysqlclient-sys",
  "num-bigint",
@@ -1812,6 +1814,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2562,6 +2573,83 @@ dependencies = [
  "sqlparser",
  "sqlparser-plpgsql",
  "thiserror",
+]
+
+[[package]]
+name = "pg_diesel"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8b7aa74fd6311142f9e8b8bff87a0ce4a538f362"
+dependencies = [
+ "diesel",
+ "pg_diesel_core",
+ "pg_diesel_pg14",
+ "pg_diesel_pg15",
+ "pg_diesel_pg16",
+ "pg_diesel_pg17",
+ "pg_diesel_pg18",
+]
+
+[[package]]
+name = "pg_diesel_core"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8b7aa74fd6311142f9e8b8bff87a0ce4a538f362"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "ipnetwork",
+ "sql-traits",
+ "sqlparser",
+ "thiserror",
+]
+
+[[package]]
+name = "pg_diesel_pg14"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8b7aa74fd6311142f9e8b8bff87a0ce4a538f362"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
+]
+
+[[package]]
+name = "pg_diesel_pg15"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8b7aa74fd6311142f9e8b8bff87a0ce4a538f362"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
+]
+
+[[package]]
+name = "pg_diesel_pg16"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8b7aa74fd6311142f9e8b8bff87a0ce4a538f362"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
+]
+
+[[package]]
+name = "pg_diesel_pg17"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8b7aa74fd6311142f9e8b8bff87a0ce4a538f362"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
+]
+
+[[package]]
+name = "pg_diesel_pg18"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#8b7aa74fd6311142f9e8b8bff87a0ce4a538f362"
+dependencies = [
+ "bigdecimal",
+ "diesel",
+ "pg_diesel_core",
 ]
 
 [[package]]
@@ -3859,6 +3947,7 @@ dependencies = [
  "openfga-client",
  "parking_lot 0.12.5",
  "pg2sqlite",
+ "pg_diesel",
  "pg_walstream",
  "postcard",
  "postgres-jsonb-canonical",

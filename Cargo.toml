@@ -174,6 +174,9 @@ r2d2 = { version = "0.8", optional = true }
 # Its `diesel ~2.4.0` requirement is met by the diesel-rs main patch, so both share one diesel.
 diesel-async = { version = "0.10", optional = true, default-features = false }
 
+# The PostgreSQL live catalog the drift guard reads, enabled by `postgres-14` to `postgres-18`.
+pg_diesel = { git = "https://github.com/connetto-rs/pg_diesel", branch = "main", default-features = false, optional = true }
+
 # SQLite patchsets and digest conversion for both CDC wire formats.
 sqlite-diff-rs = { version = "0.20", default-features = false, features = ["wal2json", "maxwell"] }
 # PostgreSQL wal2json parser and model.
@@ -567,6 +570,16 @@ sqlite-cdc = [
     "diesel?/sqlite",
     "dep:diesel-sqlite-session",
 ]
+
+# Opt-in: the drift guard's PostgreSQL live catalog over pg_diesel. Each
+# feature adds a server major version the reader accepts, and no feature
+# enables the reader without one, since pg_diesel builds no catalog without
+# a version.
+postgres-14 = ["std", "dep:diesel", "diesel?/postgres", "dep:pg_diesel", "pg_diesel?/postgres-14"]
+postgres-15 = ["std", "dep:diesel", "diesel?/postgres", "dep:pg_diesel", "pg_diesel?/postgres-15"]
+postgres-16 = ["std", "dep:diesel", "diesel?/postgres", "dep:pg_diesel", "pg_diesel?/postgres-16"]
+postgres-17 = ["std", "dep:diesel", "diesel?/postgres", "dep:pg_diesel", "pg_diesel?/postgres-17"]
+postgres-18 = ["std", "dep:diesel", "diesel?/postgres", "dep:pg_diesel", "pg_diesel?/postgres-18"]
 
 # A fake Postgres CDC source on SQLite that round-trips session changesets through pgoutput bytes.
 pg-sqlite-emu = [

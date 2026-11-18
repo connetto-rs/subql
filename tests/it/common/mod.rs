@@ -280,7 +280,9 @@ pub use parked_reads::{park_a_mysql_read, park_a_read, PARK};
     feature = "executor-diesel-postgres-r2d2"
 ))]
 pub use pg::in_transaction;
-#[cfg(feature = "pg-streaming")]
+#[cfg(feature = "postgres-18")]
+pub use pg::stock_pg_database;
+#[cfg(any(feature = "pg-streaming", feature = "postgres-18"))]
 pub use pg::PgDatabase;
 #[cfg(any(feature = "pg-streaming", feature = "pgoutput-emit"))]
 pub use pg::{create_pgoutput_slot, create_publication};
