@@ -529,8 +529,9 @@ mod scalar_kind_serde_tests {
         // The name was quoted, a schema is present, and it is three bytes.
         expected.extend_from_slice(&[1, 1, 3]);
         expected.extend_from_slice(b"app");
-        // The schema was unquoted, and neither catalog fact is known.
-        expected.extend_from_slice(&[0, 0, 0]);
+        // The schema was unquoted, neither catalog fact is known, and no
+        // PostgreSQL collation is resolved.
+        expected.extend_from_slice(&[0, 0, 0, 0]);
 
         let encoded = postcard::to_allocvec(&comparison).unwrap();
         assert_eq!(encoded, expected);
