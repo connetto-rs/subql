@@ -19,10 +19,11 @@
 //!
 //! # Scope
 //!
-//! `execute_scalar` resolves the MIN/MAX flavor of re-execution, mirroring
-//! the sync connectors. `execute_rows` returns
-//! [`DieselAsyncError::RowsUnsupported`] until total row re-execution lands
-//! (tracked in `MILESTONES.md`), matching the sync connectors' deferral.
+//! `execute_scalar` resolves the MIN/MAX flavor of re-execution, and
+//! `read_page` re-reads a whole answer one page at a time, as the sync
+//! connectors do. The Postgres connector also opens a cursor for an answer
+//! with no key to resume from, and the MySQL connector refuses one through
+//! the trait's default.
 //!
 //! Backends are Postgres and MySQL only: `diesel-async` 0.7 has no real
 //! async SQLite backend.
@@ -92,11 +93,6 @@ pub enum DieselAsyncError {
     /// Diesel returned a database error while executing the query.
     #[error("diesel error: {0}")]
     Diesel(diesel::result::Error),
-    /// `execute_rows` is reserved for total row re-execution and is not
-    /// implemented for these connectors yet. Use the scalar path or supply a
-    /// custom [`AsyncConnector`] impl.
-    #[error("execute_rows is reserved for total row reexec; use the scalar path or a custom AsyncConnector impl")]
-    RowsUnsupported,
 }
 
 /// Async counterpart of `load_scalar` (module-private there): route the
