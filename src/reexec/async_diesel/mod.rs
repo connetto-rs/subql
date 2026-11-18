@@ -276,11 +276,13 @@ impl<S: SessionSetup + Send + Sync, C: crate::backend::MySqlTableNameCase> Async
     type Checkpoint = crate::MysqlBinlogPos;
     type Backend = crate::backend::MySql<C>;
 
-    /// Transient for every error, because `diesel-async` exposes no MySQL
-    /// error number to tell a lock wait timeout from a permanent `HY000`
-    /// error.
-    fn failure_class(&self, _error: &Self::Error) -> super::connector::FailureClass {
-        super::connector::FailureClass::Transient
+    fn failure_class(&self, error: &Self::Error) -> super::connector::FailureClass {
+        use super::connector::{DieselFailureClass, FailureClass};
+
+        match error {
+            DieselAsyncError::Pool(_) => FailureClass::Transient,
+            DieselAsyncError::Diesel(error) => diesel::mysql::Mysql::failure_class(error),
+        }
     }
 
     fn execute_scalar(

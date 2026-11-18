@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "diesel"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel#35c7c77307c823c6ffdf704f7346fb1385dd49a0"
+source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -387,7 +387,7 @@ dependencies = [
 [[package]]
 name = "diesel-dynamic-schema"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#35c7c77307c823c6ffdf704f7346fb1385dd49a0"
+source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
 dependencies = [
  "diesel",
 ]
@@ -406,7 +406,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel#35c7c77307c823c6ffdf704f7346fb1385dd49a0"
+source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -416,7 +416,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel#35c7c77307c823c6ffdf704f7346fb1385dd49a0"
+source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -429,7 +429,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.4.0"
-source = "git+https://github.com/diesel-rs/diesel#35c7c77307c823c6ffdf704f7346fb1385dd49a0"
+source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
 dependencies = [
  "syn 3.0.10",
 ]
@@ -453,7 +453,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#35c7c77307c823c6ffdf704f7346fb1385dd49a0"
+source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
 dependencies = [
  "darling",
  "either",
@@ -1507,7 +1507,7 @@ checksum = "858cea190fe7555971c35a5eb336858f1bf962a2bd7ceb8704fb1759b36af2cd"
 [[package]]
 name = "sqlstate"
 version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#35c7c77307c823c6ffdf704f7346fb1385dd49a0"
+source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
 
 [[package]]
 name = "stable_try_trait_v2"

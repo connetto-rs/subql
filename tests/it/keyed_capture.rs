@@ -721,6 +721,7 @@ fn a_failed_read_keeps_the_keys_it_was_going_to_ask_about() {
     for ddl in [
         "CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT)",
         "INSERT INTO orders VALUES (1, 'paid'), (2, 'paid')",
+        "PRAGMA busy_timeout = 0",
     ] {
         diesel::sql_query(ddl).execute(&mut engine_conn).unwrap();
     }
@@ -736,24 +737,24 @@ fn a_failed_read_keeps_the_keys_it_was_going_to_ask_about() {
         AutoResolvingEngine::new(inner, SyncMode(DieselConnector::new(engine_conn)));
     let _ = register(&mut engine);
 
-    // Make the scoped read fail: the catalog still names `orders`, the database
-    // no longer has it.
-    diesel::sql_query("ALTER TABLE orders RENAME TO orders_hidden")
+    // Hold the database's exclusive lock, so the scoped read finds it busy and
+    // stays queued for a retry.
+    diesel::sql_query("BEGIN EXCLUSIVE")
         .execute(&mut saboteur)
-        .expect("hide the table");
+        .expect("lock the database");
     let event =
         TestEvent::<SQLite>::update(table, row(1, "paid"), row(1, "paid")).with_pk_columns([0u16]);
     engine.apply_leaving_reads_queued(&event).expect("apply");
     assert!(
         engine.resolve_collect().is_err(),
-        "the read must fail while the table is missing"
+        "the read must fail while the database is busy"
     );
 
-    // Put it back and change a different row. Row 1's change was never
+    // Release it and change a different row. Row 1's change was never
     // delivered, so it must still be pending rather than forgotten.
-    diesel::sql_query("ALTER TABLE orders_hidden RENAME TO orders")
+    diesel::sql_query("COMMIT")
         .execute(&mut saboteur)
-        .expect("restore the table");
+        .expect("release the database");
     let other =
         TestEvent::<SQLite>::update(table, row(2, "paid"), row(2, "paid")).with_pk_columns([0u16]);
     engine.apply_leaving_reads_queued(&other).expect("apply");

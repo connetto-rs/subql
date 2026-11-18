@@ -194,7 +194,7 @@ impl<S: SessionSetup, C: crate::backend::MySqlTableNameCase> Connector
     type Backend = crate::backend::MySql<C>;
 
     fn failure_class(&self, error: &Self::Error) -> super::FailureClass {
-        <Self::Backend as super::DieselBackend>::failure_class(error)
+        <diesel::mysql::Mysql as super::DieselFailureClass>::failure_class(error)
     }
 
     fn execute_scalar(

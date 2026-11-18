@@ -168,7 +168,7 @@ impl<S: SessionSetup> Connector for PgR2D2DieselConnector<S> {
         match error {
             PgR2D2Error::Pool(_) => super::FailureClass::Transient,
             PgR2D2Error::Diesel(error) => {
-                <Self::Backend as super::DieselBackend>::failure_class(error)
+                <diesel::pg::Pg as super::DieselFailureClass>::failure_class(error)
             }
         }
     }

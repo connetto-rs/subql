@@ -86,7 +86,7 @@ pub use connector::{
     ScalarRowError, SessionSetup, Snapshot,
 };
 #[cfg(feature = "executor-diesel")]
-pub use connector::{DieselBackend, DieselConnector};
+pub use connector::{DieselBackend, DieselConnector, DieselFailureClass};
 #[cfg(feature = "executor-diesel-postgres-r2d2")]
 pub use connector::{PgR2D2DieselConnector, PgR2D2Error};
 pub use dispatch::{Dispatch, Settled};
