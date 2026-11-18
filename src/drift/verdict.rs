@@ -9,8 +9,25 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use sql_traits::prelude::SqlparserDialect;
+use sql_traits::traits::{CollationMatch, ColumnCollation};
 
 use super::shape::{Publication, PublishedChange, ReplicaIdentity, TableShape};
+
+/// A step from a column's type to a collated field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CollationPathStep {
+    /// A named field, under its declared spelling.
+    Named(String),
+    /// An unnamed field's zero-based position.
+    Unnamed(usize),
+    /// An array's element.
+    ArrayElement,
+    /// A map's key.
+    MapKey,
+    /// A map's value.
+    MapValue,
+}
 
 /// One reason a live table no longer conforms to the catalog's.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +54,28 @@ pub enum Incompatibility {
         catalog: String,
         /// The live normalized type spelling.
         live: String,
+    },
+    /// A column or field uses a different comparison rule.
+    ColumnCollationChanged {
+        /// The column's name.
+        column: String,
+        /// The path to the field, empty for the column's own collation.
+        field: Vec<CollationPathStep>,
+        /// The catalog's collation.
+        catalog: ColumnCollation<'static>,
+        /// The live collation.
+        live: ColumnCollation<'static>,
+    },
+    /// A column or field's comparison rules cannot be proven equivalent.
+    ColumnCollationUndetermined {
+        /// The column's name.
+        column: String,
+        /// The path to the field, empty for the column's own collation.
+        field: Vec<CollationPathStep>,
+        /// The catalog's collation.
+        catalog: ColumnCollation<'static>,
+        /// The live collation.
+        live: ColumnCollation<'static>,
     },
     /// A column present in both declares a different nullability.
     ColumnNullabilityChanged {
@@ -136,6 +175,9 @@ pub enum Verdict {
 /// publication's column list leaves out included, then the live extras in
 /// live order, the key, the `CHECK` constraints, the kinds of change the
 /// publication skips, and its row filter.
+///
+/// Within each column, a retype precedes collation reasons, the column's
+/// own first, then fields in declaration order, before nullability and defaults.
 #[must_use]
 pub fn judge(catalog: &TableShape, live: Option<&TableShape>) -> Verdict {
     let Some(live) = live else {
@@ -202,13 +244,15 @@ fn column_reasons(catalog: &TableShape, live: &TableShape, reasons: &mut Vec<Inc
                 column: column.into(),
             });
         }
-        if !live_column.type_matches(catalog_column) {
+        let matching_type = live_column.type_matches(catalog_column);
+        if !matching_type {
             reasons.push(Incompatibility::ColumnRetyped {
                 column: column.into(),
                 catalog: catalog_column.type_normalized().into(),
                 live: live_column.type_normalized().into(),
             });
         }
+        catalog_column.collation_reasons(live_column, catalog.dialect, matching_type, reasons);
         if live_column.nullable() != catalog_column.nullable() {
             reasons.push(Incompatibility::ColumnNullabilityChanged {
                 column: column.into(),
@@ -235,6 +279,30 @@ fn column_reasons(catalog: &TableShape, live: &TableShape, reasons: &mut Vec<Inc
                 column: live_column.name().into(),
             });
         }
+    }
+}
+
+pub(super) fn collation_reason(
+    column: &str,
+    catalog: &ColumnCollation<'static>,
+    live: &ColumnCollation<'static>,
+    dialect: SqlparserDialect,
+    field: impl FnOnce() -> Vec<CollationPathStep>,
+) -> Option<Incompatibility> {
+    match catalog.is_same_rule(dialect, live) {
+        CollationMatch::Same => None,
+        CollationMatch::Different => Some(Incompatibility::ColumnCollationChanged {
+            column: column.into(),
+            field: field(),
+            catalog: catalog.clone(),
+            live: live.clone(),
+        }),
+        CollationMatch::Undetermined => Some(Incompatibility::ColumnCollationUndetermined {
+            column: column.into(),
+            field: field(),
+            catalog: catalog.clone(),
+            live: live.clone(),
+        }),
     }
 }
 
@@ -359,6 +427,28 @@ mod tests {
     }
 
     const BASE: &str = "CREATE TABLE t1 (id INTEGER PRIMARY KEY, v INTEGER, note TEXT)";
+
+    #[test]
+    fn postgres_column_collation_rules_are_judged() {
+        let (catalog, live) = postgres(
+            "CREATE TABLE t (v TEXT COLLATE \"C\")",
+            "CREATE TABLE t (v TEXT COLLATE pg_catalog.\"C\")",
+        );
+        assert_eq!(judge(&catalog, live.as_ref()), Verdict::Unchanged);
+        let (catalog, live) = postgres(
+            "CREATE TABLE t (v TEXT COLLATE \"C\")",
+            "CREATE TABLE t (v TEXT COLLATE pg_catalog.\"POSIX\")",
+        );
+        assert!(matches!(
+            judge(&catalog, live.as_ref()),
+            Verdict::Incompatible { reasons }
+                if matches!(&reasons[..], [Incompatibility::ColumnCollationChanged {
+                    column, field, ..
+                }] if column == "v" && field.is_empty())
+        ));
+        let (catalog, live) = postgres("CREATE TABLE t (v TEXT)", "CREATE TABLE t (v TEXT)");
+        assert_eq!(judge(&catalog, live.as_ref()), Verdict::Unchanged);
+    }
 
     #[test]
     fn an_unchanged_table_is_unchanged() {
@@ -836,6 +926,39 @@ mod tests {
                 }]
             }
         );
+    }
+
+    #[test]
+    fn sqlite_collation_names_compare_without_case() {
+        let (catalog, live) = sqlite(
+            "CREATE TABLE t (value TEXT COLLATE NOCASE)",
+            "CREATE TABLE t (value TEXT COLLATE nocase)",
+        );
+        assert_eq!(judge(&catalog, live.as_ref()), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn sqlite_default_collation_matches_explicit_binary() {
+        let (catalog, live) = sqlite(
+            "CREATE TABLE t (value TEXT)",
+            "CREATE TABLE t (value TEXT COLLATE BINARY)",
+        );
+        assert_eq!(judge(&catalog, live.as_ref()), Verdict::Unchanged);
+    }
+
+    #[test]
+    fn sqlite_different_collation_rules_are_reported() {
+        let (catalog, live) = sqlite(
+            "CREATE TABLE t (value TEXT COLLATE NOCASE)",
+            "CREATE TABLE t (value TEXT COLLATE RTRIM)",
+        );
+        assert!(matches!(
+            judge(&catalog, live.as_ref()),
+            Verdict::Incompatible { reasons }
+                if matches!(&reasons[..], [Incompatibility::ColumnCollationChanged {
+                    column, field, ..
+                }] if column == "value" && field.is_empty())
+        ));
     }
 
     #[test]
