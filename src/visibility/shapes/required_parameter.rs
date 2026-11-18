@@ -1,7 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rls2fga_types::{BoundQuery, RecordDescription};
+use rls2fga_types::{BoundQuery, RecordDescription, RequestNormalization};
 
 use crate::ColumnId;
 
@@ -20,6 +20,11 @@ pub struct RequiredParameter {
     /// Whether it holds a set rather than one value, read off the note's own
     /// list report, since a JSON-array set names no separator to read it off.
     pub list: bool,
+    /// The function the policy applies to the setting's value. A watcher
+    /// sends that function's result under [`parameter`](Self::parameter), as
+    /// the database the policies run in computes it, since the result follows
+    /// that database's collation.
+    pub normalization: Option<RequestNormalization>,
 }
 
 impl RequiredParameter {

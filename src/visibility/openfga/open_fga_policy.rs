@@ -2177,6 +2177,7 @@ mod tests {
             parameter: "app_subjects".to_string(),
             setting_key: Some("app.subjects".to_string()),
             list,
+            normalization: None,
         }]
     }
 
@@ -2279,6 +2280,7 @@ mod tests {
                 parameter: "request_time".to_string(),
                 setting_key: None,
                 list: false,
+                normalization: None,
             }],
             &Eager,
             &mut values,

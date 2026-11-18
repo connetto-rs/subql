@@ -22,6 +22,14 @@ const DDL: &str =
        owner = current_setting('app.user_id', true)
        OR owner = ANY(string_to_array(current_setting('app.subjects', true), ',')));";
 
+/// An owner check beside a literal check on a column no deployment confirms as
+/// an attribute, which rls2fga grades B.
+const GRADE_B_DDL: &str =
+    "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
+     ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY items_p ON items FOR ALL USING (
+       owner = current_setting('app.user_id', true) OR title = 'public');";
+
 const UNION_DDL: &str =
     "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
      ALTER TABLE items ENABLE ROW LEVEL SECURITY;
@@ -862,7 +870,7 @@ fn quoted_role_keyword_columns_fold_their_public_read_rule() {
 
 #[test]
 fn a_below_threshold_rule_keeps_query_only_matching() {
-    let db = parse(DDL);
+    let db = parse(GRADE_B_DDL);
     let items = table_id(&db, "items");
     let mut engine: Engine = SubscriptionEngine::new(db, PostgreSqlDialect {})
         .with_translator(translator_at(ConfidenceLevel::A));
