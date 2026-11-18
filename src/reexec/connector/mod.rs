@@ -28,10 +28,8 @@
 //!
 //! # Error handling
 //!
-//! [`Connector::Error`] propagates as [`ReExecError::Connector`]. A single
-//! Connector failure aborts the entire `consumers()` batch. The caller is
-//! expected to retry the batch. Retry policy lives in the Connector impl
-//! (or above the engine), never inside subql.
+//! [`Connector::failure_class`] decides whether a failed read is retried or
+//! its subscription ends with a stopped delivery.
 
 use crate::backend::{Backend, ScalarFamily, Value};
 use crate::{Checkpoint, DispatchError};
@@ -402,7 +400,7 @@ pub struct CursorId(pub u64);
 /// Separates "this connector holds no cursors" from a genuine failure, so a
 /// caller can tell a connector that cannot serve keyless captures from a
 /// database that refused.
-#[derive(Error, Debug)]
+#[derive(Clone, Error, Debug)]
 #[non_exhaustive]
 pub enum CursorError<E> {
     /// This connector does not implement cursors, so it cannot serve a
@@ -420,6 +418,15 @@ pub enum CursorError<E> {
     /// The connector failed.
     #[error(transparent)]
     Connector(E),
+}
+
+/// Whether a failed subscription read can succeed on retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureClass {
+    /// Keep the subscription and retry its read.
+    Transient,
+    /// End the subscription and deliver its error.
+    Permanent,
 }
 
 /// Executes a captured query's SQL when maintenance cannot resolve it.
@@ -441,9 +448,8 @@ pub enum CursorError<E> {
 ///
 /// # Errors
 ///
-/// Any failure (network, authentication, malformed SQL) bubbles up as
-/// `Self::Error`. The auto-resolving engine wraps it in
-/// [`ReExecError::Connector`] and aborts the rest of the dispatch batch.
+/// Transient failures propagate as [`ReExecError::Connector`], while permanent
+/// failures end their subscription and are delivered through the sink.
 pub trait Connector {
     /// Per-subscription auth state carried verbatim to each execution.
     /// Subql stores it opaquely. The connector's impl interprets it.
@@ -452,6 +458,10 @@ pub trait Connector {
     ///
     /// [`execute_scalar`]: Self::execute_scalar
     type Error;
+
+    /// Classify a failed read for retry or subscription termination.
+    fn failure_class(&self, error: &Self::Error) -> FailureClass;
+
     /// The change-stream domain the read's fence lives in.
     ///
     /// Every read reports the fence of the snapshot that served it, so a
@@ -687,7 +697,7 @@ where
 /// Error returned by [`AutoResolvingEngine::resolve`].
 ///
 /// [`AutoResolvingEngine::resolve`]: super::AutoResolvingEngine::resolve
-#[derive(Error, Debug)]
+#[derive(Clone, Error, Debug)]
 #[non_exhaustive]
 pub enum ReExecError<E> {
     /// The core engine could not dispatch the event (e.g. unknown table id,
@@ -703,11 +713,7 @@ pub enum ReExecError<E> {
         /// The answer that came back unadopted.
         subscription: crate::SubscriptionId,
     },
-    /// The [`Connector`] failed to execute the re-execution SQL for
-    /// `subscription`. The whole batch is aborted. The id names the read that
-    /// failed, so a caller whose read fails deterministically (a statement
-    /// timeout on a query that always exceeds its budget) can end that one
-    /// subscription rather than retrying the same failure forever.
+    /// A connector failure classified for retry or stopped delivery.
     #[error("connector failed for subscription {subscription}: {error}")]
     Connector {
         /// The subscription whose triggered read failed.
@@ -745,6 +751,22 @@ pub enum ReExecError<E> {
 }
 
 impl<E> ReExecError<E> {
+    /// Whether this read failure ends its subscription.
+    pub(crate) fn is_permanent(&self, classify: impl FnOnce(&E) -> FailureClass) -> bool {
+        match self {
+            Self::Connector { error, .. }
+            | Self::Cursor {
+                error: CursorError::Connector(error),
+                ..
+            } => classify(error) == FailureClass::Permanent,
+            Self::Cursor {
+                error: CursorError::Unsupported,
+                ..
+            } => true,
+            _ => false,
+        }
+    }
+
     /// Whether retrying the same read can change the outcome.
     ///
     /// An install failure means the database answer does not match the

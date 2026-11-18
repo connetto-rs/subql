@@ -6,6 +6,7 @@ use super::*;
 /// modeled by leaving the queue empty when `panic_on_empty` is false.
 pub(super) struct MockConnector {
     pub(super) values: RefCell<alloc::vec::Vec<Value<Postgres>>>,
+    pub(super) permanent_query: RefCell<Option<String>>,
     pub(super) calls: RefCell<alloc::vec::Vec<(String, ScalarFamily)>>,
     pub(super) scalar_queries:
         RefCell<alloc::vec::Vec<crate::reexec::ReadQuery<'static, Postgres>>>,
@@ -33,6 +34,7 @@ impl MockConnector {
     pub(super) fn new(values: alloc::vec::Vec<Value<Postgres>>) -> Self {
         Self {
             values: RefCell::new(values),
+            permanent_query: RefCell::new(None),
             calls: RefCell::new(alloc::vec::Vec::new()),
             scalar_queries: RefCell::new(alloc::vec::Vec::new()),
             page_queries: RefCell::new(alloc::vec::Vec::new()),
@@ -58,6 +60,8 @@ impl MockConnector {
 pub(super) enum MockError {
     #[error("{0}")]
     Unstaged(&'static str),
+    #[error("permanent read failure")]
+    Permanent,
 }
 
 impl Connector for MockConnector {
@@ -65,6 +69,13 @@ impl Connector for MockConnector {
     type Error = MockError;
     type Checkpoint = crate::NoCheckpoint;
     type Backend = Postgres;
+
+    fn failure_class(&self, error: &Self::Error) -> crate::reexec::FailureClass {
+        match error {
+            MockError::Permanent => crate::reexec::FailureClass::Permanent,
+            MockError::Unstaged(_) => crate::reexec::FailureClass::Transient,
+        }
+    }
 
     fn execute_scalar(
         &self,
@@ -78,6 +89,9 @@ impl Connector for MockConnector {
         ),
         Self::Error,
     > {
+        if self.permanent_query.borrow().as_deref() == Some(query.sql()) {
+            return Err(MockError::Permanent);
+        }
         self.calls
             .borrow_mut()
             .push((String::from(query.sql()), column_kind));
@@ -149,7 +163,9 @@ impl Connector for MockConnector {
         let fetch = *self.fetches.borrow();
         *self.fetches.borrow_mut() = fetch + 1;
         if *self.fail_fetch_at.borrow() == Some(fetch) {
-            return Err(crate::reexec::CursorError::Unsupported);
+            return Err(crate::reexec::CursorError::Connector(MockError::Unstaged(
+                "fetch failed",
+            )));
         }
         let page = self.cursor_pages.borrow_mut().remove(0);
         Ok(crate::reexec::connector::Snapshot {

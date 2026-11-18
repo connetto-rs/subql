@@ -42,6 +42,10 @@ impl Connector for RefusingReads {
     type Checkpoint = NoCheckpoint;
     type Backend = SQLite;
 
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
+
     fn execute_scalar(
         &self,
         _query: &ReadQuery<'_, SQLite>,
@@ -78,6 +82,10 @@ impl Connector for AnsweringSouth {
     type Error = RefusedRead;
     type Checkpoint = PgLsn;
     type Backend = SQLite;
+
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
 
     fn execute_scalar(
         &self,

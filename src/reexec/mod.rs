@@ -82,8 +82,8 @@ pub use connector::MysqlDieselConnector;
 #[cfg(feature = "executor-diesel-postgres")]
 pub use connector::PgDieselConnector;
 pub use connector::{
-    BoundQuery, Connector, CursorError, CursorId, ReExecError, ReadQuery, RowPage, ScalarRowError,
-    SessionSetup, Snapshot,
+    BoundQuery, Connector, CursorError, CursorId, FailureClass, ReExecError, ReadQuery, RowPage,
+    ScalarRowError, SessionSetup, Snapshot,
 };
 #[cfg(feature = "executor-diesel")]
 pub use connector::{DieselBackend, DieselConnector};
@@ -93,5 +93,5 @@ pub use dispatch::{Dispatch, Settled};
 pub(crate) use engine::ReExecEntry;
 pub use engine::{
     Dispatched, ReExecNotifications, ReExecutionRead, ReExecutionTrigger, ReadDelivery,
-    ResolvedReads, RowDelta, RowsUpdate, ScalarInstalled, ScalarUpdate,
+    ResolvedReads, RowDelta, RowsUpdate, ScalarInstalled, ScalarUpdate, StoppedRead,
 };

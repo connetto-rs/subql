@@ -271,6 +271,16 @@ impl<S: SessionSetup + Send + Sync> AsyncConnector for PgAsyncDieselConnector<S>
     type Checkpoint = crate::PgCommitPosition;
     type Backend = crate::backend::Postgres;
 
+    fn failure_class(&self, error: &Self::Error) -> super::super::connector::FailureClass {
+        use super::super::connector::{DieselBackend, FailureClass};
+
+        match error {
+            DieselAsyncError::Pool(_) => FailureClass::Transient,
+            DieselAsyncError::Diesel(error) => Self::Backend::failure_class(error),
+            DieselAsyncError::RowsUnsupported => FailureClass::Permanent,
+        }
+    }
+
     fn execute_scalar(
         &self,
         query: &ReadQuery<'_, Self::Backend>,

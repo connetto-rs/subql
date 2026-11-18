@@ -174,6 +174,74 @@ fn r2d2_pool_drives_snapshot_and_reexec() {
     assert_eq!(notifs.scalar_updates[0].checkpoint, Some(event_pos));
 }
 
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn dropped_table_stops_only_its_subscription_in_one_resolve() {
+    common::assert_docker_available();
+    let database = common::pg_database();
+    common::postgres_read_failures::dropped_table(
+        PgR2D2DieselConnector::new(build_pool(&database.url())),
+        database.connect(),
+        |error| match error {
+            subql::reexec::PgR2D2Error::Diesel(error) => {
+                common::postgres_read_failures::assert_undefined_table(error);
+            }
+            other => panic!("unexpected connector error {other:?}"),
+        },
+    );
+}
+
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn exhausted_pool_keeps_reads_queued_until_connection_returns() {
+    common::assert_docker_available();
+    let database = common::pg_database();
+    let catalog = common::postgres_read_failures::prepare(&mut database.connect());
+    let pool = r2d2::Pool::builder()
+        .max_size(1)
+        .connection_timeout(Duration::from_millis(100))
+        .build(ConnectionManager::<PgConnection>::new(database.url()))
+        .expect("build pool");
+    let mut engine = build_engine(catalog, pool.clone());
+    let (first_subscription, healthy_subscription) =
+        common::postgres_read_failures::register_and_queue(&mut engine);
+    let held_connection = pool.get().expect("hold connection");
+    let mut reads = subql::reexec::ResolvedReads::default();
+    let error = engine
+        .resolve(&mut |delivery| reads.push(delivery))
+        .expect_err("pool exhausted");
+    assert!(error.is_retryable());
+    assert!(matches!(
+        error,
+        subql::reexec::ReExecError::Cursor {
+            error: subql::reexec::CursorError::Connector(subql::reexec::PgR2D2Error::Pool(_)),
+            ..
+        }
+    ));
+    assert_eq!(engine.pending_read_count(), 2);
+    assert!(reads.stopped.is_empty());
+    assert!(reads.rows_updates.is_empty());
+    drop(held_connection);
+    let reads = engine.resolve_collect().expect("retry after release");
+    assert!(reads.stopped.is_empty());
+    assert_eq!(reads.rows_updates.len(), 2);
+    let healthy = reads
+        .rows_updates
+        .iter()
+        .find(|update| update.subscription_id == healthy_subscription)
+        .expect("healthy rows");
+    assert_eq!(healthy.rows, vec![vec![Value::Int(1)]]);
+    assert_eq!(engine.pending_read_count(), 0);
+    assert!(engine
+        .snapshot(first_subscription)
+        .expect("first subscription retained")
+        .is_some());
+    assert!(engine
+        .snapshot(healthy_subscription)
+        .expect("healthy subscription retained")
+        .is_some());
+}
+
 /// `PgR2D2DieselConnector: Send + Sync` so it can move across async
 /// tasks. Compile-time check.
 #[test]
@@ -797,6 +865,10 @@ impl Connector for PanicMidRead {
     type Error = <PgR2D2DieselConnector as Connector>::Error;
     type Checkpoint = <PgR2D2DieselConnector as Connector>::Checkpoint;
     type Backend = Postgres;
+
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
 
     fn execute_scalar(
         &self,

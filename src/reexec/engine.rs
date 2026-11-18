@@ -326,12 +326,28 @@ pub struct Dispatched<I: IdTypes, B: Backend, C: crate::Checkpoint = crate::NoCh
     pub debounced: usize,
 }
 
+/// A subscription ended by a permanent re-execution failure.
+#[derive(Debug, Clone)]
+pub struct StoppedRead<I: IdTypes, Error> {
+    /// The subscription the engine stopped.
+    pub subscription_id: crate::SubscriptionId,
+    /// The consumer that registered it.
+    pub consumer_id: I::ConsumerId,
+    /// The failure that stopped the read.
+    pub error: super::ReExecError<Error>,
+}
+
 /// One result delivered by `resolve` as its read completes.
 ///
 /// The sink receives each installed answer the moment its read finishes,
 /// so retained memory tracks one read rather than the whole drain.
 #[derive(Debug, Clone)]
-pub enum ReadDelivery<I: IdTypes, B: Backend, C: crate::Checkpoint = crate::NoCheckpoint> {
+pub enum ReadDelivery<
+    I: IdTypes,
+    B: Backend,
+    C: crate::Checkpoint = crate::NoCheckpoint,
+    Error = core::convert::Infallible,
+> {
     /// A scalar captured query's re-read value.
     Scalar(ScalarUpdate<I, B, C>),
     /// A grouped aggregate row written or removed by a grouped read.
@@ -342,6 +358,8 @@ pub enum ReadDelivery<I: IdTypes, B: Backend, C: crate::Checkpoint = crate::NoCh
     Delta(RowDelta<I, B, C>),
     /// A subscription changed maintenance tier during resolution.
     Transition(crate::MaintenanceTransition<B>),
+    /// A subscription ended by a permanent read failure.
+    Stopped(StoppedRead<I, Error>),
 }
 
 /// Every delivery of one `resolve` drain, buffered by channel.
@@ -352,7 +370,12 @@ pub enum ReadDelivery<I: IdTypes, B: Backend, C: crate::Checkpoint = crate::NoCh
 /// rather than being alternatives, so ignoring one silently drops every
 /// subscription that uses it.
 #[derive(Debug, Clone)]
-pub struct ResolvedReads<I: IdTypes, B: Backend, C: crate::Checkpoint = crate::NoCheckpoint> {
+pub struct ResolvedReads<
+    I: IdTypes,
+    B: Backend,
+    C: crate::Checkpoint = crate::NoCheckpoint,
+    Error = core::convert::Infallible,
+> {
     /// Scalar re-read values, in delivery order.
     pub scalar_updates: Vec<ScalarUpdate<I, B, C>>,
     /// Grouped aggregate rows written or removed, in delivery order.
@@ -363,9 +386,13 @@ pub struct ResolvedReads<I: IdTypes, B: Backend, C: crate::Checkpoint = crate::N
     pub row_deltas: Vec<RowDelta<I, B, C>>,
     /// Tier changes produced during resolution.
     pub transitions: Vec<crate::MaintenanceTransition<B>>,
+    /// Subscriptions ended by permanent read failures.
+    pub stopped: Vec<StoppedRead<I, Error>>,
 }
 
-impl<I: IdTypes, B: Backend, C: crate::Checkpoint> Default for ResolvedReads<I, B, C> {
+impl<I: IdTypes, B: Backend, C: crate::Checkpoint, Error> Default
+    for ResolvedReads<I, B, C, Error>
+{
     fn default() -> Self {
         Self {
             scalar_updates: Vec::new(),
@@ -373,19 +400,21 @@ impl<I: IdTypes, B: Backend, C: crate::Checkpoint> Default for ResolvedReads<I, 
             rows_updates: Vec::new(),
             row_deltas: Vec::new(),
             transitions: Vec::new(),
+            stopped: Vec::new(),
         }
     }
 }
 
-impl<I: IdTypes, B: Backend, C: crate::Checkpoint> ResolvedReads<I, B, C> {
+impl<I: IdTypes, B: Backend, C: crate::Checkpoint, Error> ResolvedReads<I, B, C, Error> {
     /// File one delivery under its channel.
-    pub fn push(&mut self, delivery: ReadDelivery<I, B, C>) {
+    pub fn push(&mut self, delivery: ReadDelivery<I, B, C, Error>) {
         match delivery {
             ReadDelivery::Scalar(update) => self.scalar_updates.push(update),
             ReadDelivery::Aggregate(update) => self.aggregate_updates.push(update),
             ReadDelivery::Rows(update) => self.rows_updates.push(update),
             ReadDelivery::Delta(delta) => self.row_deltas.push(delta),
             ReadDelivery::Transition(transition) => self.transitions.push(transition),
+            ReadDelivery::Stopped(stopped) => self.stopped.push(stopped),
         }
     }
 }

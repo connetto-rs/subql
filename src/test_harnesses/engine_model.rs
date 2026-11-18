@@ -979,9 +979,9 @@ fn apply_scalars(
 }
 
 /// Fold what the re-execution reads delivered into `subscription`.
-fn absorb_reads(
+fn absorb_reads<Error>(
     subscription: &mut Subscription,
-    reads: &crate::reexec::ResolvedReads<DefaultIds, SQLite, crate::NoCheckpoint>,
+    reads: &crate::reexec::ResolvedReads<DefaultIds, SQLite, crate::NoCheckpoint, Error>,
 ) {
     apply_aggregates(
         &mut subscription.view,

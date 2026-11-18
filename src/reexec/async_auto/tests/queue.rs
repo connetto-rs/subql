@@ -81,6 +81,15 @@ fn a_failed_install_drops_the_read_instead_of_requeueing_it() {
 /// answered in process and what its queued reads answered.
 #[test]
 fn the_drain_hands_back_the_notifications_with_the_resolved_reads() {
+    assert_dispatch_deliveries(false);
+}
+
+#[test]
+fn the_sink_drain_hands_back_notifications_and_delivers_reads() {
+    assert_dispatch_deliveries(true);
+}
+
+fn assert_dispatch_deliveries(use_sink: bool) {
     let (mut e, tid) = engine_with_values(vec![Value::Float(7.0)]);
     let min_id = crate::reexec::test_fixtures::bootstrap_scalar_query(
         &mut e,
@@ -94,20 +103,29 @@ fn the_drain_hands_back_the_notifications_with_the_resolved_reads() {
     )
     .expect("an in-process row subscription registers");
 
-    let settled = block_on(
-        e.apply(&delete_event(tid, 1, 5.0))
-            .expect("the event applies")
-            .resolve_collect(),
-    );
-    let reads = settled.reads.expect("the queued read runs");
+    let dispatch = e
+        .apply(&delete_event(tid, 1, 5.0))
+        .expect("the event applies");
+    let (dispatched, reads) = if use_sink {
+        let mut deliveries = crate::reexec::ResolvedReads::default();
+        let settled = block_on(dispatch.resolve(|delivery| deliveries.push(delivery)));
+        settled.reads.expect("the queued read runs");
+        (settled.dispatched, deliveries)
+    } else {
+        let settled = block_on(dispatch.resolve_collect());
+        (
+            settled.dispatched,
+            settled.reads.expect("the queued read runs"),
+        )
+    };
 
     assert_eq!(
-        settled.dispatched.engine.deleted(),
+        dispatched.engine.deleted(),
         &[2],
         "the in-process subscription is answered without a read"
     );
     assert_eq!(
-        settled.dispatched.outstanding, 1,
+        dispatched.outstanding, 1,
         "the displaced extreme queued one read"
     );
     assert_eq!(
@@ -442,8 +460,12 @@ fn dropped_resolve_keeps_the_read_queued() {
     *e.connector().pend_next_read.lock() = true;
     {
         let mut ctx = Context::from_waker(core::task::Waker::noop());
-        let mut sink =
-            |_delivery: crate::reexec::ReadDelivery<DefaultIds, Postgres, NoCheckpoint>| {};
+        let mut sink = |_delivery: crate::reexec::ReadDelivery<
+            DefaultIds,
+            Postgres,
+            NoCheckpoint,
+            MockError,
+        >| {};
         let fut = e.resolve(&mut sink);
         let mut pinned = pin!(fut);
         assert!(

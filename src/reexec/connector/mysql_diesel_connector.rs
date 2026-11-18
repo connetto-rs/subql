@@ -193,6 +193,10 @@ impl<S: SessionSetup, C: crate::backend::MySqlTableNameCase> Connector
     type Checkpoint = crate::MysqlBinlogPos;
     type Backend = crate::backend::MySql<C>;
 
+    fn failure_class(&self, error: &Self::Error) -> super::FailureClass {
+        <Self::Backend as super::DieselBackend>::failure_class(error)
+    }
+
     fn execute_scalar(
         &self,
         query: &ReadQuery<'_, Self::Backend>,

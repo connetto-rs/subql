@@ -210,3 +210,260 @@ fn a_grouped_read_without_a_context_is_refused_async() {
         "the refusal names the unadopted answer, got {err:?}"
     );
 }
+
+#[test]
+fn permanent_read_failure_stops_only_its_subscription() {
+    let (mut engine, table_id) = engine_with_values(vec![Value::Float(9.0)]);
+    for consumer_id in [11, 22] {
+        crate::reexec::test_fixtures::bootstrap_scalar_query(
+            &mut engine,
+            consumer_id,
+            "SELECT MIN(price) FROM orders",
+            5.0,
+        );
+    }
+    engine
+        .connector()
+        .scalar_failures
+        .lock()
+        .extend([None, Some(MockError::Permanent)]);
+    engine
+        .apply_leaving_reads_queued(&delete_event(table_id, 1, 5.0))
+        .unwrap();
+    let triggers = engine.pending_reads.snapshot();
+    let deliveries = block_on(engine.resolve_collect()).unwrap();
+    assert_eq!(deliveries.stopped.len(), 1);
+    assert_eq!(deliveries.scalar_updates.len(), 1);
+    let stopped = &deliveries.stopped[0];
+    assert!(matches!(
+        stopped.error,
+        ReExecError::Connector {
+            error: MockError::Permanent,
+            ..
+        }
+    ));
+    assert!(triggers.iter().any(|trigger| {
+        trigger.subscription_id == stopped.subscription_id
+            && trigger.consumer_id == stopped.consumer_id
+    }));
+    assert_ne!(
+        deliveries.scalar_updates[0].subscription_id,
+        stopped.subscription_id
+    );
+    assert!(!engine.contexts.contains_key(&stopped.subscription_id));
+    assert_eq!(engine.pending_read_count(), 0);
+    assert!(!engine.unregister_subscription(stopped.subscription_id));
+    assert!(block_on(engine.snapshot(stopped.subscription_id))
+        .unwrap()
+        .is_none());
+    engine
+        .apply_leaving_reads_queued(&delete_event(table_id, 2, 9.0))
+        .unwrap();
+    assert!(engine
+        .pending_reads
+        .snapshot()
+        .iter()
+        .all(|trigger| { trigger.subscription_id != stopped.subscription_id }));
+}
+
+#[test]
+fn transient_read_failure_keeps_subscription_and_delivers_healthy_answer() {
+    let (mut engine, table_id) = engine_with_values(vec![Value::Float(9.0)]);
+    for consumer_id in [11, 22] {
+        crate::reexec::test_fixtures::bootstrap_scalar_query(
+            &mut engine,
+            consumer_id,
+            "SELECT MIN(price) FROM orders",
+            5.0,
+        );
+    }
+    engine
+        .connector()
+        .scalar_failures
+        .lock()
+        .extend([None, Some(MockError::Unstaged("temporarily unavailable"))]);
+    engine
+        .apply_leaving_reads_queued(&delete_event(table_id, 1, 5.0))
+        .unwrap();
+    let mut deliveries = crate::reexec::ResolvedReads::default();
+    let failure = block_on(engine.resolve(|delivery| deliveries.push(delivery))).unwrap_err();
+    let ReExecError::Connector { subscription, .. } = failure else {
+        panic!("expected connector failure");
+    };
+    assert!(deliveries.stopped.is_empty());
+    assert_eq!(deliveries.scalar_updates.len(), 1);
+    assert_ne!(deliveries.scalar_updates[0].subscription_id, subscription);
+    assert!(engine.contexts.contains_key(&subscription));
+    assert_eq!(engine.pending_read_count(), 1);
+    engine.connector().values.lock().push(Value::Float(12.0));
+    let retried = block_on(engine.resolve_collect()).unwrap();
+    assert_eq!(retried.scalar_updates.len(), 1);
+    assert_eq!(retried.scalar_updates[0].subscription_id, subscription);
+    assert_eq!(engine.pending_read_count(), 0);
+}
+
+#[test]
+fn permanent_outcome_discards_same_subscription_answers_in_either_order() {
+    for permanent_first in [false, true] {
+        let (mut engine, table_id) = engine_with_values(vec![]);
+        crate::reexec::test_fixtures::bootstrap_scalar_query(
+            &mut engine,
+            11,
+            "SELECT MIN(price) FROM orders",
+            5.0,
+        );
+        engine
+            .apply_leaving_reads_queued(&delete_event(table_id, 1, 5.0))
+            .unwrap();
+        let trigger = engine.pending_reads.snapshot().pop().unwrap();
+        let subscription_id = trigger.subscription_id;
+        let success = Ok((
+            trigger.clone(),
+            Resolved::Scalar {
+                value: Value::Float(9.0),
+                fence: None,
+            },
+        ));
+        let failure = Err((
+            trigger.clone(),
+            ReExecError::Connector {
+                subscription: subscription_id,
+                error: MockError::Permanent,
+            },
+        ));
+        let mut outcomes = if permanent_first {
+            vec![failure, success]
+        } else {
+            vec![success, failure]
+        };
+        outcomes.push(Err((
+            trigger.clone(),
+            ReExecError::Connector {
+                subscription: subscription_id,
+                error: MockError::Permanent,
+            },
+        )));
+        outcomes.push(Err((
+            trigger,
+            ReExecError::Connector {
+                subscription: subscription_id,
+                error: MockError::Unstaged("temporary"),
+            },
+        )));
+        let mut deliveries = crate::reexec::ResolvedReads::default();
+        let pages = vec![crate::reexec::engine::RowsUpdate {
+            subscription_id,
+            consumer_id: 11,
+            generation: 1,
+            columns: vec!["price".into()],
+            rows: vec![vec![Value::Float(9.0)]],
+            more: false,
+            checkpoint: None,
+        }];
+        engine
+            .apply_outcomes(outcomes, pages, &mut |delivery| {
+                deliveries.push(delivery);
+            })
+            .unwrap();
+        assert_eq!(deliveries.stopped.len(), 1);
+        assert_eq!(deliveries.stopped[0].subscription_id, subscription_id);
+        assert!(deliveries.scalar_updates.is_empty());
+        assert!(deliveries.rows_updates.is_empty());
+        assert_eq!(engine.pending_read_count(), 0);
+        assert!(!engine.unregister_subscription(subscription_id));
+    }
+}
+
+#[test]
+fn whole_read_with_queued_fence_delivers_buffered_pages() {
+    let (mut engine, table_id) = engine_with_values(vec![]);
+    engine.inner = engine.inner.with_max_changes_during_aggregate_read(1);
+    let subscription_id = engine
+        .register(
+            SubscriptionRequest::new(
+                11u64,
+                "SELECT status, MIN(price) FROM orders GROUP BY status",
+            ),
+            (),
+        )
+        .unwrap()
+        .subscription_id;
+    crate::Install::install(
+        &mut engine.inner,
+        subscription_id,
+        crate::GroupedScalarSeedInstall {
+            rows: vec![vec![
+                Value::String("paid".into()),
+                Value::Float(5.0),
+                Value::Int(1),
+            ]],
+            fence: None,
+        },
+    )
+    .unwrap();
+    engine
+        .apply_leaving_reads_queued(&insert_event(table_id, 2, 7.0).with_checkpoint(NoCheckpoint))
+        .unwrap();
+    let triggers = engine.pending_reads.snapshot();
+    assert_eq!(triggers.len(), 1);
+    assert!(matches!(
+        triggers[0].read,
+        crate::reexec::ReExecutionRead::Fence
+    ));
+    let missing_old = TestEvent::<Postgres>::update(table_id, vec![], row(2, 9.0))
+        .with_pk_columns([0u16])
+        .with_changed_columns([3u16]);
+    let dispatched = engine.apply_leaving_reads_queued(&missing_old).unwrap();
+    assert_eq!(dispatched.transitions.len(), 1);
+    assert!(matches!(
+        dispatched.transitions[0].to,
+        Tier::WholeRows { .. }
+    ));
+    let triggers = engine.pending_reads.snapshot();
+    assert_eq!(triggers.len(), 2);
+    assert!(triggers
+        .iter()
+        .all(|trigger| trigger.subscription_id == subscription_id));
+    assert!(triggers
+        .iter()
+        .any(|trigger| matches!(trigger.read, crate::reexec::ReExecutionRead::Subscription)));
+    let columns = vec!["status".into(), "min".into()];
+    let expected_rows = [
+        vec![Value::String("paid".into()), Value::Float(5.0)],
+        vec![Value::String("pending".into()), Value::Float(9.0)],
+    ];
+    for (index, expected_row) in expected_rows.iter().enumerate() {
+        engine
+            .connector()
+            .cursor_pages
+            .lock()
+            .push(crate::reexec::RowPage {
+                columns: columns.clone(),
+                rows: vec![expected_row.clone()],
+                more: index == 0,
+            });
+    }
+    let log = Arc::clone(&engine.connector().log);
+    let mut deliveries = crate::reexec::ResolvedReads::default();
+    block_on(engine.resolve(|delivery| {
+        log.lock().push("deliver");
+        deliveries.push(delivery);
+    }))
+    .unwrap();
+    assert_eq!(
+        &*log.lock(),
+        &["open", "fetch", "fetch", "close", "deliver", "deliver"]
+    );
+    assert_eq!(deliveries.rows_updates.len(), 2);
+    for (index, page) in deliveries.rows_updates.iter().enumerate() {
+        assert_eq!(page.subscription_id, subscription_id);
+        assert_eq!(page.consumer_id, 11);
+        assert_eq!(page.generation, 1);
+        assert_eq!(page.columns, columns);
+        assert_eq!(page.rows, vec![expected_rows[index].clone()]);
+        assert_eq!(page.more, index == 0);
+    }
+    assert!(deliveries.stopped.is_empty());
+    assert_eq!(engine.pending_read_count(), 0);
+    assert!(engine.unregister_subscription(subscription_id));
+}

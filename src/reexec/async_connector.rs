@@ -44,6 +44,10 @@ pub trait AsyncConnector: Send + Sync {
     type AuthContext: Send + Sync;
     /// Connector-specific error returned by the futures below.
     type Error: Send;
+
+    /// Classify a failed read for retry or subscription termination.
+    fn failure_class(&self, error: &Self::Error) -> super::connector::FailureClass;
+
     /// The change-stream domain the read's fence lives in. See
     /// [`Connector::Checkpoint`](super::Connector::Checkpoint) for the
     /// sync analogue.

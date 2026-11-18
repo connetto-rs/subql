@@ -118,16 +118,21 @@ fn async_ungrouped_aggregate_demotion_resolves_through_the_wrapper() {
     let missing_old = TestEvent::<Postgres>::update(tid, vec![], row(1, 5.0))
         .with_pk_columns([0u16])
         .with_changed_columns([3u16]);
-    match block_on(e.apply(&missing_old).unwrap().resolve_collect()).reads {
-        Err(ReExecError::Cursor { subscription, .. }) => {
-            assert_eq!(
-                subscription, count_id,
-                "the demoted aggregate attempts its whole read"
-            );
-        }
-        Ok(_) => panic!("expected the demotion to attempt a whole read"),
-        Err(other) => panic!("expected a Cursor error naming the aggregate, got {other:?}"),
-    }
+    let reads = block_on(e.apply(&missing_old).unwrap().resolve_collect())
+        .reads
+        .expect("an unsupported cursor stops the subscription");
+    assert_eq!(reads.stopped.len(), 1);
+    assert_eq!(
+        reads.stopped[0].subscription_id, count_id,
+        "the demoted aggregate attempts its whole read"
+    );
+    assert!(matches!(
+        reads.stopped[0].error,
+        ReExecError::Cursor {
+            subscription,
+            error: crate::reexec::CursorError::Unsupported,
+        } if subscription == count_id
+    ));
 }
 
 #[test]

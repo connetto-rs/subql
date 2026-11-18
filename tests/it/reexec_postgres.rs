@@ -49,6 +49,18 @@ fn build_engine(
     AutoResolvingEngine::new(inner, SyncMode(PgDieselConnector::new(conn_exec)))
 }
 
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn dropped_table_stops_only_its_subscription_in_one_resolve() {
+    common::assert_docker_available();
+    let database = common::pg_database();
+    common::postgres_read_failures::dropped_table(
+        PgDieselConnector::new(database.connect()),
+        database.connect(),
+        common::postgres_read_failures::assert_undefined_table,
+    );
+}
+
 /// Harness health check: container starts, three PG connections, catalog
 /// builds, registration of both subscriptions returns the right `Registered`
 /// variants. No DML, no slot drain. Proves the harness is healthy without

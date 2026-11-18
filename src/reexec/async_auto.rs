@@ -320,12 +320,9 @@ where
     /// The reads of one drain iteration run concurrently, at most
     /// [`with_max_concurrent_reexecutions`](Self::with_max_concurrent_reexecutions)
     /// in flight (unbounded when not configured). A read whose database
-    /// call fails stays queued and the next `resolve` retries it. A read
-    /// whose answer fails to install is already dequeued when the install
-    /// runs, matching the sync engine: install failures are not retryable,
-    /// per [`ReExecError::is_retryable`](super::ReExecError::is_retryable).
-    /// Reads that succeeded in the same iteration are still installed and
-    /// delivered before the failure is reported.
+    /// call fails transiently stays queued for the next `resolve`. A permanent
+    /// failure ends its subscription and discards its other iteration outcomes.
+    /// Install failures are dequeued and returned without retrying.
     ///
     /// Dropping the returned future loses nothing: engine state moves only
     /// between awaits, keys are copied rather than taken, and a read is
@@ -341,7 +338,7 @@ where
     /// key column the read named. Neither is retryable.
     pub async fn resolve<S>(&mut self, mut sink: S) -> Result<(), ReExecError<X::Error>>
     where
-        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint>) + Send,
+        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>) + Send,
     {
         use futures_util::stream::{FuturesUnordered, StreamExt};
 
@@ -377,11 +374,33 @@ where
                     },
                 )
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut reads_per_subscription = alloc::collections::BTreeMap::<_, usize>::new();
+            for (trigger, _, _) in &jobs {
+                *reads_per_subscription
+                    .entry(trigger.subscription_id)
+                    .or_default() += 1;
+            }
+            let buffered_subscriptions = jobs
+                .iter()
+                .filter(|(trigger, job, _)| {
+                    matches!(job, ResolveJob::Whole { .. })
+                        && reads_per_subscription
+                            .get(&trigger.subscription_id)
+                            .is_some_and(|reads| *reads > 1)
+                })
+                .map(|(trigger, _, _)| trigger.subscription_id)
+                .collect::<alloc::collections::BTreeSet<_>>();
+            let mut buffered_pages = Vec::new();
             let resolved = {
-                // Whole reads stream their pages from inside the concurrent
-                // phase, so the sink is shared under an async lock for the
-                // duration and handed back exclusively afterwards.
-                let shared_sink = async_lock::Mutex::new(&mut sink);
+                let mut deliver = |delivery| match delivery {
+                    super::ReadDelivery::Rows(page)
+                        if buffered_subscriptions.contains(&page.subscription_id) =>
+                    {
+                        buffered_pages.push(page);
+                    }
+                    other => sink(other),
+                };
+                let shared_sink = async_lock::Mutex::new(&mut deliver);
                 // Pushed in a loop, since a closure over `auth: &_` is
                 // higher-ranked and rustc cannot then prove the drain `Send`.
                 let reads = FuturesUnordered::new();
@@ -399,7 +418,7 @@ where
                 reads.collect::<Vec<_>>().await
             };
 
-            self.apply_outcomes(resolved, &mut sink)?;
+            self.apply_outcomes(resolved, buffered_pages, &mut sink)?;
             // Grouped installs may have queued follow-up reads: loop drains
             // them with the same concurrency.
         }
@@ -436,7 +455,7 @@ where
         throttle: Option<(Arc<Semaphore>, Arc<AtomicUsize>)>,
     ) -> ReadOutcome<I, E::Checkpoint, E::Backend, X::Error>
     where
-        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint>) + Send,
+        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>) + Send,
     {
         let _guard = acquire_permit(throttle.as_ref(), trigger.subscription_id).await;
         let answer = match job {
@@ -474,26 +493,59 @@ where
         Ok((trigger, answer))
     }
 
-    /// Phase three, between awaits so it cannot be interrupted: install and
-    /// deliver the successes, keep the retryable failures queued, drop the
-    /// non-retryable ones, and report the first failure.
+    /// Classify the iteration before installing any subscription's outcomes.
     fn apply_outcomes<S>(
         &mut self,
         resolved: ReadOutcomes<I, E::Checkpoint, E::Backend, X::Error>,
+        buffered_pages: Vec<super::engine::RowsUpdate<I, E::Backend, E::Checkpoint>>,
         sink: &mut S,
     ) -> Result<(), ReExecError<X::Error>>
     where
-        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint>) + Send,
+        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>) + Send,
     {
+        let mut stopped = resolved
+            .iter()
+            .filter_map(|outcome| match outcome {
+                Err((trigger, error))
+                    if error.is_permanent(|error| self.connector().failure_class(error)) =>
+                {
+                    Some((trigger.subscription_id, false))
+                }
+                _ => None,
+            })
+            .collect::<alloc::collections::BTreeMap<_, _>>();
+        for (subscription_id, undelivered) in &mut stopped {
+            *undelivered = self.unregister_subscription(*subscription_id);
+        }
+        for page in buffered_pages {
+            if !stopped.contains_key(&page.subscription_id) {
+                sink(super::ReadDelivery::Rows(page));
+            }
+        }
         let mut first_error = None;
         for outcome in resolved {
             match outcome {
                 Ok((trigger, answer)) => {
+                    if stopped.contains_key(&trigger.subscription_id) {
+                        continue;
+                    }
                     self.dequeue_read(&trigger);
                     self.apply_answer(&trigger, answer, sink)?;
                     self.stamp_reexec(trigger.subscription_id, &trigger.read);
                 }
                 Err((trigger, error)) => {
+                    if let Some(undelivered) = stopped.get_mut(&trigger.subscription_id) {
+                        if error.is_permanent(|error| self.connector().failure_class(error))
+                            && core::mem::take(undelivered)
+                        {
+                            sink(super::ReadDelivery::Stopped(super::engine::StoppedRead {
+                                subscription_id: trigger.subscription_id,
+                                consumer_id: trigger.consumer_id,
+                                error,
+                            }));
+                        }
+                        continue;
+                    }
                     // The same read returns the same mismatched answer, so a
                     // non-retryable failure is dropped exactly as the sync
                     // engine drops it.
@@ -521,7 +573,8 @@ where
     /// [`resolve`](Self::resolve) to keep them.
     pub async fn resolve_collect(
         &mut self,
-    ) -> Result<super::ResolvedReads<I, E::Backend, E::Checkpoint>, ReExecError<X::Error>> {
+    ) -> Result<super::ResolvedReads<I, E::Backend, E::Checkpoint, X::Error>, ReExecError<X::Error>>
+    {
         let mut collected = super::ResolvedReads::default();
         self.resolve(|delivery| collected.push(delivery)).await?;
         Ok(collected)
@@ -536,7 +589,7 @@ where
         sink: &mut S,
     ) -> Result<(), ReExecError<X::Error>>
     where
-        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint>),
+        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>),
     {
         match answer {
             Resolved::Scalar { value, fence } => {
@@ -832,7 +885,7 @@ where
         auth: &X::AuthContext,
     ) -> Result<(), ReExecError<X::Error>>
     where
-        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint>) + Send,
+        S: FnMut(super::ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>) + Send,
     {
         let subscription = trigger.subscription_id;
         let cursor = connector

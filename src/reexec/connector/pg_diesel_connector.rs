@@ -154,6 +154,10 @@ impl<S: SessionSetup> Connector for PgDieselConnector<S> {
     type Checkpoint = crate::PgCommitPosition;
     type Backend = crate::backend::Postgres;
 
+    fn failure_class(&self, error: &Self::Error) -> super::FailureClass {
+        <Self::Backend as super::DieselBackend>::failure_class(error)
+    }
+
     fn execute_scalar(
         &self,
         query: &ReadQuery<'_, Self::Backend>,

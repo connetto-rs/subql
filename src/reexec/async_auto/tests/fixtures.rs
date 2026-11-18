@@ -5,6 +5,7 @@ use super::*;
 /// `parking_lot::Mutex`-backed mock so the futures are `Send`.
 pub(super) struct MockAsyncConnector {
     pub(super) values: Mutex<Vec<Value<Postgres>>>,
+    pub(super) scalar_failures: Mutex<Vec<Option<MockError>>>,
     pub(super) call_count: Mutex<usize>,
     pub(super) scalar_queries: Mutex<Vec<crate::reexec::ReadQuery<'static, Postgres>>>,
     pub(super) page_queries: Mutex<Vec<crate::reexec::ReadQuery<'static, Postgres>>>,
@@ -31,6 +32,7 @@ impl MockAsyncConnector {
     pub(super) fn new(values: Vec<Value<Postgres>>) -> Self {
         Self {
             values: Mutex::new(values),
+            scalar_failures: Mutex::new(Vec::new()),
             call_count: Mutex::new(0),
             scalar_queries: Mutex::new(Vec::new()),
             page_queries: Mutex::new(Vec::new()),
@@ -51,12 +53,12 @@ impl MockAsyncConnector {
     }
 }
 
-/// What the mock connector fails with, as one variant, mirroring the
-/// synchronous suite's own mock.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum MockError {
     #[error("{0}")]
     Unstaged(&'static str),
+    #[error("permanent read failure")]
+    Permanent,
 }
 
 // The `+ Send` bound on the returned futures is the whole point of
@@ -67,6 +69,13 @@ impl AsyncConnector for MockAsyncConnector {
     type Error = MockError;
     type Checkpoint = NoCheckpoint;
     type Backend = Postgres;
+
+    fn failure_class(&self, error: &Self::Error) -> super::super::super::FailureClass {
+        match error {
+            MockError::Unstaged(_) => super::super::super::FailureClass::Transient,
+            MockError::Permanent => super::super::super::FailureClass::Permanent,
+        }
+    }
 
     fn execute_scalar(
         &self,
@@ -88,6 +97,10 @@ impl AsyncConnector for MockAsyncConnector {
             }
             *self.call_count.lock() += 1;
             self.scalar_queries.lock().push(query.clone().into_owned());
+            let failure = self.scalar_failures.lock().pop();
+            if let Some(Some(error)) = failure {
+                return Err(error);
+            }
             let value = self
                 .values
                 .lock()

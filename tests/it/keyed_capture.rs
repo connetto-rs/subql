@@ -75,6 +75,10 @@ impl subql::reexec::Connector for Counting {
         <DieselConnector<SqliteConnection, SQLite> as subql::reexec::Connector>::Checkpoint;
     type Backend = SQLite;
 
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
+
     fn execute_scalar(
         &self,
         query: &subql::reexec::ReadQuery<'_, SQLite>,
