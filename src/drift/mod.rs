@@ -62,4 +62,4 @@ pub use refusal::{NoRefusals, RefusalView};
 pub use shape::{ColumnShape, Publication, PublishedChange, ReplicaIdentity, TableShape};
 #[cfg(feature = "sqlite-cdc")]
 pub use sqlite::SqliteShapeError;
-pub use verdict::{judge, refusal_reasons, Incompatibility, Verdict};
+pub use verdict::{judge, refusal_reasons, CollationPathStep, Incompatibility, Verdict};
