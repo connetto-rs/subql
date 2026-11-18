@@ -106,6 +106,35 @@ fn every_parity_table_reads_as_its_catalog_declares_it() {
 }
 
 #[test]
+#[ignore = "requires Docker"]
+fn column_collation_reads_and_changes_are_judged() {
+    assert_docker_available();
+    let database = stock_pg_database(18);
+    let ddl = "CREATE TABLE collated (value TEXT COLLATE \"C\")";
+    let catalog = catalog_shape(ddl);
+    let mut reader = reader(
+        &database,
+        &format!("{ddl}; ALTER TABLE collated REPLICA IDENTITY FULL; CREATE PUBLICATION {PUBLICATION} FOR ALL TABLES;"),
+    );
+    assert_eq!(
+        judge(&catalog, live_shape(&mut reader, "collated").as_ref()),
+        Verdict::Unchanged
+    );
+    run(
+        &database,
+        "ALTER TABLE collated ALTER COLUMN value TYPE text COLLATE \"POSIX\"",
+    );
+    let verdict = judge(&catalog, live_shape(&mut reader, "collated").as_ref());
+    assert!(matches!(
+        verdict,
+        Verdict::Incompatible { reasons }
+            if matches!(&reasons[..], [Incompatibility::ColumnCollationChanged {
+                column, field, ..
+            }] if column == "value" && field.is_empty())
+    ));
+}
+
+#[test]
 fn each_identity_below_full_weakens_the_table() {
     assert_docker_available();
     let database = stock_pg_database(18);

@@ -15,6 +15,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use sql_traits::prelude::SqlparserDialect;
 use sql_traits::prelude::{ColumnLike, DatabaseLike, ExpressionScope, SemanticProofs, TableLike};
 use sql_traits::structs::IdentifierCase;
 use sql_traits::traits::{
@@ -26,6 +27,7 @@ use sqlparser::ast::Expr;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser_canonicalize::Canonicalizer;
 
+use super::verdict::{collation_reason, CollationPathStep, Incompatibility};
 use crate::backend::{Backend, CheckTexts, TypeNames};
 
 /// The replica identity a PostgreSQL table records, `pg_class.relreplident`,
@@ -80,7 +82,7 @@ pub enum Publication {
 /// A field of a structured type, as sql-traits answers it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FieldShape {
-    name: Option<String>,
+    step: CollationPathStep,
     name_is_quoted: bool,
     data_type: TypeShape,
     nullable: bool,
@@ -91,11 +93,16 @@ struct FieldShape {
 impl FieldShape {
     fn of<T: DataTypeLike>(
         field: &StructuredField<'_, T>,
+        position: usize,
         database: &T::DB,
         names: TypeNames,
     ) -> Self {
         Self {
-            name: field.name().map(String::from),
+            step: field
+                .name()
+                .map_or(CollationPathStep::Unnamed(position), |name| {
+                    CollationPathStep::Named(name.into())
+                }),
             name_is_quoted: field.name_is_quoted(),
             data_type: TypeShape::of(field.data_type(), database, names),
             nullable: field.is_nullable(),
@@ -106,6 +113,27 @@ impl FieldShape {
                 .collect(),
             collation: field.collation().clone().into_owned(),
         }
+    }
+}
+
+struct CollationPath<'path> {
+    parent: Option<&'path Self>,
+    step: &'path CollationPathStep,
+    depth: usize,
+}
+
+impl CollationPath<'_> {
+    fn to_vec(&self) -> Vec<CollationPathStep> {
+        let mut steps = Vec::with_capacity(self.depth);
+        self.extend(&mut steps);
+        steps
+    }
+
+    fn extend(&self, steps: &mut Vec<CollationPathStep>) {
+        if let Some(parent) = self.parent {
+            parent.extend(steps);
+        }
+        steps.push(self.step.clone());
     }
 }
 
@@ -157,6 +185,91 @@ struct TypeShape {
 }
 
 impl TypeShape {
+    fn type_matches(&self, other: &Self) -> bool {
+        self.normalized == other.normalized
+            && self.bounds == other.bounds
+            && self.time_zone == other.time_zone
+            && self.structure_kind == other.structure_kind
+            && self.enumeration == other.enumeration
+            && self.array_dimensions == other.array_dimensions
+            && self.admits_null == other.admits_null
+            && match (&self.element, &other.element) {
+                (Some(element), Some(other)) => element.type_matches(other),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.map, &other.map) {
+                (Some(entry), Some(other)) => {
+                    entry.value_nullable == other.value_nullable
+                        && entry.key.type_matches(&other.key)
+                        && entry.value.type_matches(&other.value)
+                }
+                (None, None) => true,
+                _ => false,
+            }
+            && self.fields.len() == other.fields.len()
+            && self.fields.iter().zip(&other.fields).all(|(field, other)| {
+                field.step == other.step
+                    && field.name_is_quoted == other.name_is_quoted
+                    && field.nullable == other.nullable
+                    && field.options == other.options
+                    && field.data_type.type_matches(&other.data_type)
+            })
+    }
+
+    fn collation_reasons(
+        &self,
+        other: &Self,
+        column: &str,
+        dialect: SqlparserDialect,
+        parent: Option<&CollationPath<'_>>,
+        reasons: &mut Vec<Incompatibility>,
+    ) {
+        let depth = parent.map_or(1, |path| path.depth + 1);
+        if let (Some(element), Some(other)) = (&self.element, &other.element) {
+            let path = CollationPath {
+                parent,
+                step: &CollationPathStep::ArrayElement,
+                depth,
+            };
+            element.collation_reasons(other, column, dialect, Some(&path), reasons);
+        }
+        for (field, other) in self.fields.iter().zip(&other.fields) {
+            let path = CollationPath {
+                parent,
+                step: &field.step,
+                depth,
+            };
+            if let Some(reason) =
+                collation_reason(column, &field.collation, &other.collation, dialect, || {
+                    path.to_vec()
+                })
+            {
+                reasons.push(reason);
+            }
+            field.data_type.collation_reasons(
+                &other.data_type,
+                column,
+                dialect,
+                Some(&path),
+                reasons,
+            );
+        }
+        if let (Some(entry), Some(other)) = (&self.map, &other.map) {
+            for (catalog, live, step) in [
+                (&entry.key, &other.key, CollationPathStep::MapKey),
+                (&entry.value, &other.value, CollationPathStep::MapValue),
+            ] {
+                let path = CollationPath {
+                    parent,
+                    step: &step,
+                    depth,
+                };
+                catalog.collation_reasons(live, column, dialect, Some(&path), reasons);
+            }
+        }
+    }
+
     /// The shape of `data_type` as sql-traits answers it, named under `names`.
     fn of<T: DataTypeLike>(data_type: &T, database: &T::DB, names: TypeNames) -> Self {
         let element = data_type
@@ -193,7 +306,8 @@ impl TypeShape {
                 .structured_fields(database)
                 .into_iter()
                 .flatten()
-                .map(|field| FieldShape::of(&field, database, names))
+                .enumerate()
+                .map(|(position, field)| FieldShape::of(&field, position, database, names))
                 .collect(),
             map: data_type.map_entry(database).map(|entry| {
                 Box::new(MapShape {
@@ -226,6 +340,7 @@ impl TypeShape {
 pub struct ColumnShape {
     name: String,
     data_type: TypeShape,
+    collation: ColumnCollation<'static>,
     /// How the dialect reads the column as a boolean, which tells MySQL's
     /// `TINYINT(1)` from a wider `TINYINT`.
     boolean: TypeMatch,
@@ -258,16 +373,39 @@ impl ColumnShape {
         self.has_default
     }
 
-    /// Whether the declared type, bounds, members and boolean reading match `other`'s.
+    /// Whether the declared type, bounds, members and boolean reading match, excluding collations.
     #[must_use]
     pub fn type_matches(&self, other: &Self) -> bool {
-        self.data_type == other.data_type && self.boolean == other.boolean
+        self.data_type.type_matches(&other.data_type) && self.boolean == other.boolean
+    }
+
+    pub(super) fn collation_reasons(
+        &self,
+        other: &Self,
+        dialect: SqlparserDialect,
+        matching_type: bool,
+        reasons: &mut Vec<Incompatibility>,
+    ) {
+        if let Some(reason) = collation_reason(
+            &self.name,
+            &self.collation,
+            &other.collation,
+            dialect,
+            Vec::new,
+        ) {
+            reasons.push(reason);
+        }
+        if matching_type {
+            self.data_type
+                .collation_reasons(&other.data_type, &self.name, dialect, None, reasons);
+        }
     }
 }
 
 /// One table's shape, one side of the drift judgment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableShape {
+    pub(super) dialect: SqlparserDialect,
     columns: Vec<ColumnShape>,
     /// The primary key's column names, in the order the key declares them.
     primary_key: Vec<String>,
@@ -298,6 +436,7 @@ impl TableShape {
             columns.push(ColumnShape {
                 name: column_name::<B, DB>(column),
                 data_type: TypeShape::of(column.data_type(database), database, B::TYPE_NAMES),
+                collation: column.collation(database)?.into_owned(),
                 boolean: if boolean.is_yes() {
                     TypeMatch::Yes
                 } else if boolean.is_maybe() {
@@ -318,6 +457,7 @@ impl TableShape {
             .map(|check| check_text::<B, DB>(table, database, check.expression(database)))
             .collect();
         Ok(Self {
+            dialect: SqlparserDialect::of::<B::Dialect>(),
             columns,
             primary_key,
             checks,
@@ -430,12 +570,13 @@ mod tests {
             .expect("column present")
     }
 
-    /// The shape of the one table `ddl` declares, judged under its dialect's
-    /// backend.
+    /// The shape parsed under `D`, with backend-specific names and `D`'s collation rules.
     fn shape_from_ddl<D: TestDialect>(ddl: &str) -> TableShape {
         let db = ParserDB::parse::<D>(ddl).expect("DDL parses");
         let table = db.tables().next().expect("one table");
-        TableShape::from_table::<D::Backend, _>(table, &db).expect("shape builds")
+        let mut shape = TableShape::from_table::<D::Backend, _>(table, &db).expect("shape builds");
+        shape.dialect = SqlparserDialect::of::<D>();
+        shape
     }
 
     fn shape_with_type<D: TestDialect>(data_type: &str) -> TableShape {
@@ -443,8 +584,14 @@ mod tests {
     }
 
     fn assert_retyped(catalog: &TableShape, live: &TableShape) {
+        for shape in [catalog, live] {
+            assert_eq!(judge(shape, Some(shape)), Verdict::Unchanged);
+        }
+        assert_retyped_pair(catalog, live);
+    }
+
+    fn assert_retyped_pair(catalog: &TableShape, live: &TableShape) {
         for (catalog, live) in [(catalog, live), (live, catalog)] {
-            assert_eq!(judge(catalog, Some(catalog)), Verdict::Unchanged);
             assert!(!catalog.columns()[0].type_matches(&live.columns()[0]));
             assert_eq!(
                 judge(catalog, Some(live)),
@@ -970,7 +1117,21 @@ mod tests {
             shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(8) COLLATE UTF8_LCASE>");
         let wider =
             shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(16) COLLATE UTF8_LCASE>");
-        assert_retyped(&catalog, &wider);
+        assert_retyped_pair(&catalog, &wider);
+        for shape in [&catalog, &wider] {
+            let collation = &shape.columns[0].data_type.fields[0].collation;
+            assert_eq!(
+                judge(shape, Some(shape)),
+                Verdict::Incompatible {
+                    reasons: vec![Incompatibility::ColumnCollationUndetermined {
+                        column: "v".into(),
+                        field: vec![CollationPathStep::Named("label".into())],
+                        catalog: collation.clone(),
+                        live: collation.clone(),
+                    }],
+                }
+            );
+        }
     }
 
     #[test]
@@ -986,14 +1147,25 @@ mod tests {
     }
 
     #[test]
-    fn struct_field_collation_is_part_of_the_declared_type() {
+    fn struct_field_collations_have_distinct_verdicts() {
         let lowercase =
             shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(8) COLLATE UTF8_LCASE>");
         let binary =
             shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(8) COLLATE UTF8_BINARY>");
         let omitted = shape_with_type::<DatabricksDialect>("STRUCT<label VARCHAR(8)>");
-        assert_retyped(&lowercase, &binary);
-        assert_retyped(&lowercase, &omitted);
+        for live in [&binary, &omitted] {
+            assert_eq!(
+                judge(&lowercase, Some(live)),
+                Verdict::Incompatible {
+                    reasons: alloc::vec![Incompatibility::ColumnCollationUndetermined {
+                        column: "v".into(),
+                        field: alloc::vec![CollationPathStep::Named("label".into())],
+                        catalog: lowercase.columns[0].data_type.fields[0].collation.clone(),
+                        live: live.columns[0].data_type.fields[0].collation.clone(),
+                    }],
+                }
+            );
+        }
     }
 
     #[test]
@@ -1007,9 +1179,17 @@ mod tests {
         assert_retyped(&catalog, &composite("left_side BIGINT, right_side TEXT"));
         assert_retyped(&catalog, &composite("left_side INT, label TEXT"));
         assert_retyped(&catalog, &composite("right_side TEXT, left_side INT"));
-        assert_retyped(
-            &catalog,
-            &composite("left_side INT, right_side TEXT COLLATE \"C\""),
+        let collated = composite("left_side INT, right_side TEXT COLLATE \"C\"");
+        assert_eq!(
+            judge(&catalog, Some(&collated)),
+            Verdict::Incompatible {
+                reasons: alloc::vec![Incompatibility::ColumnCollationChanged {
+                    column: "v".into(),
+                    field: alloc::vec![CollationPathStep::Named("right_side".into())],
+                    catalog: catalog.columns[0].data_type.fields[1].collation.clone(),
+                    live: collated.columns[0].data_type.fields[1].collation.clone(),
+                }],
+            }
         );
         assert_eq!(
             judge(
@@ -1017,6 +1197,169 @@ mod tests {
                 Some(&composite("left_side INTEGER, right_side TEXT"))
             ),
             Verdict::Unchanged
+        );
+    }
+
+    #[test]
+    fn nested_collation_paths_preserve_declaration_order() {
+        let catalog = shape_from_ddl::<PostgreSqlDialect>(
+            "CREATE TYPE inner_pair AS (label TEXT COLLATE \"C\"); \
+             CREATE TYPE outer_pair AS (first inner_pair[], last TEXT COLLATE \"C\"); \
+             CREATE TABLE t (v outer_pair);",
+        );
+        let live = shape_from_ddl::<PostgreSqlDialect>(
+            "CREATE TYPE inner_pair AS (label TEXT COLLATE \"POSIX\"); \
+             CREATE TYPE outer_pair AS (first inner_pair[], last TEXT COLLATE missing_rule); \
+             CREATE TABLE t (v outer_pair);",
+        );
+        let Verdict::Incompatible { reasons } = judge(&catalog, Some(&live)) else {
+            panic!("nested collations must refuse the table");
+        };
+        assert_eq!(reasons.len(), 2);
+        assert!(
+            matches!(&reasons[0], Incompatibility::ColumnCollationChanged { field, .. }
+            if field == &alloc::vec![
+                CollationPathStep::Named("first".into()),
+                CollationPathStep::ArrayElement,
+                CollationPathStep::Named("label".into()),
+            ])
+        );
+        assert!(
+            matches!(&reasons[1], Incompatibility::ColumnCollationUndetermined { field, .. }
+            if field == &alloc::vec![CollationPathStep::Named("last".into())])
+        );
+    }
+
+    #[test]
+    fn map_collation_paths_distinguish_keys_and_values() {
+        let catalog =
+            shape_with_type::<DatabricksDialect>("MAP<STRUCT<label STRING>, STRUCT<label STRING>>");
+        let mut live = catalog.clone();
+        let entry = live.columns[0].data_type.map.as_mut().unwrap();
+        entry.key.fields[0].collation = ColumnCollation::Unknown;
+        entry.value.fields[0].collation = ColumnCollation::Unknown;
+        let Verdict::Incompatible { reasons } = judge(&catalog, Some(&live)) else {
+            panic!("unknown collations must refuse the table");
+        };
+        assert_eq!(reasons.len(), 2);
+        for (reason, step) in reasons
+            .iter()
+            .zip([CollationPathStep::MapKey, CollationPathStep::MapValue])
+        {
+            assert!(
+                matches!(reason, Incompatibility::ColumnCollationUndetermined { field, .. }
+                if field == &alloc::vec![step, CollationPathStep::Named("label".into())])
+            );
+        }
+    }
+
+    #[test]
+    fn unnamed_collation_paths_use_field_positions() {
+        let catalog = shape_with_type::<ClickHouseDialect>("Tuple(String, String)");
+        let mut live = catalog.clone();
+        live.columns[0].data_type.fields[1].collation = ColumnCollation::Unknown;
+        assert_eq!(
+            judge(&catalog, Some(&live)),
+            Verdict::Incompatible {
+                reasons: alloc::vec![Incompatibility::ColumnCollationUndetermined {
+                    column: "v".into(),
+                    field: alloc::vec![CollationPathStep::Unnamed(1)],
+                    catalog: ColumnCollation::DatabaseDefault,
+                    live: ColumnCollation::Unknown,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn a_retype_skips_field_collations_but_keeps_the_columns_own() {
+        let catalog = shape_from_ddl::<PostgreSqlDialect>(
+            "CREATE TYPE pair AS (label TEXT COLLATE \"C\"); CREATE TABLE t (v pair);",
+        );
+        let mut live = shape_from_ddl::<PostgreSqlDialect>(
+            "CREATE TYPE pair AS (label VARCHAR(8) COLLATE \"POSIX\"); CREATE TABLE t (v pair);",
+        );
+        live.columns[0].collation = ColumnCollation::Unknown;
+        let Verdict::Incompatible { reasons } = judge(&catalog, Some(&live)) else {
+            panic!("a retype must refuse the table");
+        };
+        assert_eq!(reasons.len(), 2);
+        assert!(matches!(reasons[0], Incompatibility::ColumnRetyped { .. }));
+        assert!(
+            matches!(&reasons[1], Incompatibility::ColumnCollationUndetermined { field, .. }
+            if field.is_empty())
+        );
+    }
+
+    #[test]
+    fn postgres_collations_compare_written_and_stored_names() {
+        use sql_traits::structs::TargetName;
+        use sql_traits::traits::NamedColumnCollation;
+
+        let catalog = shape_from_ddl::<PostgreSqlDialect>("CREATE TABLE t (v TEXT COLLATE \"C\");");
+        for name in ["C", "POSIX"] {
+            let mut live = catalog.clone();
+            live.columns[0].collation = ColumnCollation::Named(
+                NamedColumnCollation::new(
+                    TargetName::new(name, true).with_schema("pg_catalog", true),
+                )
+                .with_postgres_deterministic(Some(true)),
+            );
+            let expected = if name == "C" {
+                Verdict::Unchanged
+            } else {
+                Verdict::Incompatible {
+                    reasons: alloc::vec![Incompatibility::ColumnCollationChanged {
+                        column: "v".into(),
+                        field: Vec::new(),
+                        catalog: catalog.columns[0].collation.clone(),
+                        live: live.columns[0].collation.clone(),
+                    }],
+                }
+            };
+            assert_eq!(judge(&catalog, Some(&live)), expected);
+        }
+    }
+
+    #[test]
+    fn an_unresolvable_live_column_collation_is_undetermined() {
+        let catalog = shape_from_ddl::<PostgreSqlDialect>("CREATE TABLE t (v TEXT COLLATE \"C\");");
+        let mut live = catalog.clone();
+        live.columns[0].collation = ColumnCollation::Unknown;
+        assert_eq!(
+            judge(&catalog, Some(&live)),
+            Verdict::Incompatible {
+                reasons: vec![Incompatibility::ColumnCollationUndetermined {
+                    column: "v".into(),
+                    field: Vec::new(),
+                    catalog: catalog.columns[0].collation.clone(),
+                    live: ColumnCollation::Unknown,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn a_columns_own_collation_precedes_its_field_collations() {
+        let catalog = shape_from_ddl::<PostgreSqlDialect>(
+            "CREATE TYPE pair AS (label TEXT COLLATE \"C\"); CREATE TABLE t (v pair);",
+        );
+        let mut live = shape_from_ddl::<PostgreSqlDialect>(
+            "CREATE TYPE pair AS (label TEXT COLLATE \"POSIX\"); CREATE TABLE t (v pair);",
+        );
+        live.columns[0].collation = ColumnCollation::Unknown;
+        let Verdict::Incompatible { reasons } = judge(&catalog, Some(&live)) else {
+            panic!("collations must refuse the table");
+        };
+        assert_eq!(reasons.len(), 2);
+        assert!(
+            matches!(&reasons[0], Incompatibility::ColumnCollationUndetermined {
+            column, field, catalog: ColumnCollation::DatabaseDefault, live: ColumnCollation::Unknown,
+        } if column == "v" && field.is_empty())
+        );
+        assert!(
+            matches!(&reasons[1], Incompatibility::ColumnCollationChanged { field, .. }
+            if field == &alloc::vec![CollationPathStep::Named("label".into())])
         );
     }
 

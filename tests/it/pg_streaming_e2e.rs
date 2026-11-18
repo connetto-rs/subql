@@ -1373,7 +1373,7 @@ fn reopening_a_source_whose_slot_was_dropped_fails_typed() {
     assert!(
         matches!(
             err,
-            PgStreamingError::Postgres(ReplicationError::ReplicationSlot(_))
+            PgStreamingError::Postgres(ReplicationError::ReplicationSlot(..))
         ),
         "the missing slot must surface as a typed slot error, got {err:?}",
     );
