@@ -30,6 +30,7 @@ deny = []
 # `mysql_async` to 0.37 and so allows the patched `lru` 0.18.2.
 ignore = [
     { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar is unmaintained, reached only through the testcontainers dev-dependency, whose 0.28 still requires it" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, and besides subql's own temporal values it is reached through pg_walstream and openfga-client's prost-wkt, which still require it" },
 ]
 
 [sources]
