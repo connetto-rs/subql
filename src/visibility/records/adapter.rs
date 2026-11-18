@@ -533,6 +533,118 @@ CREATE POLICY docs_owner ON docs USING (owner = current_setting('app.user_id', t
         ));
     }
 
+    fn compared_columns(
+        column: ColumnRead,
+        operator: rls2fga_types::AttributeOperator,
+        other: ColumnRead,
+    ) -> RecordDescription {
+        description(
+            ValueSource::column("owner"),
+            vec![Guard::CompareColumns {
+                column,
+                operator,
+                other,
+            }],
+        )
+    }
+
+    #[test]
+    fn numeric_column_comparisons_are_evaluable() {
+        let database = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE docs (id INT PRIMARY KEY, owner TEXT, amount NUMERIC, public BOOL);",
+        )
+        .unwrap();
+        for (left, right, kind, other_kind) in [
+            ("id", "amount", ColumnKind::Integer, ColumnKind::Decimal),
+            ("amount", "id", ColumnKind::Decimal, ColumnKind::Integer),
+            ("id", "id", ColumnKind::Integer, ColumnKind::Integer),
+            ("amount", "amount", ColumnKind::Decimal, ColumnKind::Decimal),
+            ("public", "public", ColumnKind::Bool, ColumnKind::Bool),
+        ] {
+            let described = compared_columns(
+                typed_column(left, kind),
+                rls2fga_types::AttributeOperator::Lt,
+                typed_column(right, other_kind),
+            );
+            assert!(is_evaluable::<Postgres, _>(&described, &database));
+        }
+    }
+
+    #[test]
+    fn text_column_equality_is_evaluable() {
+        for operator in [
+            rls2fga_types::AttributeOperator::Eq,
+            rls2fga_types::AttributeOperator::NotEq,
+        ] {
+            let described = compared_columns(column("owner"), operator, column("owner"));
+            assert!(is_evaluable::<Postgres, _>(&described, &catalog()));
+            let result = records(&described, row_of(Value::String("alice".into()))).unwrap();
+            assert_eq!(
+                result.len(),
+                usize::from(operator == rls2fga_types::AttributeOperator::Eq)
+            );
+        }
+    }
+
+    #[test]
+    fn text_column_ordering_needs_a_query() {
+        let described = compared_columns(
+            column("owner"),
+            rls2fga_types::AttributeOperator::Lt,
+            column("owner"),
+        );
+        assert!(matches!(
+            records(&described, row_of(Value::String("alice".into()))),
+            Err(RowRecordError::UnreadableColumn(message)) if message.contains("needs a query")
+        ));
+    }
+
+    #[test]
+    fn mismatched_column_comparison_kinds_are_unsupported() {
+        let described = compared_columns(
+            column("owner"),
+            rls2fga_types::AttributeOperator::Eq,
+            typed_column("id", ColumnKind::Integer),
+        );
+        assert!(matches!(
+            records(&described, row_of(Value::String("alice".into()))),
+            Err(RowRecordError::UnsupportedValueSource(
+                "unrecognised comparison"
+            ))
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_other_column_is_refused() {
+        let described = compared_columns(
+            column("owner"),
+            rls2fga_types::AttributeOperator::Eq,
+            column("missing"),
+        );
+        assert!(matches!(
+            records(&described, row_of(Value::String("alice".into()))),
+            Err(RowRecordError::UnreadableColumn(message)) if message.contains("missing")
+        ));
+    }
+
+    #[test]
+    fn an_untyped_column_comparison_is_refused_at_setup_and_evaluation() {
+        let described = guarded(
+            column("owner"),
+            AttributeTest::CompareColumn {
+                operator: rls2fga_types::AttributeOperator::Eq,
+                other: name("owner"),
+            },
+        );
+        assert!(!is_evaluable::<Postgres, _>(&described, &catalog()));
+        assert!(matches!(
+            records(&described, row_of(Value::String("alice".into()))),
+            Err(RowRecordError::UnsupportedValueSource(
+                "unrecognised comparison"
+            ))
+        ));
+    }
+
     #[test]
     fn a_text_owner_column_becomes_one_record() {
         let described = owner_description();

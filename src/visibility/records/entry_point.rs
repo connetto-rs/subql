@@ -147,7 +147,46 @@ fn unsupported_guard<B: crate::backend::Backend, DB: DatabaseLike>(
         Guard::Compare { column, predicate } => {
             comparison_read::<B, DB>(column, predicate, db, table)
         }
+        Guard::CompareColumns {
+            column,
+            operator,
+            other,
+        } => column_comparison_read::<B, DB>(column, *operator, other, db, table),
         _ => Some(RowRecordError::UnsupportedValueSource("unrecognised guard")),
+    }
+}
+
+fn column_comparison_read<B: crate::backend::Backend, DB: DatabaseLike>(
+    column: &ColumnRead,
+    operator: AttributeOperator,
+    other: &ColumnRead,
+    database: &DB,
+    table: TableId,
+) -> Option<RowRecordError> {
+    let kind = match column_read_kind::<B, DB>(column, database, table) {
+        Ok(kind) => kind,
+        Err(refusal) => return Some(refusal),
+    };
+    let other_kind = match column_read_kind::<B, DB>(other, database, table) {
+        Ok(kind) => kind,
+        Err(refusal) => return Some(refusal),
+    };
+    match (kind, other_kind) {
+        (ColumnKind::Bool, ColumnKind::Bool)
+        | (ColumnKind::Integer | ColumnKind::Decimal, ColumnKind::Integer | ColumnKind::Decimal) => {
+            None
+        }
+        (ColumnKind::Text, ColumnKind::Text)
+            if matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq) =>
+        {
+            None
+        }
+        (ColumnKind::Text, ColumnKind::Text) => Some(RowRecordError::UnreadableColumn(
+            alloc::format!("comparison between columns {column} and {other} needs a query"),
+        )),
+        _ => Some(RowRecordError::UnsupportedValueSource(
+            "unrecognised comparison",
+        )),
     }
 }
 
@@ -165,6 +204,9 @@ fn comparison_read<B: crate::backend::Backend, DB: DatabaseLike>(
         AttributeTest::Compare { operator, value } => {
             literal_comparison_read(column, kind, *operator, value)
         }
+        AttributeTest::CompareColumn { .. } => Some(RowRecordError::UnsupportedValueSource(
+            "unrecognised comparison",
+        )),
         AttributeTest::In(values)
             if matches!(
                 kind,
