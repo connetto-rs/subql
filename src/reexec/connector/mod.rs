@@ -14,10 +14,10 @@
 //! # Scope
 //!
 //! [`Connector::execute_scalar`] resolves the [`MinMaxQuery`](super::maintain)
-//! flavor of re-execution and is the only method backed by a shipped impl.
-//! [`Connector::execute_rows`] exists for single-table total re-execution but
-//! the diesel-backed impls still stub it (see `MILESTONES.md`). An async peer
-//! lives in [`AsyncConnector`](super::AsyncConnector).
+//! flavor of re-execution. [`Connector::read_page`] and
+//! [`Connector::open_cursor`] re-read a whole answer page by page, and every
+//! diesel-backed connector implements both. An async peer lives in
+//! [`AsyncConnector`](super::AsyncConnector).
 //!
 //! # Authorization
 //!

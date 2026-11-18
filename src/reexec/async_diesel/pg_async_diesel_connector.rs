@@ -277,7 +277,6 @@ impl<S: SessionSetup + Send + Sync> AsyncConnector for PgAsyncDieselConnector<S>
         match error {
             DieselAsyncError::Pool(_) => FailureClass::Transient,
             DieselAsyncError::Diesel(error) => Self::Backend::failure_class(error),
-            DieselAsyncError::RowsUnsupported => FailureClass::Permanent,
         }
     }
 
