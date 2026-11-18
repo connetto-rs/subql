@@ -48,6 +48,10 @@ impl Connector for RecordingConnector {
     type Checkpoint = NoCheckpoint;
     type Backend = Postgres;
 
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
+
     fn execute_scalar(
         &self,
         query: &ReadQuery<'_, Postgres>,

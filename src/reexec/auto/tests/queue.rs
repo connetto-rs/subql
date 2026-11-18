@@ -5,6 +5,107 @@
 use super::fixtures::*;
 use super::*;
 
+#[test]
+fn permanent_read_failure_stops_only_its_subscription() {
+    let (mut engine, table) = engine_with_values(alloc::vec![Value::Float(7.0)]);
+    let stopped = engine
+        .register(
+            SubscriptionRequest::new(1u64, "SELECT DISTINCT status FROM orders"),
+            (),
+        )
+        .expect("whole read registers")
+        .subscription_id;
+    let healthy = crate::reexec::test_fixtures::bootstrap_scalar_query(
+        &mut engine,
+        2u64,
+        "SELECT MIN(price) FROM orders",
+        5.0,
+    );
+    engine
+        .apply_leaving_reads_queued(&delete_event(table, 1, 5.0))
+        .expect("event applies");
+    let reads = engine
+        .resolve_collect()
+        .expect("permanent failure is delivered");
+    assert_eq!(reads.stopped.len(), 1);
+    assert_eq!(reads.stopped[0].subscription_id, stopped);
+    assert_eq!(reads.stopped[0].consumer_id, 1);
+    assert_eq!(reads.scalar_updates[0].subscription_id, healthy);
+    engine
+        .apply_leaving_reads_queued(&insert_event(table, 2, 10.0))
+        .expect("later event applies");
+    assert_eq!(engine.pending_read_count(), 0);
+}
+
+#[test]
+fn permanent_connector_failure_continues_the_drain() {
+    let (mut engine, table) = engine_with_values(alloc::vec![Value::Float(7.0)]);
+    let stopped = crate::reexec::test_fixtures::bootstrap_scalar_query(
+        &mut engine,
+        1u64,
+        "SELECT MIN(price) FROM orders",
+        5.0,
+    );
+    let healthy = crate::reexec::test_fixtures::bootstrap_scalar_query(
+        &mut engine,
+        2u64,
+        "SELECT MAX(price) FROM orders",
+        5.0,
+    );
+    *engine.connector().permanent_query.borrow_mut() =
+        Some(String::from(engine.contexts[&stopped].query.sql()));
+    engine
+        .apply_leaving_reads_queued(&delete_event(table, 1, 5.0))
+        .unwrap();
+    let reads = engine.resolve_collect().unwrap();
+    assert_eq!(reads.stopped.len(), 1);
+    assert_eq!(reads.stopped[0].subscription_id, stopped);
+    assert!(matches!(
+        reads.stopped[0].error,
+        crate::reexec::ReExecError::Connector {
+            error: MockError::Permanent,
+            ..
+        }
+    ));
+    assert_eq!(reads.scalar_updates.len(), 1);
+    assert_eq!(reads.scalar_updates[0].subscription_id, healthy);
+    engine
+        .apply_leaving_reads_queued(&delete_event(table, 2, 5.0))
+        .unwrap();
+    assert_eq!(engine.pending_read_count(), 0);
+}
+
+#[test]
+fn transient_connector_failure_retries_without_stopping_subscriptions() {
+    let (mut engine, table) = engine_with_values(alloc::vec![]);
+    crate::reexec::test_fixtures::bootstrap_scalar_query(
+        &mut engine,
+        1u64,
+        "SELECT MIN(price) FROM orders",
+        5.0,
+    );
+    crate::reexec::test_fixtures::bootstrap_scalar_query(
+        &mut engine,
+        2u64,
+        "SELECT MAX(price) FROM orders",
+        5.0,
+    );
+    engine
+        .apply_leaving_reads_queued(&delete_event(table, 1, 5.0))
+        .unwrap();
+    assert!(engine.resolve_collect().is_err());
+    assert_eq!(engine.pending_read_count(), 2);
+    engine
+        .connector()
+        .values
+        .borrow_mut()
+        .extend([Value::Float(7.0), Value::Float(7.0)]);
+    let reads = engine.resolve_collect().unwrap();
+    assert!(reads.stopped.is_empty());
+    assert_eq!(reads.scalar_updates.len(), 2);
+    assert_eq!(engine.pending_read_count(), 0);
+}
+
 /// `outstanding` is the queue's depth now: not a constant, not one per
 /// event, and not the number ever queued.
 #[test]

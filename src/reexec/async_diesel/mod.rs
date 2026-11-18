@@ -280,6 +280,13 @@ impl<S: SessionSetup + Send + Sync, C: crate::backend::MySqlTableNameCase> Async
     type Checkpoint = crate::MysqlBinlogPos;
     type Backend = crate::backend::MySql<C>;
 
+    /// Transient for every error, because `diesel-async` exposes no MySQL
+    /// error number to tell a lock wait timeout from a permanent `HY000`
+    /// error.
+    fn failure_class(&self, _error: &Self::Error) -> super::connector::FailureClass {
+        super::connector::FailureClass::Transient
+    }
+
     fn execute_scalar(
         &self,
         query: &ReadQuery<'_, Self::Backend>,

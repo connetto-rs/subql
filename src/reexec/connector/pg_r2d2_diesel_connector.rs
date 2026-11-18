@@ -164,6 +164,15 @@ impl<S: SessionSetup> Connector for PgR2D2DieselConnector<S> {
     type Checkpoint = crate::PgCommitPosition;
     type Backend = crate::backend::Postgres;
 
+    fn failure_class(&self, error: &Self::Error) -> super::FailureClass {
+        match error {
+            PgR2D2Error::Pool(_) => super::FailureClass::Transient,
+            PgR2D2Error::Diesel(error) => {
+                <Self::Backend as super::DieselBackend>::failure_class(error)
+            }
+        }
+    }
+
     fn execute_scalar(
         &self,
         query: &ReadQuery<'_, Self::Backend>,

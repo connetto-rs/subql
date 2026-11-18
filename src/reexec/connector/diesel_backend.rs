@@ -40,6 +40,9 @@ struct UnsupportedReadBinds;
 pub trait DieselBackend:
     crate::backend::Backend<Int = i64, Float = f64, String = String> + Sized
 {
+    /// Classify a read failure using this backend's error codes.
+    fn failure_class(error: &diesel::result::Error) -> super::FailureClass;
+
     /// Wrap an `i64` decoded via `Nullable<BigInt>` as [`Value::Int`].
     #[must_use]
     fn value_from_i64(x: i64) -> Value<Self> {
@@ -92,6 +95,38 @@ pub enum DieselReadBind<'a> {
 
 #[cfg(feature = "executor-diesel")]
 impl DieselBackend for crate::backend::Postgres {
+    /// Transient for an SQLSTATE on Npgsql's `PostgresException.IsTransient`
+    /// list, an error without SQLSTATE, and a transaction-manager error.
+    /// Permanent for any other SQLSTATE and for an error raised before the
+    /// server answers.
+    fn failure_class(error: &diesel::result::Error) -> super::FailureClass {
+        use super::FailureClass;
+        use diesel::result::Error;
+
+        match error {
+            Error::DatabaseError(_, information) => match information
+                .sqlstate()
+                .as_ref()
+                .map(diesel::result::SqlState::as_str)
+            {
+                None
+                | Some(
+                    "08000" | "08001" | "08003" | "08004" | "08006" | "08007" | "40001" | "40P01"
+                    | "53000" | "53100" | "53200" | "53300" | "53400" | "55000" | "55006" | "55P03"
+                    | "57P01" | "57P02" | "57P03" | "57P05" | "58000" | "58030",
+                ) => FailureClass::Transient,
+                Some(_) => FailureClass::Permanent,
+            },
+            Error::QueryBuilderError(_)
+            | Error::SerializationError(_)
+            | Error::DeserializationError(_)
+            | Error::InvalidCString(_)
+            | Error::IntegerConversion(_)
+            | Error::NotFound => FailureClass::Permanent,
+            _ => FailureClass::Transient,
+        }
+    }
+
     fn read_bind(value: &Value<Self>) -> Option<DieselReadBind<'_>> {
         Some(match value {
             Value::Bool(value) => DieselReadBind::Bool(value),
@@ -117,6 +152,12 @@ impl DieselBackend for crate::backend::Postgres {
 
 #[cfg(feature = "executor-diesel")]
 impl<C: crate::backend::MySqlTableNameCase> DieselBackend for crate::backend::MySql<C> {
+    /// Transient for every error, because `diesel` exposes no MySQL error
+    /// number to tell a lock wait timeout from a permanent `HY000` error.
+    fn failure_class(_error: &diesel::result::Error) -> super::FailureClass {
+        super::FailureClass::Transient
+    }
+
     fn read_bind(value: &Value<Self>) -> Option<DieselReadBind<'_>> {
         Some(match value {
             Value::Bool(value) => DieselReadBind::Bool(value),
@@ -146,6 +187,12 @@ impl<C: crate::backend::MySqlTableNameCase> DieselBackend for crate::backend::My
 
 #[cfg(feature = "executor-diesel")]
 impl DieselBackend for crate::backend::SQLite {
+    /// Transient for every error, because `diesel` exposes no SQLite result
+    /// code to tell a busy database from a missing table.
+    fn failure_class(_error: &diesel::result::Error) -> super::FailureClass {
+        super::FailureClass::Transient
+    }
+
     fn read_bind(value: &Value<Self>) -> Option<DieselReadBind<'_>> {
         Some(match value {
             Value::Bool(value) | Value::Int(value) => DieselReadBind::Int(value),
@@ -401,6 +448,136 @@ mod tests {
     use super::{boxed_read_query, ReadQuery, Value};
     use crate::backend::{Interval, MySql, Postgres, SQLite};
     use diesel::result::Error;
+
+    struct DatabaseFailure(diesel::result::SqlState);
+
+    impl diesel::result::DatabaseErrorInformation for DatabaseFailure {
+        fn message(&self) -> &'static str {
+            "database failure"
+        }
+
+        fn details(&self) -> Option<&str> {
+            None
+        }
+
+        fn hint(&self) -> Option<&str> {
+            None
+        }
+
+        fn table_name(&self) -> Option<&str> {
+            None
+        }
+
+        fn column_name(&self) -> Option<&str> {
+            None
+        }
+
+        fn constraint_name(&self) -> Option<&str> {
+            None
+        }
+
+        fn statement_position(&self) -> Option<i32> {
+            None
+        }
+
+        fn sqlstate(&self) -> Option<diesel::result::SqlState> {
+            Some(self.0)
+        }
+    }
+
+    #[test]
+    fn postgres_failure_class_uses_sqlstate_allowlist() {
+        use super::super::FailureClass;
+        use super::DieselBackend;
+        use diesel::result::{DatabaseErrorKind, SqlState};
+
+        for (codes, expected) in [
+            (
+                &[
+                    "08000", "08001", "08003", "08004", "08006", "08007", "40001", "40P01",
+                    "53000", "53100", "53200", "53300", "53400", "55000", "55006", "55P03",
+                    "57P01", "57P02", "57P03", "57P05", "58000", "58030",
+                ][..],
+                FailureClass::Transient,
+            ),
+            (
+                &[
+                    "42P01", "42703", "42501", "57014", "57P04", "23505", "08002", "58001",
+                ][..],
+                FailureClass::Permanent,
+            ),
+        ] {
+            for code in codes {
+                let sqlstate: SqlState = code.parse().expect("valid SQLSTATE");
+                let error = Error::DatabaseError(
+                    DatabaseErrorKind::Unknown,
+                    Box::new(DatabaseFailure(sqlstate)),
+                );
+                assert_eq!(Postgres::failure_class(&error), expected, "{code}");
+                assert_eq!(
+                    <MySql as DieselBackend>::failure_class(&error),
+                    FailureClass::Transient
+                );
+                assert_eq!(SQLite::failure_class(&error), FailureClass::Transient);
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_failure_class_handles_errors_without_sqlstate() {
+        use super::super::FailureClass;
+        use super::DieselBackend;
+        use diesel::result::DatabaseErrorKind;
+
+        for error in [
+            Error::BrokenTransactionManager,
+            Error::RollbackTransaction,
+            Error::AlreadyInTransaction,
+            Error::NotInTransaction,
+            Error::ClosingHandle("handle"),
+            Error::RollbackErrorOnCommit {
+                rollback_error: Box::new(Error::NotFound),
+                commit_error: Box::new(Error::NotFound),
+            },
+            Error::DatabaseError(
+                DatabaseErrorKind::ClosedConnection,
+                Box::new(String::from("closed")),
+            ),
+            Error::DatabaseError(
+                DatabaseErrorKind::UnableToSendCommand,
+                Box::new(String::from("unable")),
+            ),
+            Error::DatabaseError(DatabaseErrorKind::Unknown, Box::new(String::from("driver"))),
+        ] {
+            assert_eq!(
+                Postgres::failure_class(&error),
+                FailureClass::Transient,
+                "{error}"
+            );
+        }
+
+        for error in [
+            Error::NotFound,
+            Error::QueryBuilderError("query".into()),
+            Error::SerializationError("serialization".into()),
+            Error::DeserializationError("deserialization".into()),
+            Error::InvalidCString(
+                alloc::ffi::CString::new(b"embedded\0nul".to_vec()).expect_err("embedded nul"),
+            ),
+            Error::IntegerConversion(u8::try_from(256_u16).expect_err("outside byte range")),
+        ] {
+            assert_eq!(
+                Postgres::failure_class(&error),
+                FailureClass::Permanent,
+                "{error}"
+            );
+            assert_eq!(
+                <MySql as DieselBackend>::failure_class(&error),
+                FailureClass::Transient
+            );
+            assert_eq!(SQLite::failure_class(&error), FailureClass::Transient);
+        }
+    }
 
     /// The generic re-execution read carries no interval bind, so a query
     /// that binds an interval refuses at construction on every diesel

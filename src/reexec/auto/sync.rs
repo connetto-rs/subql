@@ -264,31 +264,34 @@ where
     /// Execute every queued read through the connector, delivering each
     /// installed answer into `sink` as it completes.
     ///
-    /// A read that fails a retryable way (a connector or cursor failure)
-    /// stays queued together with every read behind it, and the next
-    /// `resolve` retries them. A read that fails a non-retryable way, per
-    /// [`ReExecError::is_retryable`](crate::reexec::ReExecError::is_retryable), is
-    /// dropped: the same read returns the same mismatched answer, and
-    /// requeueing it would block every read behind it forever. Deliveries
-    /// already made stand: their answers were installed, so retrying them
-    /// would be a second read of a current value, not a repair.
+    /// A permanent connector or cursor failure ends its subscription and
+    /// delivers a `ReadDelivery::Stopped` while the drain continues.
+    /// A transient failure stays queued and stops the drain.
     ///
     /// # Errors
     ///
-    /// [`ReExecError::Connector`] and [`ReExecError::Cursor`] name the
-    /// subscription whose read failed. Install errors mean the database
-    /// answer does not match the subscription, and
-    /// [`ReExecError::KeyedRowShape`] that a keyed row does not carry every
-    /// key column the read named. Neither is retryable.
+    /// Returns transient connector or cursor failures with the read queued,
+    /// or installation and row-shape errors with the read dropped.
     pub fn resolve<S>(&mut self, mut sink: S) -> Result<(), ReExecError<X::Error>>
     where
-        S: FnMut(crate::reexec::ReadDelivery<I, E::Backend, E::Checkpoint>),
+        S: FnMut(crate::reexec::ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>),
     {
         self.release_deferred_reads();
         while let Some(trigger) = self.pending_reads.pop_front() {
             match self.resolve_one(&trigger, &mut sink) {
                 Ok(()) => self.stamp_reexec(trigger.subscription_id, &trigger.read),
                 Err(error) => {
+                    if error.is_permanent(|error| self.mode.0.failure_class(error)) {
+                        self.unregister_subscription(trigger.subscription_id);
+                        sink(crate::reexec::ReadDelivery::Stopped(
+                            crate::reexec::StoppedRead {
+                                subscription_id: trigger.subscription_id,
+                                consumer_id: trigger.consumer_id,
+                                error,
+                            },
+                        ));
+                        continue;
+                    }
                     if error.is_retryable() {
                         self.pending_reads.push_front(trigger);
                     }
@@ -311,8 +314,10 @@ where
     /// [`resolve`](Self::resolve) to keep them.
     pub fn resolve_collect(
         &mut self,
-    ) -> Result<crate::reexec::ResolvedReads<I, E::Backend, E::Checkpoint>, ReExecError<X::Error>>
-    {
+    ) -> Result<
+        crate::reexec::ResolvedReads<I, E::Backend, E::Checkpoint, X::Error>,
+        ReExecError<X::Error>,
+    > {
         let mut collected = crate::reexec::ResolvedReads::default();
         self.resolve(|delivery| collected.push(delivery))?;
         Ok(collected)
@@ -325,7 +330,7 @@ where
         sink: &mut S,
     ) -> Result<(), ReExecError<X::Error>>
     where
-        S: FnMut(crate::reexec::ReadDelivery<I, E::Backend, E::Checkpoint>),
+        S: FnMut(crate::reexec::ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>),
     {
         if let crate::reexec::ReExecutionRead::GroupedScalar { group, query, .. } = &trigger.read {
             let installed = self.resolve_grouped_scalar(
@@ -607,7 +612,7 @@ where
         sink: &mut S,
     ) -> Result<(), ReExecError<X::Error>>
     where
-        S: FnMut(crate::reexec::ReadDelivery<I, E::Backend, E::Checkpoint>),
+        S: FnMut(crate::reexec::ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>),
     {
         let Some(ctx) = self.contexts.get_mut(&subscription_id) else {
             return Err(ReExecError::Unadopted {

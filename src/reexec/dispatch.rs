@@ -161,7 +161,7 @@ where
     /// take them with it.
     pub fn resolve<S>(self, sink: S) -> Settled<I, E::Backend, E::Checkpoint, X::Error, ()>
     where
-        S: FnMut(ReadDelivery<I, E::Backend, E::Checkpoint>),
+        S: FnMut(ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>),
     {
         let Self {
             engine,
@@ -225,7 +225,7 @@ where
            + Send
            + 'engine
     where
-        S: FnMut(ReadDelivery<I, E::Backend, E::Checkpoint>) + Send + 'engine,
+        S: FnMut(ReadDelivery<I, E::Backend, E::Checkpoint, X::Error>) + Send + 'engine,
     {
         let Self {
             engine,
@@ -275,7 +275,7 @@ where
 /// later drain through [`AutoResolvingEngine::resolve`], never a second
 /// `apply` of the same event.
 #[must_use = "both halves carry deliveries, and dropping either one drops its subscriptions' updates"]
-pub struct Settled<I: IdTypes, B: Backend, C: Checkpoint, XE, R = ResolvedReads<I, B, C>> {
+pub struct Settled<I: IdTypes, B: Backend, C: Checkpoint, XE, R = ResolvedReads<I, B, C, XE>> {
     /// What the event answered in process, with no database round trip.
     pub dispatched: Dispatched<I, B, C>,
     /// What the queued reads answered, or the failure that stopped them.

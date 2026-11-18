@@ -51,6 +51,10 @@ impl Connector for Refusing {
     type Checkpoint = NoCheckpoint;
     type Backend = Postgres;
 
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
+
     fn execute_scalar(
         &self,
         _query: &ReadQuery<'_, Postgres>,
@@ -82,6 +86,10 @@ impl AsyncConnector for Refusing {
     type Error = RefusingError;
     type Checkpoint = NoCheckpoint;
     type Backend = Postgres;
+
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
 
     fn execute_scalar(
         &self,

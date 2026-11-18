@@ -174,6 +174,98 @@ fn r2d2_pool_drives_snapshot_and_reexec() {
     assert_eq!(notifs.scalar_updates[0].checkpoint, Some(event_pos));
 }
 
+#[test]
+#[ignore = "requires Docker"]
+fn dropped_table_stops_only_its_subscription_in_one_resolve() {
+    use diesel::connection::SimpleConnection;
+
+    const CATALOG: &str = "CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT NOT NULL); \
+        CREATE TABLE dropped (id INTEGER PRIMARY KEY, status TEXT NOT NULL);";
+
+    common::assert_docker_available();
+    let database = common::pg_database();
+    let mut connection = database.connect();
+    // The typed query DSL does not express table creation or removal.
+    connection.batch_execute(CATALOG).expect("create tables");
+    diesel::insert_into(grouped_schema::orders::table)
+        .values((
+            grouped_schema::orders::id.eq(1),
+            grouped_schema::orders::status.eq("paid"),
+        ))
+        .execute(&mut connection)
+        .expect("insert order");
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(CATALOG).expect("parse catalog");
+    let mut engine = build_engine(catalog, build_pool(&database.url()));
+    let stopped_subscription = engine
+        .register(
+            SubscriptionRequest::new(
+                1u64,
+                "SELECT DISTINCT id FROM dropped WHERE lower(status) = 'paid'",
+            ),
+            (),
+        )
+        .expect("register dropped table")
+        .subscription_id;
+    let healthy_subscription = engine
+        .register(
+            SubscriptionRequest::new(
+                2u64,
+                "SELECT DISTINCT id FROM orders WHERE lower(status) = 'paid'",
+            ),
+            (),
+        )
+        .expect("register healthy table")
+        .subscription_id;
+    for row in [
+        r#"{"action":"U","schema":"public","table":"dropped"}"#,
+        KEYLESS_UPDATE,
+    ] {
+        let events = common::read_wal2json_v2(&common::in_transaction(row));
+        engine
+            .apply_leaving_reads_queued(&events[0])
+            .expect("queue read");
+    }
+    assert_eq!(engine.pending_read_count(), 2);
+    connection
+        .batch_execute("DROP TABLE dropped")
+        .expect("drop table");
+
+    let reads = engine.resolve_collect().expect("resolve independent reads");
+    assert_eq!(reads.stopped.len(), 1);
+    assert_eq!(reads.stopped[0].subscription_id, stopped_subscription);
+    assert_eq!(reads.stopped[0].consumer_id, 1);
+    assert!(
+        matches!(
+            &reads.stopped[0].error,
+            subql::reexec::ReExecError::Cursor {
+                error: subql::reexec::CursorError::Connector(subql::reexec::PgR2D2Error::Diesel(
+                    diesel::result::Error::DatabaseError(_, information),
+                )),
+                ..
+            } if information.sqlstate().is_some_and(|code| code.as_str() == "42P01")
+        ),
+        "{:?}",
+        reads.stopped[0].error
+    );
+    assert_eq!(reads.rows_updates.len(), 1);
+    assert_eq!(reads.rows_updates[0].subscription_id, healthy_subscription);
+    assert_eq!(reads.rows_updates[0].rows, vec![vec![Value::Int(1)]]);
+    assert_eq!(engine.pending_read_count(), 0);
+    assert!(engine
+        .snapshot(stopped_subscription)
+        .expect("stopped subscription is absent")
+        .is_none());
+    assert!(engine
+        .snapshot(healthy_subscription)
+        .expect("healthy subscription still reads")
+        .is_some());
+    assert!(engine
+        .resolve_collect()
+        .expect("drained reads")
+        .stopped
+        .is_empty());
+}
+
 /// `PgR2D2DieselConnector: Send + Sync` so it can move across async
 /// tasks. Compile-time check.
 #[test]
@@ -797,6 +889,10 @@ impl Connector for PanicMidRead {
     type Error = <PgR2D2DieselConnector as Connector>::Error;
     type Checkpoint = <PgR2D2DieselConnector as Connector>::Checkpoint;
     type Backend = Postgres;
+
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
 
     fn execute_scalar(
         &self,

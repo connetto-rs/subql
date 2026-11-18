@@ -35,6 +35,10 @@ impl Connector for Recording {
     type Checkpoint = NoCheckpoint;
     type Backend = Postgres;
 
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
+
     fn execute_scalar(
         &self,
         _query: &subql::reexec::ReadQuery<'_, Postgres>,
@@ -230,6 +234,10 @@ impl Connector for AggregateRecording {
     type Checkpoint = NoCheckpoint;
     type Backend = Postgres;
 
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
+
     fn execute_scalar(
         &self,
         query: &subql::reexec::ReadQuery<'_, Postgres>,
@@ -306,6 +314,10 @@ impl AsyncConnector for AsyncAggregateRecording {
     type Error = Infallible;
     type Checkpoint = NoCheckpoint;
     type Backend = Postgres;
+
+    fn failure_class(&self, _error: &Self::Error) -> subql::reexec::FailureClass {
+        subql::reexec::FailureClass::Transient
+    }
 
     fn execute_scalar(
         &self,

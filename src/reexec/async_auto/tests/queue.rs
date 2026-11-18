@@ -442,8 +442,12 @@ fn dropped_resolve_keeps_the_read_queued() {
     *e.connector().pend_next_read.lock() = true;
     {
         let mut ctx = Context::from_waker(core::task::Waker::noop());
-        let mut sink =
-            |_delivery: crate::reexec::ReadDelivery<DefaultIds, Postgres, NoCheckpoint>| {};
+        let mut sink = |_delivery: crate::reexec::ReadDelivery<
+            DefaultIds,
+            Postgres,
+            NoCheckpoint,
+            MockError,
+        >| {};
         let fut = e.resolve(&mut sink);
         let mut pinned = pin!(fut);
         assert!(

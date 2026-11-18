@@ -258,6 +258,10 @@ where
     type Checkpoint = crate::NoCheckpoint;
     type Backend = B;
 
+    fn failure_class(&self, error: &Self::Error) -> super::FailureClass {
+        B::failure_class(error)
+    }
+
     fn execute_scalar(
         &self,
         query: &ReadQuery<'_, B>,
