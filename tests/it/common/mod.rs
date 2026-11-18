@@ -31,12 +31,22 @@ pub mod altered_cell;
 ))]
 pub mod dispatch;
 #[cfg(any(
+    feature = "executor-diesel-mysql",
+    feature = "executor-diesel-async-mysql",
+))]
+pub mod mysql_read_failures;
+#[cfg(any(
     feature = "apply-patchset-postgres",
     feature = "apply-patchset-mysql",
     feature = "apply-patchset-postgres-async",
     feature = "apply-patchset-mysql-async",
 ))]
 pub mod patchset;
+#[cfg(any(
+    feature = "executor-diesel-postgres",
+    feature = "executor-diesel-async-postgres",
+))]
+pub mod postgres_read_failures;
 #[cfg(any(
     feature = "executor-diesel-postgres",
     feature = "executor-diesel-postgres-r2d2",

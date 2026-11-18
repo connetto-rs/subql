@@ -175,95 +175,71 @@ fn r2d2_pool_drives_snapshot_and_reexec() {
 }
 
 #[test]
-#[ignore = "requires Docker"]
+#[ignore = "requires Docker; run with --ignored"]
 fn dropped_table_stops_only_its_subscription_in_one_resolve() {
-    use diesel::connection::SimpleConnection;
-
-    const CATALOG: &str = "CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT NOT NULL); \
-        CREATE TABLE dropped (id INTEGER PRIMARY KEY, status TEXT NOT NULL);";
-
     common::assert_docker_available();
     let database = common::pg_database();
-    let mut connection = database.connect();
-    // The typed query DSL does not express table creation or removal.
-    connection.batch_execute(CATALOG).expect("create tables");
-    diesel::insert_into(grouped_schema::orders::table)
-        .values((
-            grouped_schema::orders::id.eq(1),
-            grouped_schema::orders::status.eq("paid"),
-        ))
-        .execute(&mut connection)
-        .expect("insert order");
-    let catalog = ParserDB::parse::<PostgreSqlDialect>(CATALOG).expect("parse catalog");
-    let mut engine = build_engine(catalog, build_pool(&database.url()));
-    let stopped_subscription = engine
-        .register(
-            SubscriptionRequest::new(
-                1u64,
-                "SELECT DISTINCT id FROM dropped WHERE lower(status) = 'paid'",
-            ),
-            (),
-        )
-        .expect("register dropped table")
-        .subscription_id;
-    let healthy_subscription = engine
-        .register(
-            SubscriptionRequest::new(
-                2u64,
-                "SELECT DISTINCT id FROM orders WHERE lower(status) = 'paid'",
-            ),
-            (),
-        )
-        .expect("register healthy table")
-        .subscription_id;
-    for row in [
-        r#"{"action":"U","schema":"public","table":"dropped"}"#,
-        KEYLESS_UPDATE,
-    ] {
-        let events = common::read_wal2json_v2(&common::in_transaction(row));
-        engine
-            .apply_leaving_reads_queued(&events[0])
-            .expect("queue read");
-    }
-    assert_eq!(engine.pending_read_count(), 2);
-    connection
-        .batch_execute("DROP TABLE dropped")
-        .expect("drop table");
-
-    let reads = engine.resolve_collect().expect("resolve independent reads");
-    assert_eq!(reads.stopped.len(), 1);
-    assert_eq!(reads.stopped[0].subscription_id, stopped_subscription);
-    assert_eq!(reads.stopped[0].consumer_id, 1);
-    assert!(
-        matches!(
-            &reads.stopped[0].error,
-            subql::reexec::ReExecError::Cursor {
-                error: subql::reexec::CursorError::Connector(subql::reexec::PgR2D2Error::Diesel(
-                    diesel::result::Error::DatabaseError(_, information),
-                )),
-                ..
-            } if information.sqlstate().is_some_and(|code| code.as_str() == "42P01")
-        ),
-        "{:?}",
-        reads.stopped[0].error
+    common::postgres_read_failures::dropped_table(
+        PgR2D2DieselConnector::new(build_pool(&database.url())),
+        database.connect(),
+        |error| match error {
+            subql::reexec::PgR2D2Error::Diesel(error) => {
+                common::postgres_read_failures::assert_undefined_table(error);
+            }
+            other => panic!("unexpected connector error {other:?}"),
+        },
     );
-    assert_eq!(reads.rows_updates.len(), 1);
-    assert_eq!(reads.rows_updates[0].subscription_id, healthy_subscription);
-    assert_eq!(reads.rows_updates[0].rows, vec![vec![Value::Int(1)]]);
+}
+
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn exhausted_pool_keeps_reads_queued_until_connection_returns() {
+    common::assert_docker_available();
+    let database = common::pg_database();
+    let catalog = common::postgres_read_failures::prepare(&mut database.connect());
+    let pool = r2d2::Pool::builder()
+        .max_size(1)
+        .connection_timeout(Duration::from_millis(100))
+        .build(ConnectionManager::<PgConnection>::new(database.url()))
+        .expect("build pool");
+    let mut engine = build_engine(catalog, pool.clone());
+    let (first_subscription, healthy_subscription) =
+        common::postgres_read_failures::register_and_queue(&mut engine);
+    let held_connection = pool.get().expect("hold connection");
+    let mut reads = subql::reexec::ResolvedReads::default();
+    let error = engine
+        .resolve(&mut |delivery| reads.push(delivery))
+        .expect_err("pool exhausted");
+    assert!(error.is_retryable());
+    assert!(matches!(
+        error,
+        subql::reexec::ReExecError::Cursor {
+            error: subql::reexec::CursorError::Connector(subql::reexec::PgR2D2Error::Pool(_)),
+            ..
+        }
+    ));
+    assert_eq!(engine.pending_read_count(), 2);
+    assert!(reads.stopped.is_empty());
+    assert!(reads.rows_updates.is_empty());
+    drop(held_connection);
+    let reads = engine.resolve_collect().expect("retry after release");
+    assert!(reads.stopped.is_empty());
+    assert_eq!(reads.rows_updates.len(), 2);
+    let healthy = reads
+        .rows_updates
+        .iter()
+        .find(|update| update.subscription_id == healthy_subscription)
+        .expect("healthy rows");
+    assert_eq!(healthy.rows, vec![vec![Value::Int(1)]]);
     assert_eq!(engine.pending_read_count(), 0);
     assert!(engine
-        .snapshot(stopped_subscription)
-        .expect("stopped subscription is absent")
-        .is_none());
-    assert!(engine
-        .snapshot(healthy_subscription)
-        .expect("healthy subscription still reads")
+        .snapshot(first_subscription)
+        .expect("first subscription retained")
         .is_some());
     assert!(engine
-        .resolve_collect()
-        .expect("drained reads")
-        .stopped
-        .is_empty());
+        .snapshot(healthy_subscription)
+        .expect("healthy subscription retained")
+        .is_some());
 }
 
 /// `PgR2D2DieselConnector: Send + Sync` so it can move across async

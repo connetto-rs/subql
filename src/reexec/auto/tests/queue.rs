@@ -193,6 +193,15 @@ fn a_dispatch_reports_the_reads_it_queued() {
 /// and what its queued reads answered.
 #[test]
 fn the_drain_hands_back_the_notifications_with_the_resolved_reads() {
+    assert_dispatch_deliveries(false);
+}
+
+#[test]
+fn the_sink_drain_hands_back_notifications_and_delivers_reads() {
+    assert_dispatch_deliveries(true);
+}
+
+fn assert_dispatch_deliveries(use_sink: bool) {
     let (mut e, tid) = engine_with_values(alloc::vec![Value::Float(7.0)]);
     let min_id = crate::reexec::test_fixtures::bootstrap_scalar_query(
         &mut e,
@@ -206,19 +215,29 @@ fn the_drain_hands_back_the_notifications_with_the_resolved_reads() {
     )
     .expect("an in-process row subscription registers");
 
-    let settled = e
+    let dispatch = e
         .apply(&delete_event(tid, 1, 5.0))
-        .expect("the event applies")
-        .resolve_collect();
-    let reads = settled.reads.expect("the queued read runs");
+        .expect("the event applies");
+    let (dispatched, reads) = if use_sink {
+        let mut deliveries = crate::reexec::ResolvedReads::default();
+        let settled = dispatch.resolve(|delivery| deliveries.push(delivery));
+        settled.reads.expect("the queued read runs");
+        (settled.dispatched, deliveries)
+    } else {
+        let settled = dispatch.resolve_collect();
+        (
+            settled.dispatched,
+            settled.reads.expect("the queued read runs"),
+        )
+    };
 
     assert_eq!(
-        settled.dispatched.engine.deleted(),
+        dispatched.engine.deleted(),
         &[2],
         "the in-process subscription is answered without a read"
     );
     assert_eq!(
-        settled.dispatched.outstanding, 1,
+        dispatched.outstanding, 1,
         "the displaced extreme queued one read"
     );
     assert_eq!(

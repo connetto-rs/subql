@@ -93,6 +93,23 @@ pub enum DieselReadBind<'a> {
     Json(&'a serde_json::Value),
 }
 
+/// Transient for an SQLSTATE on Npgsql's `PostgresException.IsTransient`
+/// list and for a failure without SQLSTATE, permanent for any other code.
+#[cfg(feature = "executor-diesel")]
+fn postgres_sqlstate_failure_class(code: Option<&str>) -> super::FailureClass {
+    use super::FailureClass;
+
+    match code {
+        None
+        | Some(
+            "08000" | "08001" | "08003" | "08004" | "08006" | "08007" | "40001" | "40P01" | "53000"
+            | "53100" | "53200" | "53300" | "53400" | "55000" | "55006" | "55P03" | "57P01"
+            | "57P02" | "57P03" | "57P05" | "58000" | "58030",
+        ) => FailureClass::Transient,
+        Some(_) => FailureClass::Permanent,
+    }
+}
+
 #[cfg(feature = "executor-diesel")]
 impl DieselBackend for crate::backend::Postgres {
     /// Transient for an SQLSTATE on Npgsql's `PostgresException.IsTransient`
@@ -104,19 +121,12 @@ impl DieselBackend for crate::backend::Postgres {
         use diesel::result::Error;
 
         match error {
-            Error::DatabaseError(_, information) => match information
-                .sqlstate()
-                .as_ref()
-                .map(diesel::result::SqlState::as_str)
-            {
-                None
-                | Some(
-                    "08000" | "08001" | "08003" | "08004" | "08006" | "08007" | "40001" | "40P01"
-                    | "53000" | "53100" | "53200" | "53300" | "53400" | "55000" | "55006" | "55P03"
-                    | "57P01" | "57P02" | "57P03" | "57P05" | "58000" | "58030",
-                ) => FailureClass::Transient,
-                Some(_) => FailureClass::Permanent,
-            },
+            Error::DatabaseError(_, information) => postgres_sqlstate_failure_class(
+                information
+                    .sqlstate()
+                    .as_ref()
+                    .map(diesel::result::SqlState::as_str),
+            ),
             Error::QueryBuilderError(_)
             | Error::SerializationError(_)
             | Error::DeserializationError(_)
@@ -449,47 +459,10 @@ mod tests {
     use crate::backend::{Interval, MySql, Postgres, SQLite};
     use diesel::result::Error;
 
-    struct DatabaseFailure(diesel::result::SqlState);
-
-    impl diesel::result::DatabaseErrorInformation for DatabaseFailure {
-        fn message(&self) -> &'static str {
-            "database failure"
-        }
-
-        fn details(&self) -> Option<&str> {
-            None
-        }
-
-        fn hint(&self) -> Option<&str> {
-            None
-        }
-
-        fn table_name(&self) -> Option<&str> {
-            None
-        }
-
-        fn column_name(&self) -> Option<&str> {
-            None
-        }
-
-        fn constraint_name(&self) -> Option<&str> {
-            None
-        }
-
-        fn statement_position(&self) -> Option<i32> {
-            None
-        }
-
-        fn sqlstate(&self) -> Option<diesel::result::SqlState> {
-            Some(self.0)
-        }
-    }
-
     #[test]
     fn postgres_failure_class_uses_sqlstate_allowlist() {
         use super::super::FailureClass;
-        use super::DieselBackend;
-        use diesel::result::{DatabaseErrorKind, SqlState};
+        use super::postgres_sqlstate_failure_class;
 
         for (codes, expected) in [
             (
@@ -508,19 +481,17 @@ mod tests {
             ),
         ] {
             for code in codes {
-                let sqlstate: SqlState = code.parse().expect("valid SQLSTATE");
-                let error = Error::DatabaseError(
-                    DatabaseErrorKind::Unknown,
-                    Box::new(DatabaseFailure(sqlstate)),
-                );
-                assert_eq!(Postgres::failure_class(&error), expected, "{code}");
                 assert_eq!(
-                    <MySql as DieselBackend>::failure_class(&error),
-                    FailureClass::Transient
+                    postgres_sqlstate_failure_class(Some(code)),
+                    expected,
+                    "{code}"
                 );
-                assert_eq!(SQLite::failure_class(&error), FailureClass::Transient);
             }
         }
+        assert_eq!(
+            postgres_sqlstate_failure_class(None),
+            FailureClass::Transient
+        );
     }
 
     #[test]

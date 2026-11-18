@@ -127,6 +127,121 @@ fn build_engine(catalog: ParserDB, pool: Pool<AsyncPgConnection>) -> Engine {
     AutoResolvingEngine::new(inner, AsyncMode::new(PgAsyncDieselConnector::new(pool)))
 }
 
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn dropped_table_stops_only_its_subscription_in_one_resolve() {
+    use diesel::connection::SimpleConnection;
+
+    common::assert_docker_available();
+    let database = common::pg_database();
+    let mut connection = database.connect();
+    let catalog = common::postgres_read_failures::prepare(&mut connection);
+    common::multi_thread_rt().block_on(async {
+        let mut engine = build_engine(catalog, pg_async_pool(&database.url()).await);
+        let (stopped_subscription, healthy_subscription) =
+            common::postgres_read_failures::register_and_queue(&mut engine);
+        assert_eq!(engine.pending_read_count(), 2);
+        connection
+            .batch_execute("DROP TABLE dropped")
+            .expect("drop table");
+        let reads = engine
+            .resolve_collect()
+            .await
+            .expect("resolve independent reads");
+        common::postgres_read_failures::assert_stopped(
+            &reads,
+            stopped_subscription,
+            healthy_subscription,
+            |error| match error {
+                subql::reexec::DieselAsyncError::Diesel(error) => {
+                    common::postgres_read_failures::assert_undefined_table(error);
+                }
+                other => panic!("unexpected connector error {other:?}"),
+            },
+        );
+        assert_eq!(engine.pending_read_count(), 0);
+        assert!(engine
+            .snapshot(stopped_subscription)
+            .await
+            .expect("stopped subscription is absent")
+            .is_none());
+        assert!(engine
+            .snapshot(healthy_subscription)
+            .await
+            .expect("healthy subscription still reads")
+            .is_some());
+        common::postgres_read_failures::queue_reads(&mut engine);
+        assert_eq!(engine.pending_read_count(), 1);
+        assert!(engine
+            .resolve_collect()
+            .await
+            .expect("resolve healthy trigger")
+            .stopped
+            .is_empty());
+    });
+}
+
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn exhausted_pool_keeps_reads_queued_until_connection_returns() {
+    common::assert_docker_available();
+    let database = common::pg_database();
+    let catalog = common::postgres_read_failures::prepare(&mut database.connect());
+    common::multi_thread_rt().block_on(async {
+        let pool = Pool::builder()
+            .max_size(1)
+            .connection_timeout(std::time::Duration::from_millis(100))
+            .build(AsyncDieselConnectionManager::<AsyncPgConnection>::new(
+                database.url(),
+            ))
+            .await
+            .expect("build pool");
+        let mut engine = build_engine(catalog, pool.clone());
+        let (first_subscription, healthy_subscription) =
+            common::postgres_read_failures::register_and_queue(&mut engine);
+        let held_connection = pool.get().await.expect("hold connection");
+        let mut reads = subql::reexec::ResolvedReads::default();
+        let error = engine
+            .resolve(&mut |delivery| reads.push(delivery))
+            .await
+            .expect_err("pool exhausted");
+        assert!(error.is_retryable());
+        assert!(matches!(
+            error,
+            subql::reexec::ReExecError::Cursor {
+                error: subql::reexec::CursorError::Connector(
+                    subql::reexec::DieselAsyncError::Pool(_)
+                ),
+                ..
+            }
+        ));
+        assert_eq!(engine.pending_read_count(), 2);
+        assert!(reads.stopped.is_empty());
+        assert!(reads.rows_updates.is_empty());
+        drop(held_connection);
+        let reads = engine.resolve_collect().await.expect("retry after release");
+        assert!(reads.stopped.is_empty());
+        assert_eq!(reads.rows_updates.len(), 2);
+        let healthy = reads
+            .rows_updates
+            .iter()
+            .find(|update| update.subscription_id == healthy_subscription)
+            .expect("healthy rows");
+        assert_eq!(healthy.rows, vec![vec![Value::Int(1)]]);
+        assert_eq!(engine.pending_read_count(), 0);
+        assert!(engine
+            .snapshot(first_subscription)
+            .await
+            .expect("first subscription retained")
+            .is_some());
+        assert!(engine
+            .snapshot(healthy_subscription)
+            .await
+            .expect("healthy subscription retained")
+            .is_some());
+    });
+}
+
 /// Headline test: engine-supported and captured subscriptions coexist. An
 /// INSERT matches the engine predicate only. A DELETE of the current MIN
 /// spills a re-execution the async connector resolves against live PG,

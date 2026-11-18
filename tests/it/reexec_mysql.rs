@@ -43,6 +43,45 @@ fn build_engine(catalog: ParserDB, conn_exec: MysqlConnection) -> Engine {
 
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
+fn dropped_table_keeps_reads_queued_and_stops_the_sync_drain() {
+    common::assert_docker_available();
+    let database = common::mysql_database();
+    let mut connection = database.connect();
+    let (catalog, tables) = common::mysql_read_failures::setup(&mut connection);
+    let mut engine = build_engine(catalog, database.connect());
+    let subscriptions = common::mysql_read_failures::queue_reads(&mut engine, tables);
+    common::mysql_read_failures::drop_table(&mut connection);
+
+    let mut deliveries = subql::reexec::ResolvedReads::default();
+    let error = engine
+        .resolve(|delivery| deliveries.push(delivery))
+        .expect_err("missing table leaves the read retryable");
+    assert!(matches!(
+        error,
+        subql::reexec::ReExecError::Connector {
+            subscription,
+            error: diesel::result::Error::DatabaseError(_, _),
+        } if subscription == subscriptions[0]
+    ));
+    assert!(deliveries.scalar_updates.is_empty());
+    assert!(deliveries.stopped.is_empty());
+    assert_eq!(engine.pending_read_count(), 2);
+    assert_eq!(engine.reexec_query_count(), 2);
+
+    common::mysql_read_failures::restore_table(&mut connection);
+    let reads = engine.resolve_collect().expect("retry restored table");
+    assert!(reads.stopped.is_empty());
+    assert_eq!(reads.scalar_updates.len(), 2);
+    for (update, subscription) in reads.scalar_updates.iter().zip(subscriptions) {
+        assert_eq!(update.subscription_id, subscription);
+        assert_eq!(update.value, Value::Float(9.0));
+    }
+    assert_eq!(engine.pending_read_count(), 0);
+    assert_eq!(engine.reexec_query_count(), 2);
+}
+
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
 fn scaffold_registers_both_and_executes_scalar() {
     common::assert_docker_available();
     let db = common::mysql_database();
