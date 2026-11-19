@@ -10,11 +10,11 @@ use hashbrown::HashMap;
 use rls2fga_types::identity::encode_part;
 #[cfg(feature = "visibility-openfga")]
 use rls2fga_types::ColumnRelations;
-use rls2fga_types::{ResultingRow, RowNaming};
 use rls2fga_types::TranslationNote;
 use rls2fga_types::{ActionAnswer, ActionJudgement, ActionRelations, ActionStatement};
 use rls2fga_types::{Record, RecordDerivation, RecordDescription};
 use rls2fga_types::{RelationShapes, RequestPredicate, RowDecision};
+use rls2fga_types::{ResultingRow, RowNaming};
 #[cfg(feature = "visibility-openfga")]
 use sql_traits::traits::{ColumnLike, TableLike};
 
@@ -1396,7 +1396,11 @@ mod tests {
     fn a_bot_gate_on_an_owned_table_is_answered_locally() {
         let shapes = gated("notes", "owner = current_setting('app.user_id', true)");
         let notes = table(&shapes, "notes");
-        assert!(judges_a_resulting_row(&shapes, notes, ActionStatement::Insert));
+        assert!(judges_a_resulting_row(
+            &shapes,
+            notes,
+            ActionStatement::Insert
+        ));
         for statement in EVERY_STATEMENT {
             assert_eq!(
                 shapes.answers_locally(notes, statement),

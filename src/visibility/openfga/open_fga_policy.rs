@@ -17,8 +17,8 @@ use openfga_client::prost_wkt_types::{value::Kind, ListValue, Struct, Value as P
 use openfga_client::tonic::body::Body;
 use openfga_client::tonic::client::GrpcService;
 use openfga_client::tonic::codegen::{Bytes, StdError};
-use rls2fga_types::{RelationName, TypeName};
 use rls2fga_types::{ConditionName, Record, RecordContextValue, ReplayScope};
+use rls2fga_types::{RelationName, TypeName};
 use sql_traits::prelude::DatabaseLike;
 
 use crate::backend::Backend;

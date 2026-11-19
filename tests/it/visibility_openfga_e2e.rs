@@ -2451,7 +2451,10 @@ async fn a_bot_gate_is_answered_locally_as_the_service_answers() {
                 read: &[],
             };
             assert_eq!(
-                local.may_write(removal, watcher).await.expect("never fails"),
+                local
+                    .may_write(removal, watcher)
+                    .await
+                    .expect("never fails"),
                 service
                     .may_write(removal, watcher)
                     .await

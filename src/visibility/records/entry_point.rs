@@ -1,12 +1,12 @@
 use alloc::vec::Vec;
 use core::cell::Cell;
 
+#[cfg(feature = "visibility-openfga")]
+use rls2fga_types::ResultingRow;
 use rls2fga_types::{
     records_from_row, ColumnKind, ColumnRead, Guard, Record, RecordDerivation, RecordDescription,
     RecordError, TypeName, ValueSource,
 };
-#[cfg(feature = "visibility-openfga")]
-use rls2fga_types::ResultingRow;
 use rls2fga_types::{AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest};
 use sql_traits::prelude::DatabaseLike;
 

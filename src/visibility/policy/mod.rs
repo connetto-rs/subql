@@ -2010,10 +2010,7 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
     fn a_replacement_on_one_condition_is_answered_from_both_versions() {
         let (db, relations) = translated_with_keys(HELD_KEYS);
         let notes = notes_id(&db);
-        let policy = RowPolicy::new(
-            shared(db, &relations),
-            Named::<Principal>::to("user:alice"),
-        );
+        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::to("user:alice"));
 
         assert!(
             !policy.answers_locally(notes, ActionStatement::Update),
@@ -2051,8 +2048,8 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
 
         // bob does not hold the row as it is, which refuses him with no round
         // trip, whatever he writes into it.
-        let taken: TestEvent<_> = TestEvent::update(notes, notes_row("alice"), notes_row("bob"))
-            .with_pk_columns([0u16]);
+        let taken: TestEvent<_> =
+            TestEvent::update(notes, notes_row("alice"), notes_row("bob")).with_pk_columns([0u16]);
         let old = EventRow::previous(&taken, policy.catalog()).unwrap();
         let new = EventRow::current(&taken, policy.catalog()).unwrap();
         assert_eq!(
