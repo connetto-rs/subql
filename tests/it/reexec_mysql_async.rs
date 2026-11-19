@@ -163,6 +163,60 @@ fn locked_table_keeps_its_read_queued_and_delivers_healthy_async_reads() {
     });
 }
 
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn exhausted_pool_keeps_reads_queued_until_connection_returns() {
+    common::assert_docker_available();
+    let database = common::mysql_database();
+    let mut connection = database.connect();
+    let (catalog, tables) = common::mysql_read_failures::setup(&mut connection);
+    let url = database.url();
+    common::multi_thread_rt().block_on(async move {
+        let pool = Pool::builder()
+            .max_size(1)
+            .connection_timeout(std::time::Duration::from_millis(100))
+            .build(AsyncDieselConnectionManager::<AsyncMysqlConnection>::new(
+                url,
+            ))
+            .await
+            .expect("build async mysql pool");
+        let mut engine = build_engine(catalog, pool.clone());
+        let subscriptions = common::mysql_read_failures::queue_reads(&mut engine, tables);
+        common::mysql_read_failures::displace_minimums(&mut connection);
+        let held_connection = pool.get().await.expect("hold the connection");
+
+        let mut deliveries = subql::reexec::ResolvedReads::default();
+        let error = engine
+            .resolve(|delivery| deliveries.push(delivery))
+            .await
+            .expect_err("pool exhausted");
+        assert!(matches!(
+            error,
+            subql::reexec::ReExecError::Connector {
+                error: subql::reexec::DieselAsyncError::Pool(_),
+                ..
+            }
+        ));
+        assert!(deliveries.stopped.is_empty());
+        assert!(deliveries.scalar_updates.is_empty());
+        assert_eq!(engine.pending_read_count(), 2);
+
+        drop(held_connection);
+        let reads = engine.resolve_collect().await.expect("retry after release");
+        assert!(reads.stopped.is_empty());
+        assert_eq!(reads.scalar_updates.len(), 2);
+        for subscription in subscriptions {
+            let update = reads
+                .scalar_updates
+                .iter()
+                .find(|update| update.subscription_id == subscription)
+                .expect("each read delivered");
+            assert_eq!(update.value, Value::Float(9.0));
+        }
+        assert_eq!(engine.pending_read_count(), 0);
+    });
+}
+
 /// Snapshot reads value plus a binlog coordinate through the async
 /// connector, mirroring the sync snapshot test.
 #[test]
