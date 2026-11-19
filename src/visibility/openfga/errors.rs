@@ -3,6 +3,8 @@ use alloc::string::String;
 use openfga_client::tonic::Code;
 use rls2fga_types::ActionStatement;
 
+use crate::visibility::records::RowRecordError;
+
 /// Why no answer could be reached.
 ///
 /// Every variant means exactly that. None of them is a denial, and a caller
@@ -36,9 +38,16 @@ pub enum OpenFgaError {
     ///
     /// Reached when the index was built without
     /// [`Shapes::with_row_naming`](crate::visibility::shapes::Shapes::with_row_naming),
-    /// or for a table the model gives no type.
+    /// for a table the model gives no type, and for a write the model judges
+    /// on the row it produces when the index was built without
+    /// [`Shapes::with_resulting_rows`](crate::visibility::shapes::Shapes::with_resulting_rows)
+    /// or that row names no object of the type the judgement is asked on.
     #[error("the model names no object for rows of the changed table")]
     RowCannotBeNamed,
+    /// A fact the row a write produces states cannot be read off that row, so
+    /// its check would judge a row missing that fact.
+    #[error("the facts of the row the write produces cannot be read: {0}")]
+    ResultingRowUnreadable(RowRecordError),
     /// The model says nothing this can ask about the statement, so no question
     /// can be put.
     ///

@@ -10,15 +10,15 @@ use hashbrown::HashMap;
 use rls2fga_types::identity::encode_part;
 #[cfg(feature = "visibility-openfga")]
 use rls2fga_types::ColumnRelations;
-use rls2fga_types::RowNaming;
+use rls2fga_types::{ResultingRow, RowNaming};
 use rls2fga_types::TranslationNote;
-use rls2fga_types::{ActionAnswer, ActionRelations, ActionStatement};
+use rls2fga_types::{ActionAnswer, ActionJudgement, ActionRelations, ActionStatement};
 use rls2fga_types::{Record, RecordDerivation, RecordDescription};
 use rls2fga_types::{RelationShapes, RequestPredicate, RowDecision};
 #[cfg(feature = "visibility-openfga")]
 use sql_traits::traits::{ColumnLike, TableLike};
 
-use rls2fga_types::{ColumnName, RelationName, TableId as ContractTableId};
+use rls2fga_types::{ColumnName, RelationName, TableId as ContractTableId, TypeName};
 use sql_traits::prelude::DatabaseLike;
 
 use crate::visibility::records::{grants_everyone, is_evaluable};
@@ -80,7 +80,8 @@ use super::required_parameter::{RequiredParameter, TableShapes};
 /// let shapes = Arc::new(
 ///     Shapes::new::<Postgres>(db, translation.relations(), &enumerations)
 ///         .with_row_naming(&naming)
-///         .with_action_relations(&answers),
+///         .with_action_relations(&answers)
+///         .with_resulting_rows(translation.resulting_rows()),
 /// );
 ///
 /// assert!(shapes.answers_locally(docs, ActionStatement::Select));
@@ -93,13 +94,15 @@ use super::required_parameter::{RequiredParameter, TableShapes};
 pub struct Shapes<DB> {
     db: DB,
     /// Only the recipes that can be evaluated from a row image, keyed by the
-    /// table whose rows they judge and the relation they decide. Absent means
-    /// delegate.
+    /// table whose rows they judge, the type the relation is defined on and
+    /// the relation they decide. Absent means delegate.
     ///
     /// Keyed by relation rather than by a fixed set of actions, because which
     /// relations answer a statement is the model's to say and varies with the
-    /// clauses a policy wrote.
-    recipes: HashMap<(TableId, RelationName), RowDecision>,
+    /// clauses a policy wrote. Keyed by type as well, because the type judging
+    /// a written row repeats the stored type's relation names and holds no
+    /// record, so none of its relations is decided from a row.
+    recipes: Recipes,
     /// What the model says answers each statement, by the type it is asked on.
     answers: HashMap<String, HashMap<ActionStatement, ActionAnswer>>,
     /// Every shape indexed by the table whose changes move it, which is a wider
@@ -119,6 +122,8 @@ pub struct Shapes<DB> {
     load: Vec<Region>,
     /// How the model names a row of each table it names rows of.
     naming: HashMap<TableId, RowNaming>,
+    /// How a check names and states the row a write to each table produces.
+    resulting: HashMap<TableId, ResultingRow>,
     /// Parameters every question's context has to carry.
     parameters: Vec<RequiredParameter>,
     /// Role objects for request-local OpenFGA tuples, keyed by encoded role.
@@ -214,6 +219,7 @@ impl<DB: DatabaseLike> Shapes<DB> {
             load,
             answers: HashMap::new(),
             naming: HashMap::new(),
+            resulting: HashMap::new(),
             parameters: Vec::new(),
             #[cfg(feature = "visibility-openfga")]
             acting,
@@ -232,6 +238,24 @@ impl<DB: DatabaseLike> Shapes<DB> {
             .filter_map(|entry| {
                 catalog_helpers::contract_table_id(&self.db, &entry.table)
                     .map(|id| (id, entry.clone()))
+            })
+            .collect();
+        self
+    }
+
+    /// Take how a check names the row a write produces and which facts it
+    /// carries, from
+    /// [`Translation::resulting_rows`](rls2fga::translator::Translation::resulting_rows).
+    ///
+    /// A reader asking about such a row refuses without this, because the
+    /// stored row's object already holds the stored row's facts, and a check
+    /// there reads both versions at once.
+    #[must_use]
+    pub fn with_resulting_rows(mut self, rows: &[ResultingRow]) -> Self {
+        self.resulting = rows
+            .iter()
+            .filter_map(|row| {
+                catalog_helpers::contract_table_id(&self.db, &row.table).map(|id| (id, row.clone()))
             })
             .collect();
         self
@@ -331,7 +355,7 @@ impl<DB: DatabaseLike> Shapes<DB> {
                 judges.is_empty().not()
                     && judges
                         .iter()
-                        .all(|judge| self.recipe(table, &judge.relation).is_some())
+                        .all(|judge| self.recipe(table, judge).is_some())
             }
             // A relation fusing both versions answers from neither image, and a
             // column answer is asked for the caller's acting role, which no row holds.
@@ -369,17 +393,27 @@ impl<DB: DatabaseLike> Shapes<DB> {
             .collect()
     }
 
-    /// The recipe deciding `relation` on a row of `table`, or [`None`] to
+    /// The recipe deciding `judgement` on a row of `table`, or [`None`] to
     /// delegate.
     #[must_use]
-    pub fn recipe(&self, table: TableId, relation: &RelationName) -> Option<&RowDecision> {
-        self.recipes.get(&(table, relation.clone()))
+    pub fn recipe(&self, table: TableId, judgement: &ActionJudgement) -> Option<&RowDecision> {
+        self.recipes
+            .get(&table)?
+            .get(&judgement.type_name)?
+            .get(&judgement.relation)
     }
 
     /// How the model names a row of `table`, or [`None`] when it names none.
     #[must_use]
     pub fn naming(&self, table: TableId) -> Option<&RowNaming> {
         self.naming.get(&table)
+    }
+
+    /// How a check names and states the row a write to `table` produces, or
+    /// [`None`] when the model judges no such row.
+    #[must_use]
+    pub fn resulting_row(&self, table: TableId) -> Option<&ResultingRow> {
+        self.resulting.get(&table)
     }
 
     /// The parameters every question's context has to carry.
@@ -406,7 +440,11 @@ impl<DB: DatabaseLike> Shapes<DB> {
     /// silently incomplete.
     #[must_use]
     pub fn has_request_gated_recipe(&self) -> bool {
-        self.recipes.values().any(is_request_gated)
+        self.recipes
+            .values()
+            .flat_map(HashMap::values)
+            .flat_map(HashMap::values)
+            .any(is_request_gated)
     }
 
     /// Shapes whose records this cannot keep current, settled once at
@@ -449,17 +487,6 @@ impl<DB: DatabaseLike> Shapes<DB> {
     #[must_use]
     pub fn load_regions(&self) -> &[Region] {
         &self.load
-    }
-
-    /// Shapes whose records a row of `table` settles on its own.
-    ///
-    /// A question about a row the store has never seen carries the facts that
-    /// row implies, and these are the shapes that state them.
-    #[must_use]
-    pub fn table_records(&self, table: TableId) -> Option<&[RecordDescription]> {
-        self.by_table
-            .get(&table)
-            .map(|shapes| shapes.settled.as_slice())
     }
 
     /// Shapes reaching rows of `table`, for the store difference.
@@ -505,8 +532,13 @@ fn predicate_needs_a_parameter(predicate: &RequestPredicate) -> bool {
     }
 }
 
-/// Key `entry`'s recipe by the table whose rows it judges and the relation it
-/// decides, when every leaf can be read from that table's row image.
+/// Recipes by the table whose rows they judge, the type their relation is
+/// defined on and that relation.
+type Recipes = HashMap<TableId, HashMap<TypeName, HashMap<RelationName, RowDecision>>>;
+
+/// Key `entry`'s recipe by the table whose rows it judges, the type it is
+/// defined on and the relation it decides, when every leaf can be read from
+/// that table's row image.
 ///
 /// Every relation is indexed, not a chosen few: which of them answers a
 /// statement is what the model reports, and a reader that filtered here would
@@ -514,7 +546,7 @@ fn predicate_needs_a_parameter(predicate: &RequestPredicate) -> bool {
 fn index_recipe<B: crate::backend::Backend, DB: DatabaseLike>(
     db: &DB,
     entry: &RelationShapes,
-    recipes: &mut HashMap<(TableId, RelationName), RowDecision>,
+    recipes: &mut Recipes,
 ) {
     let Some(decision) = entry.decision.as_ref() else {
         return;
@@ -524,7 +556,12 @@ fn index_recipe<B: crate::backend::Backend, DB: DatabaseLike>(
     else {
         return;
     };
-    recipes.insert((table, entry.relation.clone()), decision.clone());
+    recipes
+        .entry(table)
+        .or_default()
+        .entry(entry.type_name.clone())
+        .or_default()
+        .insert(entry.relation.clone(), decision.clone());
 }
 
 /// One description, with the region it states facts in.
@@ -912,12 +949,6 @@ fn index_shape<B: crate::backend::Backend, DB: DatabaseLike>(
                     name_gap(entry, shape, table, UncoveredReason::MissingEnumeration)
                 }),
             );
-            // Refused for maintenance, which is a different question from what
-            // a row implies. The row policy and the resulting-row check of a
-            // write both read that, and neither deletes anything, so keeping it
-            // cannot reach the store. Dropping it would deny a write the row's
-            // own facts would have admitted.
-            index_implied(db, shape, by_table);
             return;
         }
         Placement::Grouped(group) => {
@@ -939,9 +970,11 @@ fn index_shape<B: crate::backend::Backend, DB: DatabaseLike>(
                 return;
             }
             if let Some(id) = catalog_helpers::contract_table_id(db, table) {
-                let held = by_table.entry(id).or_default();
-                held.differenced.push(held.settled.len());
-                held.settled.push((*shape).clone());
+                by_table
+                    .entry(id)
+                    .or_default()
+                    .differenced
+                    .push((*shape).clone());
             }
         }
         RecordDerivation::Joined { queries, .. } => {
@@ -1013,24 +1046,6 @@ fn index_grouped<DB: DatabaseLike>(
         let held = by_table.entry(id).or_default();
         if !held.groups.contains(&group) {
             held.groups.push(group);
-        }
-    }
-    index_implied(db, shape, by_table);
-}
-
-/// Record what a row of the table implies, without maintaining anything.
-///
-/// A different question from who keeps the store current: the row policy and a
-/// write's resulting-row check both read this, and neither removes a fact, so
-/// it is recorded whatever the maintenance decision was.
-fn index_implied<DB: DatabaseLike>(
-    db: &DB,
-    shape: &RecordDescription,
-    by_table: &mut HashMap<TableId, TableShapes>,
-) {
-    if let RecordDerivation::FromRow { table, .. } = &shape.derivation {
-        if let Some(id) = catalog_helpers::contract_table_id(db, table) {
-            by_table.entry(id).or_default().settled.push(shape.clone());
         }
     }
 }
@@ -1130,7 +1145,7 @@ mod tests {
     use rls2fga_types::ConfidenceLevel;
     use rls2fga_types::TranslationNote;
     use rls2fga_types::TypeName;
-    use rls2fga_types::{ActionAnswer, ActionStatement};
+    use rls2fga_types::{ActionAnswer, ActionJudgement, ActionStatement};
     use rls2fga_types::{
         RecordDerivation, RecordDescription, RelationName, RelationShapes, RequestNormalization,
         RequestPredicate, RowDecision,
@@ -1358,15 +1373,34 @@ mod tests {
         )
     }
 
+    /// Whether `statement` on `table` judges the row a write produces, which
+    /// the model types on its own and only the service holds.
+    fn judges_a_resulting_row(
+        shapes: &Shapes<ParserDB>,
+        table: TableId,
+        statement: ActionStatement,
+    ) -> bool {
+        matches!(
+            shapes.answer(table, statement),
+            Some(ActionAnswer::Judged(judgements))
+                if judgements
+                    .iter()
+                    .any(|judgement| judgement.version == rls2fga_types::RowVersion::Resulting)
+        )
+    }
+
     /// The gate reads only the request, which every question carries, so it
-    /// leaves a row its own columns decide answered without a round trip.
+    /// leaves a row its own columns decide answered without a round trip,
+    /// short of the row a write produces.
     #[test]
     fn a_bot_gate_on_an_owned_table_is_answered_locally() {
         let shapes = gated("notes", "owner = current_setting('app.user_id', true)");
         let notes = table(&shapes, "notes");
+        assert!(judges_a_resulting_row(&shapes, notes, ActionStatement::Insert));
         for statement in EVERY_STATEMENT {
-            assert!(
+            assert_eq!(
                 shapes.answers_locally(notes, statement),
+                !judges_a_resulting_row(&shapes, notes, statement),
                 "the owner is in the row and the bot list is in the request, \
                  so {statement:?} needs nobody else: {:?}",
                 shapes.answer(notes, statement)
@@ -1375,14 +1409,15 @@ mod tests {
     }
 
     /// A table every caller may use, capped by the gate alone, which the
-    /// request settles for every row.
+    /// request settles for every stored row.
     #[test]
     fn a_bot_gate_on_an_open_table_is_answered_locally() {
         let shapes = gated("orders", "true");
         let orders = table(&shapes, "orders");
         for statement in EVERY_STATEMENT {
-            assert!(
+            assert_eq!(
                 shapes.answers_locally(orders, statement),
+                !judges_a_resulting_row(&shapes, orders, statement),
                 "the policy admits every caller and the bot list is in the \
                  request, so {statement:?} needs nobody else: {:?}",
                 shapes.answer(orders, statement)
@@ -1432,10 +1467,13 @@ mod tests {
              CREATE POLICY d ON docs FOR SELECT USING (status = 'active');",
         );
         let docs = table(&role_only, "docs");
+        let can_select = ActionJudgement::new(
+            test_names::relation("can_select"),
+            rls2fga_types::RowVersion::Existing,
+            test_names::docs_type(),
+        );
         assert!(
-            role_only
-                .recipe(docs, &test_names::relation("can_select"))
-                .is_some(),
+            role_only.recipe(docs, &can_select).is_some(),
             "missing role-only recipe {role_only:?}"
         );
         assert!(

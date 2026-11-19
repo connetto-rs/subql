@@ -563,7 +563,7 @@ where
             let Some(row) = image(judge.version) else {
                 return Local::Unresolved;
             };
-            let Some(decision) = self.shapes().recipe(row.table_id(), &judge.relation) else {
+            let Some(decision) = self.shapes().recipe(row.table_id(), judge) else {
                 return Local::Unresolved;
             };
             match evaluate::<R, _, _>(decision, row, self.shapes().catalog(), watcher, values) {

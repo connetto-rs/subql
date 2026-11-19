@@ -186,11 +186,6 @@ pub fn name_gap(
 }
 
 /// Every record the shapes this differences state about `row`, deduplicated.
-///
-/// Reads [`TableShapes::differenced`] rather than every settled shape: a shape
-/// a group maintains is still settled, because a row of the table still
-/// implies its records, but differencing it beside the group would be a second
-/// authoritative operation over one region.
 fn records_of<R, DB>(
     shapes: &TableShapes,
     row: &R,
@@ -201,12 +196,8 @@ where
     DB: DatabaseLike,
 {
     let mut out = BTreeSet::new();
-    for position in &shapes.differenced {
-        out.extend(records_from_row_view::<R, DB>(
-            &shapes.settled[*position],
-            row,
-            db,
-        )?);
+    for shape in &shapes.differenced {
+        out.extend(records_from_row_view::<R, DB>(shape, row, db)?);
     }
     Ok(out)
 }
@@ -1860,15 +1851,6 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
                 .any(|gap| gap.reason == UncoveredReason::MissingEnumeration),
             "the settled producer's refusal is reported: {:?}",
             store.uncovered()
-        );
-        let docs_table = table(&store, "docs");
-        assert!(
-            store
-                .table_records(docs_table)
-                .is_some_and(|shapes| !shapes.is_empty()),
-            "but what a row of the table implies is a different question, and a \
-             write's resulting-row check reads it, so refusing the maintenance \
-             must not empty it"
         );
     }
 

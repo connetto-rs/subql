@@ -31,6 +31,8 @@ pub(crate) mod entry_point;
 pub(crate) use adapter::render_text;
 pub use adapter::row_values;
 pub(crate) use entry_point::grants_everyone;
+#[cfg(feature = "visibility-openfga")]
+pub(crate) use entry_point::resulting_records;
 pub use entry_point::{is_evaluable, records_from_row_view};
 
 // Errors

@@ -17,7 +17,7 @@ use openfga_client::prost_wkt_types::{value::Kind, ListValue, Struct, Value as P
 use openfga_client::tonic::body::Body;
 use openfga_client::tonic::client::GrpcService;
 use openfga_client::tonic::codegen::{Bytes, StdError};
-use rls2fga_types::RelationName;
+use rls2fga_types::{RelationName, TypeName};
 use rls2fga_types::{ConditionName, Record, RecordContextValue, ReplayScope};
 use sql_traits::prelude::DatabaseLike;
 
@@ -545,21 +545,17 @@ where
         }
     }
 
-    /// Every question one relation on one row raises for `watchers`, each the
+    /// Every question one relation on `object` raises for `watchers`, each the
     /// watcher's only requirement.
-    fn questions<R>(
+    fn questions(
         &self,
-        row: &R,
+        object: &str,
         relation: &str,
         watchers: &[W],
         contextual: &[TupleKey],
-    ) -> Result<Vec<Question>, OpenFgaError>
-    where
-        R: RowView + ?Sized,
-    {
-        let object = self.object_of(row)?;
+    ) -> Vec<Question> {
         let target = Target {
-            object: &object,
+            object,
             relation,
             contextual,
         };
@@ -575,7 +571,7 @@ where
                 context.as_ref(),
             );
         }
-        Ok(questions)
+        questions
     }
 
     /// The questions asking `target` for `watcher`, answering the requirement
@@ -751,10 +747,11 @@ where
     /// asking.
     ///
     /// A replacement is two rules across two versions. The one choosing which
-    /// rows may be touched reads the stored row, and the one admitting the
-    /// result reads a row the store has never seen, so that group carries the
-    /// facts the new row implies. Where some acting role holds a command on some
-    /// columns only, the columns the write touches are one more group.
+    /// rows may be touched reads the stored row. The one admitting the result
+    /// reads a row the store has never seen, on the type the model judges such
+    /// rows on, so that group carries the facts the new row states. Where some
+    /// acting role holds a command on some columns only, the columns the write
+    /// touches are one more group.
     fn write_plan<R>(
         &self,
         write: RowWrite<'_, R>,
@@ -792,13 +789,14 @@ where
         let mut plan = Vec::with_capacity(judges.len());
         for judge in judges {
             let row = image_of(&write, judge.version).ok_or_else(unanswered)?;
-            // A row the store has never seen carries the facts it implies, so the
-            // rule admitting it has something to read. The stored row needs none.
-            let contextual = match judge.version {
-                RowVersion::Resulting => self.contextual_of(row),
-                _ => Vec::new(),
-            };
-            plan.push(self.questions(row, judge.relation.as_str(), only, &contextual)?);
+            let relation = judge.relation.as_str();
+            plan.push(match judge.version {
+                RowVersion::Resulting => {
+                    let (object, contextual) = self.resulting_check(row, &judge.type_name)?;
+                    self.questions(&object, relation, only, &contextual)
+                }
+                _ => self.questions(&self.object_of(row)?, relation, only, &[]),
+            });
         }
         if let Some(columns) = columns {
             let relations = self
@@ -887,38 +885,43 @@ where
         }
     }
 
-    /// The facts the row being written implies, as tuples the question carries.
+    /// The object a check about `row`, the row a write produces, asks on
+    /// `type_name`, and the facts that row states as tuples the check carries.
     ///
-    /// A row that does not exist yet has nothing stored about it, so the rule
-    /// admitting it can only be evaluated against facts supplied with the
-    /// question.
-    fn contextual_of<R>(&self, row: &R) -> Vec<TupleKey>
+    /// The stored row's object holds the stored row's facts, so asking there
+    /// would read both versions at once. Nothing stores the type a written row
+    /// is judged on, which reaches the stored row only through the link the
+    /// check carries.
+    fn resulting_check<R>(
+        &self,
+        row: &R,
+        type_name: &TypeName,
+    ) -> Result<(String, Vec<TupleKey>), OpenFgaError>
     where
         R: RowView + ?Sized,
     {
-        let Some(shapes) = self.shapes.table_records(row.table_id()) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for shape in shapes {
-            let Ok(records) = crate::visibility::records::records_from_row_view::<R, _>(
-                shape,
-                row,
-                self.shapes.catalog(),
-            ) else {
-                continue;
-            };
-            for record in records {
-                let condition = record.context.as_ref().map(condition_of);
-                out.push(TupleKey {
-                    user: record.subject,
-                    relation: record.relation.to_string(),
-                    object: record.object,
-                    condition,
-                });
-            }
-        }
-        out
+        let resulting = self
+            .shapes
+            .resulting_row(row.table_id())
+            .filter(|resulting| resulting.type_name == *type_name)
+            .ok_or(OpenFgaError::RowCannotBeNamed)?;
+        let catalog = self.shapes.catalog();
+        let object = resulting
+            .object(&crate::visibility::records::row_values(row, catalog))
+            .ok()
+            .flatten()
+            .ok_or(OpenFgaError::RowCannotBeNamed)?;
+        let contextual = crate::visibility::records::resulting_records(resulting, row, catalog)
+            .map_err(OpenFgaError::ResultingRowUnreadable)?
+            .into_iter()
+            .map(|record| TupleKey {
+                condition: record.context.as_ref().map(condition_of),
+                user: record.subject,
+                relation: record.relation.to_string(),
+                object: record.object,
+            })
+            .collect();
+        Ok((object, contextual))
     }
 }
 
@@ -2362,9 +2365,8 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
             },
         ];
 
-        let questions = policy
-            .questions(&row, "can_select", &watchers, &contextual)
-            .unwrap();
+        let object = policy.object_of(&row).unwrap();
+        let questions = policy.questions(&object, "can_select", &watchers, &contextual);
         assert_eq!(questions.len(), 3, "one question per subject name");
 
         let [granted, refused, unstated] = questions.as_slice() else {
@@ -2466,9 +2468,8 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
             },
         ];
 
-        let questions = policy
-            .questions(&row, "can_select", &watchers, &[])
-            .unwrap();
+        let object = policy.object_of(&row).unwrap();
+        let questions = policy.questions(&object, "can_select", &watchers, &[]);
         let [plain, other_type, userset, wildcard, untyped, empty] = questions.as_slice() else {
             panic!("one question per subject name");
         };
@@ -2534,9 +2535,8 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
             },
         ];
 
-        let questions = policy
-            .questions(&row, "can_select", &watchers, &[])
-            .unwrap();
+        let object = policy.object_of(&row).unwrap();
+        let questions = policy.questions(&object, "can_select", &watchers, &[]);
         let [plain, userset, wildcard, other_type] = questions.as_slice() else {
             panic!("one question per subject name");
         };
@@ -2580,9 +2580,8 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
             role: Some("app_user"),
         };
 
-        let questions = policy
-            .questions(&row, "can_select", &[watcher], &[])
-            .unwrap();
+        let object = policy.object_of(&row).unwrap();
+        let questions = policy.questions(&object, "can_select", &[watcher], &[]);
         let [question] = questions.as_slice() else {
             panic!("one subject name raises one question");
         };
@@ -2663,9 +2662,8 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
             },
         ];
 
-        let questions = policy
-            .questions(&row, "can_select", &watchers, &[])
-            .unwrap();
+        let object = policy.object_of(&row).unwrap();
+        let questions = policy.questions(&object, "can_select", &watchers, &[]);
         let role_tuples = |question: &Question| {
             question
                 .item
@@ -2720,9 +2718,8 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
             role: Some("reader:west"),
         };
 
-        let questions = policy
-            .questions(&row, "can_select", &[watcher], &[])
-            .unwrap();
+        let object = policy.object_of(&row).unwrap();
+        let questions = policy.questions(&object, "can_select", &[watcher], &[]);
         let [question] = questions.as_slice() else {
             panic!("one subject name raises one question");
         };
@@ -2788,9 +2785,8 @@ CREATE POLICY p ON docs FOR SELECT TO app_user
             },
         ];
 
-        let questions = policy
-            .questions(&row, "can_select", &watchers, &[])
-            .unwrap();
+        let object = policy.object_of(&row).unwrap();
+        let questions = policy.questions(&object, "can_select", &watchers, &[]);
         assert_eq!(questions.len(), 4, "two subject names per watcher");
         let role_tuples = |question: &Question| {
             question.item.contextual_tuples.as_ref().map(|held| {
@@ -3057,6 +3053,15 @@ CREATE POLICY notes_p ON notes USING (
     /// One translation over `sql`, with the shapes the questions read and the
     /// model they ask against from the same output.
     fn translation_over(sql: &str) -> (Arc<Shapes<ParserDB>>, AuthorizationModel) {
+        translation_reading_resulting_rows(sql, true)
+    }
+
+    /// One translation over `sql`, with the resulting-row report read into the
+    /// shapes only when `resulting_rows` says so.
+    fn translation_reading_resulting_rows(
+        sql: &str,
+        resulting_rows: bool,
+    ) -> (Arc<Shapes<ParserDB>>, AuthorizationModel) {
         let db = deployment::db(sql);
         let outputs = TranslatorBuilder::new(deployment::callers())
             .with_min_confidence(ConfidenceLevel::B)
@@ -3069,14 +3074,16 @@ CREATE POLICY notes_p ON notes USING (
         let naming = Cow::from(translation.row_naming()).into_owned();
         let answers = translation.action_relations().to_vec();
         let enumerations = enumerations_of(&outputs);
-        (
-            Arc::new(
-                Shapes::new::<crate::backend::Postgres>(db, translation.relations(), &enumerations)
-                    .with_row_naming(&naming)
-                    .with_action_relations(&answers),
-            ),
-            model,
-        )
+        let shapes =
+            Shapes::new::<crate::backend::Postgres>(db, translation.relations(), &enumerations)
+                .with_row_naming(&naming)
+                .with_action_relations(&answers);
+        let shapes = if resulting_rows {
+            shapes.with_resulting_rows(translation.resulting_rows())
+        } else {
+            shapes
+        };
+        (Arc::new(shapes), model)
     }
 
     /// One translation over `sql` whose naming report the shapes do not read.
@@ -3202,7 +3209,8 @@ GRANT DELETE ON docs TO writer;";
         let shapes = Arc::new(
             Shapes::new::<Postgres>(db, translation.relations(), &enumerations)
                 .with_row_naming(translation.row_naming())
-                .with_action_relations(translation.action_relations()),
+                .with_action_relations(translation.action_relations())
+                .with_resulting_rows(translation.resulting_rows()),
         );
         let docs = catalog_helpers::table_id::<Postgres, _>(shapes.catalog(), "docs").unwrap();
         let policy = OpenFgaPolicy::new(
@@ -4007,6 +4015,85 @@ CREATE POLICY p ON docs FOR SELECT USING (
 
         assert!(matches!(got, Err(OpenFgaError::RowCannotBeNamed)));
         assert_eq!(verdicts, [Verdict::Deny]);
+        assert!(transport.calls().is_empty());
+    }
+
+    /// A replacement of a row `UPDATE_TWO_SIDED` judges, with `editor` as the
+    /// new editor cell.
+    fn two_sided_update(docs: TableId, editor: Value<Postgres>) -> TestEvent<Postgres> {
+        TestEvent::<Postgres>::update(
+            docs,
+            vec![
+                Value::Int(4),
+                Value::String("alice".into()),
+                Value::String("alice".into()),
+            ],
+            vec![Value::Int(4), Value::String("alice".into()), editor],
+        )
+        .with_pk_columns([0u16])
+    }
+
+    /// A write the model judges on its resulting row, against shapes that never
+    /// read the resulting-row report, is refused before any service call
+    /// rather than asked on the stored row's object.
+    #[test]
+    fn a_resulting_judgement_without_the_resulting_row_report_returns_before_the_transport() {
+        let (shapes, model) = translation_reading_resulting_rows(UPDATE_TWO_SIDED, false);
+        let transport = Scripted::new([]);
+        let policy = OpenFgaPolicy::<_, _, String, Postgres>::new(
+            shapes,
+            OpenFgaServiceClient::new(transport.clone()),
+            "store",
+            &model,
+        )
+        .unwrap();
+        let docs =
+            catalog_helpers::table_id::<Postgres, _>(policy.shapes().catalog(), "docs").unwrap();
+        let event = two_sided_update(docs, Value::String("alice".into()));
+        let old = EventRow::previous(&event, policy.shapes().catalog()).unwrap();
+        let new = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+
+        let got = block_on(policy.may_write(
+            RowWrite::Update {
+                old: &old,
+                new: &new,
+                assigned: &[],
+                read: &[],
+            },
+            &"user:alice".to_string(),
+        ));
+
+        assert_eq!(got, Err(OpenFgaError::RowCannotBeNamed));
+        assert!(transport.calls().is_empty());
+    }
+
+    /// A fact of the written row that cannot be read off it refuses the write
+    /// before any service call, since a check missing that fact would judge a
+    /// different row.
+    #[test]
+    fn an_undecodable_resulting_fact_returns_before_the_transport() {
+        let transport = Scripted::new([]);
+        let policy = scripted_policy_over(UPDATE_TWO_SIDED, transport.clone());
+        let docs =
+            catalog_helpers::table_id::<Postgres, _>(policy.shapes().catalog(), "docs").unwrap();
+        let event = two_sided_update(docs, Value::Float(1.5));
+        let old = EventRow::previous(&event, policy.shapes().catalog()).unwrap();
+        let new = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+
+        let got = block_on(policy.may_write(
+            RowWrite::Update {
+                old: &old,
+                new: &new,
+                assigned: &[],
+                read: &[],
+            },
+            &"user:alice".to_string(),
+        ));
+
+        assert!(
+            matches!(got, Err(OpenFgaError::ResultingRowUnreadable(_))),
+            "{got:?}"
+        );
         assert!(transport.calls().is_empty());
     }
 
