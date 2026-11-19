@@ -47,6 +47,8 @@ use diesel::{sql_query, Connection, QueryResult, RunQueryDsl};
 mod diesel_backend;
 #[cfg(feature = "executor-diesel")]
 mod diesel_connector;
+#[cfg(feature = "executor-diesel")]
+mod diesel_failure_class;
 #[cfg(any(
     feature = "executor-diesel-mysql",
     feature = "executor-diesel-async-mysql"
@@ -72,6 +74,8 @@ pub use diesel_connector::DieselConnector;
     feature = "executor-diesel-async-mysql"
 ))]
 pub use diesel_connector::ReadShapeError;
+#[cfg(feature = "executor-diesel")]
+pub use diesel_failure_class::DieselFailureClass;
 // The scalar row shapes travel to the async connectors only, so the
 // re-export follows their backend features rather than `executor-diesel`.
 #[cfg(any(

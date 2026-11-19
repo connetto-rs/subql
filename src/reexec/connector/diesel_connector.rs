@@ -219,15 +219,17 @@ where
 }
 
 #[cfg(feature = "executor-diesel")]
-/// Reading a row needs a decoder for the connection's backend, so this impl
-/// asks for one. Every backend subql speaks has it behind that backend's own
-/// feature (`diesel-typed` for Postgres, `diesel-typed-sqlite`,
+/// Reading a row needs a decoder for the connection's backend, and
+/// classifying a failed read needs that backend's error codes, so this impl
+/// asks for both. Every backend subql speaks has them behind that backend's
+/// own feature (`diesel-typed` for Postgres, `diesel-typed-sqlite`,
 /// `diesel-typed-mysql`, `executor-diesel-postgres`, `executor-diesel-mysql`),
 /// and a connector that cannot decode a row cannot honestly claim to read one.
 impl<C, B, S> Connector for DieselConnector<C, B, S>
 where
     C: Connection + diesel::connection::LoadConnection<diesel::connection::DefaultLoadingMode>,
-    C::Backend: super::ScalarSqlBackend + crate::diesel_decode::RowFieldDecode,
+    C::Backend:
+        super::ScalarSqlBackend + crate::diesel_decode::RowFieldDecode + super::DieselFailureClass,
     B: DieselBackend + crate::diesel_decode::SpellCanonical,
     S: SessionSetup,
     bool: diesel::serialize::ToSql<Bool, C::Backend>,
@@ -259,7 +261,7 @@ where
     type Backend = B;
 
     fn failure_class(&self, error: &Self::Error) -> super::FailureClass {
-        B::failure_class(error)
+        <C::Backend as super::DieselFailureClass>::failure_class(error)
     }
 
     fn execute_scalar(

@@ -19,6 +19,7 @@
 
 use crate::common;
 
+use diesel::connection::SimpleConnection;
 use diesel::{sql_query, MysqlConnection, RunQueryDsl};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::MySqlDialect;
@@ -43,7 +44,7 @@ fn build_engine(catalog: ParserDB, conn_exec: MysqlConnection) -> Engine {
 
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
-fn dropped_table_keeps_reads_queued_and_stops_the_sync_drain() {
+fn dropped_table_stops_only_its_subscription_in_one_resolve() {
     common::assert_docker_available();
     let database = common::mysql_database();
     let mut connection = database.connect();
@@ -52,24 +53,50 @@ fn dropped_table_keeps_reads_queued_and_stops_the_sync_drain() {
     let subscriptions = common::mysql_read_failures::queue_reads(&mut engine, tables);
     common::mysql_read_failures::drop_table(&mut connection);
 
+    let reads = engine.resolve_collect().expect("resolve independent reads");
+    common::mysql_read_failures::assert_stopped(&reads, subscriptions, |error| {
+        common::mysql_read_failures::assert_error_number(error, 1146);
+    });
+    assert_eq!(engine.pending_read_count(), 0);
+    assert_eq!(engine.reexec_query_count(), 1);
+}
+
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn locked_table_keeps_reads_queued_until_the_lock_is_released() {
+    common::assert_docker_available();
+    let database = common::mysql_database();
+    let mut connection = database.connect();
+    let (catalog, tables) = common::mysql_read_failures::setup(&mut connection);
+    let mut reader = database.connect();
+    reader
+        .batch_execute(common::mysql_read_failures::WAIT_ONE_SECOND_FOR_LOCKS)
+        .expect("shorten lock wait");
+    let mut engine = build_engine(catalog, reader);
+    let subscriptions = common::mysql_read_failures::queue_reads(&mut engine, tables);
+    common::mysql_read_failures::displace_minimums(&mut connection);
+    common::mysql_read_failures::lock_table(&mut connection);
+
     let mut deliveries = subql::reexec::ResolvedReads::default();
     let error = engine
         .resolve(|delivery| deliveries.push(delivery))
-        .expect_err("missing table leaves the read retryable");
-    assert!(matches!(
-        error,
+        .expect_err("lock wait timeout leaves the read retryable");
+    match error {
         subql::reexec::ReExecError::Connector {
             subscription,
-            error: diesel::result::Error::DatabaseError(_, _),
-        } if subscription == subscriptions[0]
-    ));
+            error,
+        } => {
+            assert_eq!(subscription, subscriptions[0]);
+            common::mysql_read_failures::assert_error_number(&error, 1205);
+        }
+        other => panic!("unexpected read error {other:?}"),
+    }
     assert!(deliveries.scalar_updates.is_empty());
     assert!(deliveries.stopped.is_empty());
     assert_eq!(engine.pending_read_count(), 2);
-    assert_eq!(engine.reexec_query_count(), 2);
 
-    common::mysql_read_failures::restore_table(&mut connection);
-    let reads = engine.resolve_collect().expect("retry restored table");
+    common::mysql_read_failures::unlock_tables(&mut connection);
+    let reads = engine.resolve_collect().expect("retry unlocked table");
     assert!(reads.stopped.is_empty());
     assert_eq!(reads.scalar_updates.len(), 2);
     for (update, subscription) in reads.scalar_updates.iter().zip(subscriptions) {

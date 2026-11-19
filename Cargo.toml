@@ -8,13 +8,13 @@ exclude = ["fuzz"]
 [patch.crates-io]
 # Followed at main, whose version the `pg_walstream` requirement must match for the patch to apply.
 pg_walstream = { git = "https://github.com/isdaniel/pg-walstream", branch = "main" }
-# diesel-rs main carries the sqlite update hook, the collected-binds accessor
-# and the MySQL `execute_returning_id` subql needs, none yet released. Named
-# with no branch, exactly as diesel-sqlite-session names it, so both graphs
-# resolve to one diesel. Drop once these land in a diesel release.
+# diesel-rs main carries `DatabaseErrorInformation::native_code`, which the
+# re-execution failure classification reads, not yet released. Named with no
+# branch, exactly as diesel-sqlite-session names it, so both graphs resolve to
+# one diesel. Drop once it lands in a diesel release.
 diesel = { git = "https://github.com/diesel-rs/diesel" }
-# The async driver shares Diesel's unreleased statement-cache contract.
-diesel-async = { git = "https://github.com/diesel-rs/diesel_async" }
+# Lives in diesel-rs and forwards the MySQL error number to `native_code`.
+diesel-async = { git = "https://github.com/diesel-rs/diesel" }
 # Followed at main, whose version the `sqlparser` requirement must match for the patch to apply.
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 sqlparser_derive = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }

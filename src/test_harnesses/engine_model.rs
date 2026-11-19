@@ -9,8 +9,9 @@
 //! know it, must equal what SQLite answers for the same statement.
 //!
 //! A subscription the engine refuses to answer for a write, by an evaluation
-//! failure, an unanswered cell or a failed read, is dropped from the
-//! comparison from then on, since no answer is not a wrong one.
+//! failure, an unanswered cell, a failed read or a read that ended it, as a
+//! `SUM` overflowing SQLite's integers does, is dropped from the comparison
+//! from then on, since no answer is not a wrong one.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -852,7 +853,13 @@ impl Run {
                     .unanswered()
                     .iter()
                     .any(|cell| cell.consumer_id == consumer);
-            if refused || reads.is_none() {
+            let ended = reads.as_ref().is_some_and(|reads| {
+                reads
+                    .stopped
+                    .iter()
+                    .any(|stopped| stopped.subscription_id == subscription.id)
+            });
+            if refused || ended || reads.is_none() {
                 unknown.push(subscription.id);
                 continue;
             }

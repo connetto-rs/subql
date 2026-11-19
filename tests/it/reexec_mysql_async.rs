@@ -59,34 +59,87 @@ fn build_engine(catalog: ParserDB, pool: Pool<AsyncMysqlConnection>) -> Engine {
     AutoResolvingEngine::new(inner, AsyncMode::new(MysqlAsyncDieselConnector::new(pool)))
 }
 
+/// A pool of one connection, so the session variable it sets holds for
+/// every read.
+async fn single_connection_pool_waiting_one_second_for_locks(
+    url: String,
+) -> Pool<AsyncMysqlConnection> {
+    use diesel_async::SimpleAsyncConnection;
+
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(AsyncDieselConnectionManager::<AsyncMysqlConnection>::new(
+            url,
+        ))
+        .await
+        .expect("build async mysql pool");
+    pool.get()
+        .await
+        .expect("check out the connection")
+        .batch_execute(common::mysql_read_failures::WAIT_ONE_SECOND_FOR_LOCKS)
+        .await
+        .expect("shorten lock wait");
+    pool
+}
+
 #[test]
 #[ignore = "requires Docker; run with --ignored"]
-fn dropped_table_keeps_its_read_queued_and_delivers_healthy_async_reads() {
+fn dropped_table_stops_only_its_subscription_in_one_resolve() {
     common::assert_docker_available();
     let database = common::mysql_database();
     let mut connection = database.connect();
     let (catalog, tables) = common::mysql_read_failures::setup(&mut connection);
     let url = database.url();
     common::multi_thread_rt().block_on(async move {
-        let pool = mysql_async_pool(url).await;
-        let mut engine = build_engine(catalog, pool);
+        let mut engine = build_engine(catalog, mysql_async_pool(url).await);
         let subscriptions = common::mysql_read_failures::queue_reads(&mut engine, tables);
         common::mysql_read_failures::drop_table(&mut connection);
+
+        let reads = engine
+            .resolve_collect()
+            .await
+            .expect("resolve independent reads");
+        common::mysql_read_failures::assert_stopped(&reads, subscriptions, |error| match error {
+            subql::reexec::DieselAsyncError::Diesel(error) => {
+                common::mysql_read_failures::assert_error_number(error, 1146);
+            }
+            other => panic!("unexpected connector error {other:?}"),
+        });
+        assert_eq!(engine.pending_read_count(), 0);
+        assert_eq!(engine.reexec_query_count(), 1);
+    });
+}
+
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn locked_table_keeps_its_read_queued_and_delivers_healthy_async_reads() {
+    common::assert_docker_available();
+    let database = common::mysql_database();
+    let mut connection = database.connect();
+    let (catalog, tables) = common::mysql_read_failures::setup(&mut connection);
+    let url = database.url();
+    common::multi_thread_rt().block_on(async move {
+        let pool = single_connection_pool_waiting_one_second_for_locks(url).await;
+        let mut engine = build_engine(catalog, pool);
+        let subscriptions = common::mysql_read_failures::queue_reads(&mut engine, tables);
+        common::mysql_read_failures::displace_minimums(&mut connection);
+        common::mysql_read_failures::lock_table(&mut connection);
 
         let mut deliveries = subql::reexec::ResolvedReads::default();
         let error = engine
             .resolve(|delivery| deliveries.push(delivery))
             .await
-            .expect_err("missing table leaves the read retryable");
-        assert!(matches!(
-            error,
+            .expect_err("lock wait timeout leaves the read retryable");
+        match error {
             subql::reexec::ReExecError::Connector {
                 subscription,
-                error: subql::reexec::DieselAsyncError::Diesel(
-                    diesel::result::Error::DatabaseError(_, _),
-                ),
-            } if subscription == subscriptions[0]
-        ));
+                error: subql::reexec::DieselAsyncError::Diesel(error),
+            } => {
+                assert_eq!(subscription, subscriptions[0]);
+                common::mysql_read_failures::assert_error_number(&error, 1205);
+            }
+            other => panic!("unexpected read error {other:?}"),
+        }
         assert!(deliveries.stopped.is_empty());
         assert_eq!(deliveries.scalar_updates.len(), 1);
         assert_eq!(
@@ -95,19 +148,72 @@ fn dropped_table_keeps_its_read_queued_and_delivers_healthy_async_reads() {
         );
         assert_eq!(deliveries.scalar_updates[0].value, Value::Float(9.0));
         assert_eq!(engine.pending_read_count(), 1);
-        assert_eq!(engine.reexec_query_count(), 2);
 
-        common::mysql_read_failures::restore_table(&mut connection);
+        common::mysql_read_failures::unlock_tables(&mut connection);
         let reads = engine
             .resolve_collect()
             .await
-            .expect("retry restored table");
+            .expect("retry unlocked table");
         assert!(reads.stopped.is_empty());
         assert_eq!(reads.scalar_updates.len(), 1);
         assert_eq!(reads.scalar_updates[0].subscription_id, subscriptions[0]);
         assert_eq!(reads.scalar_updates[0].value, Value::Float(9.0));
         assert_eq!(engine.pending_read_count(), 0);
         assert_eq!(engine.reexec_query_count(), 2);
+    });
+}
+
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn exhausted_pool_keeps_reads_queued_until_connection_returns() {
+    common::assert_docker_available();
+    let database = common::mysql_database();
+    let mut connection = database.connect();
+    let (catalog, tables) = common::mysql_read_failures::setup(&mut connection);
+    let url = database.url();
+    common::multi_thread_rt().block_on(async move {
+        let pool = Pool::builder()
+            .max_size(1)
+            .connection_timeout(std::time::Duration::from_millis(100))
+            .build(AsyncDieselConnectionManager::<AsyncMysqlConnection>::new(
+                url,
+            ))
+            .await
+            .expect("build async mysql pool");
+        let mut engine = build_engine(catalog, pool.clone());
+        let subscriptions = common::mysql_read_failures::queue_reads(&mut engine, tables);
+        common::mysql_read_failures::displace_minimums(&mut connection);
+        let held_connection = pool.get().await.expect("hold the connection");
+
+        let mut deliveries = subql::reexec::ResolvedReads::default();
+        let error = engine
+            .resolve(|delivery| deliveries.push(delivery))
+            .await
+            .expect_err("pool exhausted");
+        assert!(matches!(
+            error,
+            subql::reexec::ReExecError::Connector {
+                error: subql::reexec::DieselAsyncError::Pool(_),
+                ..
+            }
+        ));
+        assert!(deliveries.stopped.is_empty());
+        assert!(deliveries.scalar_updates.is_empty());
+        assert_eq!(engine.pending_read_count(), 2);
+
+        drop(held_connection);
+        let reads = engine.resolve_collect().await.expect("retry after release");
+        assert!(reads.stopped.is_empty());
+        assert_eq!(reads.scalar_updates.len(), 2);
+        for subscription in subscriptions {
+            let update = reads
+                .scalar_updates
+                .iter()
+                .find(|update| update.subscription_id == subscription)
+                .expect("each read delivered");
+            assert_eq!(update.value, Value::Float(9.0));
+        }
+        assert_eq!(engine.pending_read_count(), 0);
     });
 }
 

@@ -7,6 +7,8 @@
 //!    surfaces a [`ScalarUpdate`] (no triggers under the auto-resolving
 //!    engine).
 //! 2. A `MIN` over an empty result set decodes as [`Value::Null`].
+//! 3. A failed read is classified by SQLite's result code, so a missing
+//!    table ends its subscription and a busy database keeps the read queued.
 //!
 //! The lib's unit tests cover the "no DB call on insert above the
 //! extreme" optimization with a `MockConnector`. Here we only assert the
@@ -22,7 +24,7 @@ use diesel::{sql_query, Connection, RunQueryDsl, SqliteConnection};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{Postgres, Value};
-use subql::reexec::{AutoResolvingEngine, DieselConnector, SyncMode};
+use subql::reexec::{AutoResolvingEngine, DieselConnector, ReExecError, SyncMode};
 use subql::testing::TestEvent;
 use subql::{
     catalog_helpers, DefaultIds, Registered, SubscriptionEngine, SubscriptionRequest, TableId, Tier,
@@ -48,7 +50,11 @@ fn orders_id(database: &ParserDB) -> TableId {
 }
 
 fn sqlite_with(rows: &[(i64, f64)]) -> SqliteConnection {
-    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    sqlite_at(":memory:", rows)
+}
+
+fn sqlite_at(url: &str, rows: &[(i64, f64)]) -> SqliteConnection {
+    let mut conn = SqliteConnection::establish(url).unwrap();
     sql_query(
         "CREATE TABLE orders (\
             id INTEGER PRIMARY KEY, \
@@ -163,4 +169,63 @@ fn empty_set_min_decodes_as_null() {
         Value::Null,
         "MIN over empty set -> SQL NULL -> Value::Null"
     );
+}
+
+/// The SQLite result code of a connector error, or `None` for any other
+/// error.
+fn result_code(error: &ReExecError<diesel::result::Error>) -> Option<i32> {
+    match error {
+        ReExecError::Connector {
+            error: diesel::result::Error::DatabaseError(_, information),
+            ..
+        } => information.native_code(),
+        _ => None,
+    }
+}
+
+/// The connector reads SQLite's result codes although the engine speaks
+/// PostgreSQL, so a missing table ends the subscription.
+#[test]
+fn a_dropped_table_ends_its_subscription_by_the_sqlite_result_code() {
+    let mut conn = sqlite_with(&[(2, 9.0)]);
+    sql_query("DROP TABLE orders").execute(&mut conn).unwrap();
+    let (mut e, tid) = build_engine(conn);
+    let qid = register_min(&mut e, Value::Float(5.0));
+
+    e.apply_leaving_reads_queued(&delete_event(tid, 1, 5.0))
+        .unwrap();
+    let reads = e.resolve_collect().unwrap();
+    assert_eq!(reads.stopped.len(), 1);
+    assert_eq!(reads.stopped[0].subscription_id, qid);
+    assert_eq!(result_code(&reads.stopped[0].error), Some(1));
+    assert!(reads.scalar_updates.is_empty());
+    assert_eq!(e.pending_read_count(), 0);
+}
+
+#[test]
+fn a_busy_database_keeps_the_read_queued_until_the_lock_is_released() {
+    let directory = tempfile::tempdir().unwrap();
+    let url = directory.path().join("orders.sqlite");
+    let url = url.to_str().unwrap();
+    let mut holder = sqlite_at(url, &[(2, 9.0)]);
+    let mut reader = SqliteConnection::establish(url).unwrap();
+    sql_query("PRAGMA busy_timeout = 0")
+        .execute(&mut reader)
+        .unwrap();
+    let (mut e, tid) = build_engine(reader);
+    let qid = register_min(&mut e, Value::Float(5.0));
+
+    e.apply_leaving_reads_queued(&delete_event(tid, 1, 5.0))
+        .unwrap();
+    sql_query("BEGIN EXCLUSIVE").execute(&mut holder).unwrap();
+    let error = e.resolve_collect().unwrap_err();
+    assert_eq!(result_code(&error).map(|code| code & 0xff), Some(5));
+    assert_eq!(e.pending_read_count(), 1);
+
+    sql_query("COMMIT").execute(&mut holder).unwrap();
+    let reads = e.resolve_collect().unwrap();
+    assert!(reads.stopped.is_empty());
+    assert_eq!(reads.scalar_updates.len(), 1);
+    assert_eq!(reads.scalar_updates[0].subscription_id, qid);
+    assert_eq!(reads.scalar_updates[0].value, Value::Float(9.0));
 }
