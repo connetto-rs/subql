@@ -1070,7 +1070,6 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         );
 
         assert!(policy.answers_locally(docs, ActionStatement::SelectForUpdate));
-        assert!(policy.answers_locally(docs, ActionStatement::Update));
 
         let old = EventRow::previous(&event, policy.catalog()).unwrap();
         let new = EventRow::current(&event, policy.catalog()).unwrap();
@@ -1098,13 +1097,14 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         );
     }
 
-    /// The version that refuses is the new one here, which is the half a
-    /// policy reading only the row as it is would miss.
+    /// The row as it is grants, and the half judging the result is the
+    /// service's, so its answer decides the replacement.
     ///
-    /// alice holds the row and hands the editorship to bob, and the rule
-    /// admitting the result wants the caller to be the editor.
+    /// alice holds the row and hands the editorship to bob. The rule admitting
+    /// the result is judged on the row's resulting type, which no recipe reads
+    /// locally, and the service here grants alice.
     #[test]
-    fn a_replacement_the_new_version_refuses_is_refused() {
+    fn a_replacement_the_stored_row_grants_takes_the_services_answer_on_the_result() {
         let (db, relations) = translated(UPDATE_TWO_SIDED);
         let docs = docs_id(&db);
         let event: TestEvent<_> = TestEvent::update(
@@ -1132,10 +1132,81 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
 
         assert_eq!(
             got,
-            Ok(Verdict::Deny),
-            "she holds it now and would not be its editor after"
+            Ok(Verdict::Allow),
+            "the service's grant on the resulting row is the answer"
         );
-        assert_eq!(policy.inner().calls(), 0);
+        assert_eq!(
+            policy.inner().calls(),
+            1,
+            "the row as it is grants her, so the result is asked"
+        );
+    }
+
+    /// `WITH CHECK` through a helper that looks `docs` up at the row's own key,
+    /// which `PostgreSQL` evaluates against the statement's snapshot.
+    const UPDATE_CHECKED_BY_STORED_ARCHIVE: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT, archived_at TEXT);
+GRANT SELECT ON docs TO authz_owner;
+CREATE FUNCTION authz.is_archived(doc INTEGER) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.docs archived
+                 WHERE archived.id = doc AND archived.archived_at IS NOT NULL)
+$$;
+ALTER FUNCTION authz.is_archived(INTEGER) OWNER TO authz_owner;
+GRANT USAGE ON SCHEMA authz TO app_user;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_user;
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY pu ON docs FOR UPDATE
+  USING (owner_id = current_setting('app.user_id', true))
+  WITH CHECK (NOT authz.is_archived(id));
+";
+
+    /// A check reading the row's own key through a helper reads the stored row,
+    /// which the row being written does not hold, so the local half leaves the
+    /// judgement on the written row to the service.
+    ///
+    /// alice owns an archived row and unarchives it. Read off the new values,
+    /// the helper would find the row open and grant her, so the refusal the
+    /// service gives here is what proves the new values decided nothing.
+    #[test]
+    fn a_helper_reading_its_own_key_judges_the_stored_row() {
+        let (db, relations) = translated(UPDATE_CHECKED_BY_STORED_ARCHIVE);
+        let docs = docs_id(&db);
+        let event: TestEvent<_> = TestEvent::update(
+            docs,
+            docs_row(text("alice"), text("2026-01-01")),
+            docs_row(text("alice"), Value::Null),
+        )
+        .with_pk_columns([0u16]);
+        let policy = RowPolicy::new(shared(db, &relations), Granting::<Principal>::default());
+
+        let old = EventRow::previous(&event, policy.catalog()).unwrap();
+        let new = EventRow::current(&event, policy.catalog()).unwrap();
+        let got = block_on(policy.may_write(
+            RowWrite::Update {
+                old: &old,
+                new: &new,
+                assigned: &[],
+                read: &[],
+            },
+            &Principal::identity("user:alice"),
+        ));
+
+        assert_eq!(
+            got,
+            Ok(Verdict::Deny),
+            "the service refuses, and its answer is the one returned"
+        );
+        assert_eq!(
+            policy.inner().calls(),
+            1,
+            "the new values never decide the check, so the service is asked"
+        );
     }
 
     /// The half that judges the row as it stands answers on its own, which is
@@ -1196,7 +1267,6 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         );
 
         assert!(policy.answers_locally(docs, ActionStatement::SelectForUpdate));
-        assert!(policy.answers_locally(docs, ActionStatement::Update));
 
         let old = EventRow::previous(&event, policy.catalog()).unwrap();
         let new = EventRow::current(&event, policy.catalog()).unwrap();
@@ -1933,20 +2003,22 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
     /// half, so a reader naming the halves asks for relations the model never
     /// defined: the local path answered nothing and the service rejected the
     /// question. Postgres applies a lone `USING` clause to the result as well, so
-    /// the one relation judges both versions and both must grant.
+    /// the one relation judges both versions and both must grant. The row as it
+    /// is answers locally and the result is the service's, which grants alice
+    /// here.
     #[test]
     fn a_replacement_on_one_condition_is_answered_from_both_versions() {
         let (db, relations) = translated_with_keys(HELD_KEYS);
         let notes = notes_id(&db);
-        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
+        let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::to("user:alice"));
 
         assert!(
-            policy.answers_locally(notes, ActionStatement::Update),
-            "one relation answers it, against both versions"
+            !policy.answers_locally(notes, ActionStatement::Update),
+            "the resulting row is judged on its own type, which only the service holds"
         );
 
-        // alice holds the row and hands it to bob, so the row as it will be
-        // refuses her even though the row as it is grants her.
+        // alice holds the row and hands it to bob. The row as it is grants her,
+        // so the result is asked, and the service's answer is the verdict.
         let handover: TestEvent<_> =
             TestEvent::update(notes, notes_row("alice"), notes_row("bob")).with_pk_columns([0u16]);
         let old = EventRow::previous(&handover, policy.catalog()).unwrap();
@@ -1965,20 +2037,21 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
 
         assert_eq!(
             got,
-            Ok(Verdict::Deny),
-            "she holds it now and would not after"
+            Ok(Verdict::Allow),
+            "the service's grant on the resulting row is the answer"
         );
         assert_eq!(
             policy.inner().calls(),
-            0,
-            "and no round trip was needed to say so"
+            1,
+            "the row as it is grants her, so the result is asked"
         );
 
-        // Keeping it is granted, since both versions name her.
-        let kept: TestEvent<_> = TestEvent::update(notes, notes_row("alice"), notes_row("alice"))
-            .with_pk_columns([0u16]);
-        let old = EventRow::previous(&kept, policy.catalog()).unwrap();
-        let new = EventRow::current(&kept, policy.catalog()).unwrap();
+        // bob does not hold the row as it is, which refuses him with no round
+        // trip, whatever he writes into it.
+        let taken: TestEvent<_> =
+            TestEvent::update(notes, notes_row("alice"), notes_row("bob")).with_pk_columns([0u16]);
+        let old = EventRow::previous(&taken, policy.catalog()).unwrap();
+        let new = EventRow::current(&taken, policy.catalog()).unwrap();
         assert_eq!(
             block_on(policy.may_write(
                 RowWrite::Update {
@@ -1987,11 +2060,11 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
                     assigned: &[],
                     read: &[]
                 },
-                &alice
+                &Principal::holding("user:bob", &[])
             )),
-            Ok(Verdict::Allow)
+            Ok(Verdict::Deny)
         );
-        assert_eq!(policy.inner().calls(), 0);
+        assert_eq!(policy.inner().calls(), 1);
     }
 
     /// Each verb carries only the versions it has, so a judgement naming one it

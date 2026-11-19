@@ -150,6 +150,7 @@ impl Wiring {
             Shapes::new::<Postgres>(db, &relations, &enumerations)
                 .with_row_naming(translation.row_naming())
                 .with_action_relations(translation.action_relations())
+                .with_resulting_rows(translation.resulting_rows())
                 .with_required_parameters(translation.notes()),
         )
     }
@@ -334,9 +335,10 @@ struct ReplacementFixture {
     docs: TableId,
 }
 
-async fn replacement_fixture() -> ReplacementFixture {
+/// A store holding `schema`'s model and the facts of `stored`, a `docs` row keyed 4.
+async fn replacement_fixture(schema: &str, stored: Vec<Value<Postgres>>) -> ReplacementFixture {
     let mut client = openfga().await;
-    let wired = wiring(UPDATE_TWO_SIDED);
+    let wired = wiring(schema);
     let docs = catalog_helpers::table_id::<Postgres, _>(&wired.db, "docs")
         .expect("docs is in the catalog");
     let constants = constants(&wired.outputs);
@@ -351,8 +353,7 @@ async fn replacement_fixture() -> ReplacementFixture {
         &installed,
     )
     .expect("the index carries both update judges");
-    let stored =
-        TestEvent::<Postgres>::insert(docs, update_row("alice", "bob")).with_pk_columns([0u16]);
+    let stored = TestEvent::<Postgres>::insert(docs, stored).with_pk_columns([0u16]);
     let (stored_diff, _requeries) = shapes
         .diff(&stored)
         .expect("the stored row states its facts");
@@ -598,7 +599,7 @@ async fn a_question_the_row_does_not_settle_is_answered_by_the_service() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires docker"]
 async fn a_replacement_requires_both_versions_and_resulting_context() {
-    let mut fixture = replacement_fixture().await;
+    let mut fixture = replacement_fixture(UPDATE_TWO_SIDED, update_row("alice", "bob")).await;
     let replacement = TestEvent::<Postgres>::update(
         fixture.docs,
         update_row("alice", "bob"),
@@ -620,16 +621,135 @@ async fn a_replacement_requires_both_versions_and_resulting_context() {
         CheckRequestTupleKey {
             user: alice.name,
             relation: "can_update_check".to_owned(),
-            object: "docs:4".to_owned(),
+            object: "docs_resulting:4".to_owned(),
         },
     )
     .await;
     assert!(
         !without_context,
-        "alice is not the stored editor, so the resulting facts are required"
+        "nothing stores the resulting row, so a check about it reads only the facts it carries"
     );
 
     assert_independent_replacement_judges(&fixture).await;
+}
+
+/// The stored values never grant the row a write produces.
+///
+/// alice owns and edits the stored row and hands the editorship to bob. The
+/// check wants the caller to be the new row's editor, so `PostgreSQL` refuses,
+/// though the stored row still names alice.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires docker"]
+async fn an_update_its_check_refuses_is_not_granted_by_the_stored_values() {
+    let fixture = replacement_fixture(UPDATE_TWO_SIDED, update_row("alice", "alice")).await;
+    let replacement = TestEvent::<Postgres>::update(
+        fixture.docs,
+        update_row("alice", "alice"),
+        update_row("alice", "bob"),
+    )
+    .with_pk_columns([0u16]);
+    let old = EventRow::previous(&replacement, fixture.shapes.catalog()).expect("pre-image");
+    let new = EventRow::current(&replacement, fixture.shapes.catalog()).expect("post-image");
+
+    assert_eq!(
+        replacement_verdict(&fixture.policy, &old, &new, &Actor::app_user("user:alice")).await,
+        Verdict::Deny
+    );
+}
+
+/// `WITH CHECK` through a helper that looks `docs` up at the row's own key,
+/// which `PostgreSQL` evaluates against the statement's snapshot.
+const CHECKED_BY_STORED_ARCHIVE: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE public.docs(id INTEGER PRIMARY KEY, owner_id TEXT, archived_at TEXT);
+GRANT SELECT ON docs TO authz_owner;
+CREATE FUNCTION authz.is_archived(doc INTEGER) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.docs archived
+                 WHERE archived.id = doc AND archived.archived_at IS NOT NULL)
+$$;
+ALTER FUNCTION authz.is_archived(INTEGER) OWNER TO authz_owner;
+GRANT USAGE ON SCHEMA authz TO app_user;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_user;
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY ps ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY pi ON docs FOR INSERT
+  WITH CHECK (owner_id = current_setting('app.user_id', true) AND NOT authz.is_archived(id));
+CREATE POLICY pu ON docs FOR UPDATE
+  USING (owner_id = current_setting('app.user_id', true))
+  WITH CHECK (NOT authz.is_archived(id));
+";
+
+/// A check reading the row's own key through a helper reads the stored row, so
+/// the values a write states for that row never vouch for it.
+///
+/// alice owns row 4, stored archived, and row 6, stored open.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires docker"]
+async fn a_check_reading_its_own_key_judges_the_stored_row() {
+    let row = |id: i64, archived: Option<&str>| {
+        vec![
+            Value::Int(id),
+            Value::String("alice".into()),
+            archived.map_or(Value::Null, |at| Value::String(at.into())),
+        ]
+    };
+    let fixture = replacement_fixture(CHECKED_BY_STORED_ARCHIVE, row(4, Some("then"))).await;
+    let sixth = TestEvent::<Postgres>::insert(fixture.docs, row(6, None)).with_pk_columns([0u16]);
+    let (sixth_diff, _requeries) = fixture
+        .shapes
+        .diff(&sixth)
+        .expect("the stored row states its facts");
+    fixture
+        .policy
+        .apply(&sixth_diff)
+        .await
+        .expect("write the second stored row's facts");
+    let alice = Actor::app_user("user:alice");
+    let update = |id: i64, before: Option<&str>, after: Option<&str>| {
+        TestEvent::<Postgres>::update(fixture.docs, row(id, before), row(id, after))
+            .with_pk_columns([0u16])
+    };
+
+    // Unarchiving still reads the stored row, which is archived.
+    let unarchiving = update(4, Some("then"), None);
+    let old = EventRow::previous(&unarchiving, fixture.shapes.catalog()).expect("pre-image");
+    let new = EventRow::current(&unarchiving, fixture.shapes.catalog()).expect("post-image");
+    assert_eq!(
+        replacement_verdict(&fixture.policy, &old, &new, &alice).await,
+        Verdict::Deny
+    );
+
+    // Archiving reads the stored row too, which is open.
+    let archiving = update(6, None, Some("now"));
+    let old = EventRow::previous(&archiving, fixture.shapes.catalog()).expect("pre-image");
+    let new = EventRow::current(&archiving, fixture.shapes.catalog()).expect("post-image");
+    assert_eq!(
+        replacement_verdict(&fixture.policy, &old, &new, &alice).await,
+        Verdict::Allow
+    );
+
+    // The snapshot holds no row 5, so an archived new row is no archived row.
+    let created =
+        TestEvent::<Postgres>::insert(fixture.docs, row(5, Some("then"))).with_pk_columns([0u16]);
+    let new = EventRow::current(&created, fixture.shapes.catalog()).expect("post-image");
+    assert_eq!(
+        fixture
+            .policy
+            .may_write(
+                RowWrite::Insert {
+                    new: &new,
+                    assigned: &[]
+                },
+                &alice
+            )
+            .await
+            .expect("ask the resulting-row relation"),
+        Verdict::Allow
+    );
 }
 
 /// Any subject name may grant its watcher without changing another watcher.
@@ -2276,7 +2396,8 @@ fn tuples_of(records: &[Record]) -> Vec<TupleKey> {
 /// Every combination is asked: the row admitting the caller or not, against a
 /// list holding the table's own entry, only `*`, another table's entry, or
 /// nothing. A request carrying no list is not the row's to settle, so it alone
-/// reaches the backend.
+/// reaches the backend. A write's resulting row is judged on a type only the
+/// service holds, so the writes compared here judge the stored row alone.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires docker"]
 async fn a_bot_gate_is_answered_locally_as_the_service_answers() {
@@ -2325,26 +2446,21 @@ async fn a_bot_gate_is_answered_locally_as_the_service_answers() {
         assert_eq!(answered, expected, "reading {name} for {watchers:?}");
 
         for watcher in &watchers {
-            for write in [
-                RowWrite::Insert {
-                    new: &row,
-                    assigned: &[],
-                },
-                RowWrite::Delete {
-                    old: &row,
-                    read: &[],
-                },
-            ] {
-                assert_eq!(
-                    local.may_write(write, watcher).await.expect("never fails"),
-                    service
-                        .may_write(write, watcher)
-                        .await
-                        .expect("the service answered"),
-                    "{:?} on {name} for {watcher:?}",
-                    write.op(),
-                );
-            }
+            let removal = RowWrite::Delete {
+                old: &row,
+                read: &[],
+            };
+            assert_eq!(
+                local
+                    .may_write(removal, watcher)
+                    .await
+                    .expect("never fails"),
+                service
+                    .may_write(removal, watcher)
+                    .await
+                    .expect("the service answered"),
+                "Delete on {name} for {watcher:?}",
+            );
         }
         assert_eq!(
             local.inner().take_asked(),

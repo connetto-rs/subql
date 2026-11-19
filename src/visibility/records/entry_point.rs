@@ -1,9 +1,11 @@
 use alloc::vec::Vec;
 use core::cell::Cell;
 
+#[cfg(feature = "visibility-openfga")]
+use rls2fga_types::ResultingRow;
 use rls2fga_types::{
     records_from_row, ColumnKind, ColumnRead, Guard, Record, RecordDerivation, RecordDescription,
-    TypeName, ValueSource,
+    RecordError, TypeName, ValueSource,
 };
 use rls2fga_types::{AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest};
 use sql_traits::prelude::DatabaseLike;
@@ -37,16 +39,51 @@ where
     if let Some(refusal) = unsupported_description::<R::Backend, DB>(description, db) {
         return Err(refusal);
     }
+    read_row(row, db, |view| records_from_row(description, view))
+}
+
+/// The records a check about the row a write produces carries for `row`, as
+/// `resulting` states them.
+///
+/// # Errors
+///
+/// [`RowRecordError::Refused`] for a record rls2fga cannot produce from `row`,
+/// and [`RowRecordError::Undecodable`] for a cell the row carried but could not
+/// decode.
+#[cfg(feature = "visibility-openfga")]
+pub fn resulting_records<R, DB>(
+    resulting: &ResultingRow,
+    row: &R,
+    db: &DB,
+) -> Result<Vec<Record>, RowRecordError>
+where
+    R: RowView + ?Sized,
+    DB: DatabaseLike,
+{
+    read_row(row, db, |view| resulting.records(view))
+}
+
+/// What `read` makes of `row`, refused where a cell it read could not be
+/// decoded.
+fn read_row<R, DB, T>(
+    row: &R,
+    db: &DB,
+    read: impl FnOnce(&RowValuesView<'_, R, DB>) -> Result<T, RecordError>,
+) -> Result<T, RowRecordError>
+where
+    R: RowView + ?Sized,
+    DB: DatabaseLike,
+{
     let view = RowValuesView {
         row,
         db,
         undecodable: Cell::new(None),
     };
-    let records = records_from_row(description, &view)?;
+    let read = read(&view)?;
     if let Some(error) = view.undecodable.into_inner() {
         return Err(RowRecordError::Undecodable(error));
     }
-    Ok(records)
+    Ok(read)
 }
 
 /// Whether [`records_from_row_view`] can evaluate `description` at all.
