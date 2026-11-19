@@ -4097,6 +4097,84 @@ CREATE POLICY p ON docs FOR SELECT USING (
         assert!(transport.calls().is_empty());
     }
 
+    /// A written row whose key cannot be read names no resulting object, so
+    /// the write is refused before any service call.
+    #[test]
+    fn a_written_row_without_a_readable_key_returns_before_the_transport() {
+        let transport = Scripted::new([]);
+        let policy = scripted_policy_over(UPDATE_TWO_SIDED, transport.clone());
+        let docs =
+            catalog_helpers::table_id::<Postgres, _>(policy.shapes().catalog(), "docs").unwrap();
+        let event = TestEvent::<Postgres>::update(
+            docs,
+            vec![
+                Value::Int(4),
+                Value::String("alice".into()),
+                Value::String("alice".into()),
+            ],
+            vec![
+                Value::Float(4.5),
+                Value::String("alice".into()),
+                Value::String("alice".into()),
+            ],
+        )
+        .with_pk_columns([0u16]);
+        let old = EventRow::previous(&event, policy.shapes().catalog()).unwrap();
+        let new = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+
+        let got = block_on(policy.may_write(
+            RowWrite::Update {
+                old: &old,
+                new: &new,
+                assigned: &[],
+                read: &[],
+            },
+            &"user:alice".to_string(),
+        ));
+
+        assert_eq!(got, Err(OpenFgaError::RowCannotBeNamed));
+        assert!(transport.calls().is_empty());
+    }
+
+    /// A stored row whose key cannot be read names no object, so the write is
+    /// refused before any service call, as a read of that row is.
+    #[test]
+    fn a_stored_row_without_a_readable_key_returns_before_the_transport() {
+        let transport = Scripted::new([]);
+        let policy = scripted_policy_over(UPDATE_TWO_SIDED, transport.clone());
+        let docs =
+            catalog_helpers::table_id::<Postgres, _>(policy.shapes().catalog(), "docs").unwrap();
+        let event = TestEvent::<Postgres>::update(
+            docs,
+            vec![
+                Value::Float(4.5),
+                Value::String("alice".into()),
+                Value::String("alice".into()),
+            ],
+            vec![
+                Value::Int(4),
+                Value::String("alice".into()),
+                Value::String("alice".into()),
+            ],
+        )
+        .with_pk_columns([0u16]);
+        let old = EventRow::previous(&event, policy.shapes().catalog()).unwrap();
+        let new = EventRow::current(&event, policy.shapes().catalog()).unwrap();
+
+        let got = block_on(policy.may_write(
+            RowWrite::Update {
+                old: &old,
+                new: &new,
+                assigned: &[],
+                read: &[],
+            },
+            &"user:alice".to_string(),
+        ));
+
+        assert_eq!(got, Err(OpenFgaError::RowCannotBeNamed));
+        assert!(transport.calls().is_empty());
+    }
+
     /// The asynchronous read answer remains movable between executor threads.
     #[test]
     fn may_see_returns_a_send_future() {
