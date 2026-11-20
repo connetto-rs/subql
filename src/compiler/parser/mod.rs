@@ -353,6 +353,9 @@ pub struct CompiledQuery<B: Backend> {
     /// The columns of each table the statement references, read before any
     /// read rule is folded into its `WHERE` clause.
     pub columns_read: ColumnsRead,
+    /// Where the statement's outputs sit in its select list and the type
+    /// each is stored as, or `None` when its select list does not resolve.
+    pub storage_layout: Option<crate::emit::StorageLayout>,
 }
 
 /// Parse and compile a subscription SQL statement into bytecode.
@@ -402,6 +405,7 @@ struct ParsedQuery {
     projection: QueryProjection,
     normalized: String,
     columns_read: ColumnsRead,
+    storage_layout: Option<crate::emit::StorageLayout>,
 }
 
 fn parse_query_front_half<B, DB>(
@@ -435,12 +439,18 @@ where
     let projection = sql_shape::extract_projection::<B, DB>(&stmt, table_id, database)?;
     let canonicalizer = Canonicalizer::new(dialect as &dyn Dialect);
     let normalized = canonicalize::normalize_where_clause(where_clause.as_ref(), &canonicalizer)?;
+    let storage_layout = crate::compiler::storage_layout::storage_layout::<B, DB>(
+        &stmt,
+        database,
+        !projection.delivers_rows(),
+    );
     Ok(ParsedQuery {
         table_id,
         where_clause,
         projection,
         normalized,
         columns_read,
+        storage_layout,
     })
 }
 
@@ -528,6 +538,7 @@ where
         projection: pq.projection,
         terms,
         columns_read: pq.columns_read,
+        storage_layout: pq.storage_layout,
     })
 }
 

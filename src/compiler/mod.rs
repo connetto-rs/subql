@@ -7,6 +7,7 @@ pub mod literals;
 pub mod parser;
 pub mod prefilter;
 pub mod sql_shape;
+pub(crate) mod storage_layout;
 pub mod tristate;
 pub(crate) mod value_cmp;
 pub mod vm;

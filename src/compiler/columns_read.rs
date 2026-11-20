@@ -90,14 +90,14 @@ impl ColumnsRead {
 
 /// One table a `FROM` clause names, under the name a column reference
 /// qualifies it by.
-struct Binding {
+pub(super) struct Binding {
     /// The alias, else the table's own unqualified name.
-    name: Ident,
+    pub(super) name: Ident,
     /// Whether `name` is an alias, which hides the table's own name.
-    aliased: bool,
-    table: TableId,
+    pub(super) aliased: bool,
+    pub(super) table: TableId,
     /// How many columns the table has, which a whole-row reference reads.
-    arity: ColumnId,
+    pub(super) arity: ColumnId,
 }
 
 /// The tables one query level reads and the names its output carries.
@@ -165,42 +165,11 @@ impl<B: Backend, DB: DatabaseLike> Charges<'_, B, DB> {
 
     /// Bind the table `factor` names into `scope`.
     fn bind(&mut self, scope: &mut Scope, factor: &TableFactor) -> ControlFlow<()> {
-        let TableFactor::Table {
-            name, alias, args, ..
-        } = factor
-        else {
+        let Some(binding) = binding::<B, DB>(self.database, factor) else {
             return ControlFlow::Break(());
         };
-        // A table function, or columns renamed by the alias, would make a
-        // written name mean something other than the catalog's column.
-        if args.is_some()
-            || alias
-                .as_ref()
-                .is_some_and(|alias| !alias.columns.is_empty())
-        {
-            return ControlFlow::Break(());
-        }
-        let database = self.database;
-        let found = written_table_name(name)
-            .and_then(|target| catalog_helpers::table_id_for_name::<B, DB>(database, target))
-            .and_then(|table| {
-                let arity = catalog_helpers::table_arity(database, table).ok()?;
-                Some((table, ColumnId::try_from(arity).ok()?))
-            });
-        let own = name.0.last().and_then(ObjectNamePart::as_ident);
-        let (Some((table, arity)), Some(own)) = (found, own) else {
-            return ControlFlow::Break(());
-        };
-        let (name, aliased) = alias
-            .as_ref()
-            .map_or_else(|| (own.clone(), false), |alias| (alias.name.clone(), true));
-        self.read.entry(table).or_default();
-        scope.bindings.push(Binding {
-            name,
-            aliased,
-            table,
-            arity,
-        });
+        self.read.entry(binding.table).or_default();
+        scope.bindings.push(binding);
         ControlFlow::Continue(())
     }
 
@@ -218,28 +187,8 @@ impl<B: Backend, DB: DatabaseLike> Charges<'_, B, DB> {
             self.bind(&mut scope, &from.relation)?;
             for join in &from.joins {
                 self.bind(&mut scope, &join.relation)?;
-                let constraint = match &join.join_operator {
-                    JoinOperator::Join(constraint)
-                    | JoinOperator::Inner(constraint)
-                    | JoinOperator::Left(constraint)
-                    | JoinOperator::LeftOuter(constraint)
-                    | JoinOperator::Right(constraint)
-                    | JoinOperator::RightOuter(constraint)
-                    | JoinOperator::FullOuter(constraint)
-                    | JoinOperator::CrossJoin(constraint)
-                    | JoinOperator::Semi(constraint)
-                    | JoinOperator::LeftSemi(constraint)
-                    | JoinOperator::RightSemi(constraint)
-                    | JoinOperator::Anti(constraint)
-                    | JoinOperator::LeftAnti(constraint)
-                    | JoinOperator::RightAnti(constraint)
-                    | JoinOperator::StraightJoin(constraint)
-                    | JoinOperator::AsOf { constraint, .. } => constraint,
-                    JoinOperator::CrossApply
-                    | JoinOperator::OuterApply
-                    | JoinOperator::ArrayJoin
-                    | JoinOperator::LeftArrayJoin
-                    | JoinOperator::InnerArrayJoin => return ControlFlow::Break(()),
+                let Some(constraint) = join_constraint(&join.join_operator) else {
+                    return ControlFlow::Break(());
                 };
                 match constraint {
                     // The expression is visited with the rest of the select.
@@ -291,6 +240,70 @@ impl<B: Backend, DB: DatabaseLike> Charges<'_, B, DB> {
         }
         ControlFlow::Continue(scope)
     }
+}
+
+/// The constraint a join is written with, or `None` for a join whose right
+/// side reads its left, which no catalog table does.
+pub(super) const fn join_constraint(operator: &JoinOperator) -> Option<&JoinConstraint> {
+    match operator {
+        JoinOperator::Join(constraint)
+        | JoinOperator::Inner(constraint)
+        | JoinOperator::Left(constraint)
+        | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::Right(constraint)
+        | JoinOperator::RightOuter(constraint)
+        | JoinOperator::FullOuter(constraint)
+        | JoinOperator::CrossJoin(constraint)
+        | JoinOperator::Semi(constraint)
+        | JoinOperator::LeftSemi(constraint)
+        | JoinOperator::RightSemi(constraint)
+        | JoinOperator::Anti(constraint)
+        | JoinOperator::LeftAnti(constraint)
+        | JoinOperator::RightAnti(constraint)
+        | JoinOperator::StraightJoin(constraint)
+        | JoinOperator::AsOf { constraint, .. } => Some(constraint),
+        JoinOperator::CrossApply
+        | JoinOperator::OuterApply
+        | JoinOperator::ArrayJoin
+        | JoinOperator::LeftArrayJoin
+        | JoinOperator::InnerArrayJoin => None,
+    }
+}
+
+/// The binding of the catalog table `factor` names, or `None` when it names
+/// anything a written column name would not resolve against.
+pub(super) fn binding<B: Backend, DB: DatabaseLike>(
+    database: &DB,
+    factor: &TableFactor,
+) -> Option<Binding> {
+    let TableFactor::Table {
+        name, alias, args, ..
+    } = factor
+    else {
+        return None;
+    };
+    // A table function, or columns renamed by the alias, would make a
+    // written name mean something other than the catalog's column.
+    if args.is_some()
+        || alias
+            .as_ref()
+            .is_some_and(|alias| !alias.columns.is_empty())
+    {
+        return None;
+    }
+    let table = written_table_name(name)
+        .and_then(|target| catalog_helpers::table_id_for_name::<B, DB>(database, target))?;
+    let arity = ColumnId::try_from(catalog_helpers::table_arity(database, table).ok()?).ok()?;
+    let own = name.0.last().and_then(ObjectNamePart::as_ident)?;
+    let (name, aliased) = alias
+        .as_ref()
+        .map_or_else(|| (own.clone(), false), |alias| (alias.name.clone(), true));
+    Some(Binding {
+        name,
+        aliased,
+        table,
+        arity,
+    })
 }
 
 impl<B: Backend, DB: DatabaseLike> References<'_, B, DB> {
@@ -466,13 +479,16 @@ impl<B: Backend, DB: DatabaseLike> Visitor for References<'_, B, DB> {
 }
 
 /// The binding a `name.*` names among `bindings`.
-fn qualifier<'b, B: Backend>(bindings: &'b [Binding], name: &ObjectName) -> Option<&'b Binding> {
+pub(super) fn qualifier<'b, B: Backend>(
+    bindings: &'b [Binding],
+    name: &ObjectName,
+) -> Option<&'b Binding> {
     let ident = single_ident(name)?;
     bindings.iter().find(|binding| names::<B>(binding, ident))
 }
 
 /// The one identifier `name` consists of, or [`None`] when it has more parts.
-fn single_ident(name: &ObjectName) -> Option<&Ident> {
+pub(super) fn single_ident(name: &ObjectName) -> Option<&Ident> {
     match name.0.as_slice() {
         [part] => part.as_ident(),
         _ => None,
@@ -481,7 +497,7 @@ fn single_ident(name: &ObjectName) -> Option<&Ident> {
 
 /// The output name a projected expression carries without an alias, when it
 /// is a column reference.
-fn output_name(expr: &Expr) -> Option<&Ident> {
+pub(super) fn output_name(expr: &Expr) -> Option<&Ident> {
     match expr {
         Expr::Identifier(name) => Some(name),
         Expr::CompoundIdentifier(parts) => parts.last(),
@@ -490,7 +506,7 @@ fn output_name(expr: &Expr) -> Option<&Ident> {
 }
 
 /// Whether `written` qualifies a column by `binding`'s name.
-fn names<B: Backend>(binding: &Binding, written: &Ident) -> bool {
+pub(super) fn names<B: Backend>(binding: &Binding, written: &Ident) -> bool {
     B::WRITTEN_TABLE_NAME_CASE.identifiers_match(
         &binding.name.value,
         binding.name.quote_style.is_some(),
@@ -500,7 +516,7 @@ fn names<B: Backend>(binding: &Binding, written: &Ident) -> bool {
 }
 
 /// Whether two written column names name one column.
-fn same_column_name<B: Backend>(left: &Ident, right: &Ident) -> bool {
+pub(super) fn same_column_name<B: Backend>(left: &Ident, right: &Ident) -> bool {
     B::COLUMN_NAME_CASE.identifiers_match(
         &left.value,
         left.quote_style.is_some(),
