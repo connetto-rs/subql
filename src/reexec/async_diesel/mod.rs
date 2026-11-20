@@ -98,7 +98,8 @@ pub enum DieselAsyncError {
 /// Async counterpart of `load_scalar` (module-private there): read the
 /// one-column scalar as a seed row of `kind`, decoded from the type the
 /// database reports for the column. An interval answers [`Value::Missing`]
-/// without a read, so the re-execution escalates.
+/// without a read, so the re-execution escalates. MySQL plans no interval,
+/// so its peer has no such branch.
 #[cfg(feature = "executor-diesel-async-postgres")]
 pub(super) async fn load_scalar_postgres_async(
     conn: &mut diesel_async::AsyncPgConnection,
@@ -120,9 +121,6 @@ pub(super) async fn load_scalar_mysql_async<C: crate::backend::MySqlTableNameCas
     query: &ReadQuery<'_, crate::backend::MySql<C>>,
     kind: ScalarFamily,
 ) -> diesel::QueryResult<Value<crate::backend::MySql<C>>> {
-    if kind == ScalarFamily::Interval {
-        return Ok(Value::Missing);
-    }
     Ok(load_scalar_row_mysql_async(conn, query, &[kind])
         .await?
         .pop()

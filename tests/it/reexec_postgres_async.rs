@@ -1924,3 +1924,42 @@ fn every_scalar_family_reads_as_its_row_cell_async() {
         },
     );
 }
+
+/// An interval scalar answers `Missing`, so its re-execution escalates.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn an_interval_scalar_escalates_async() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let rt = common::multi_thread_rt();
+    let connector = PgAsyncDieselConnector::new(rt.block_on(pg_async_pool(&db.url())));
+    let (value, _) = rt
+        .block_on(connector.execute_scalar(
+            &subql::reexec::ReadQuery::without_binds("SELECT MAX(INTERVAL '1 day') AS v"),
+            ScalarFamily::Interval,
+            &(),
+        ))
+        .expect("an interval read escalates without failing");
+    assert_eq!(value, Value::Missing);
+}
+
+/// A scalar read the database refuses reports the database's error.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_refused_scalar_read_reports_the_database_error_async() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let rt = common::multi_thread_rt();
+    let connector = PgAsyncDieselConnector::new(rt.block_on(pg_async_pool(&db.url())));
+    let error = rt
+        .block_on(connector.execute_scalar(
+            &subql::reexec::ReadQuery::without_binds("SELECT MAX(id) AS v FROM absent"),
+            ScalarFamily::Int,
+            &(),
+        ))
+        .expect_err("the table does not exist");
+    let subql::reexec::DieselAsyncError::Diesel(error) = error else {
+        panic!("expected a database error, got {error:?}");
+    };
+    common::postgres_read_failures::assert_undefined_table(&error);
+}
