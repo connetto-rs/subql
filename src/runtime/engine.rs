@@ -133,6 +133,8 @@ struct CompiledSpec<I: IdTypes, B: Backend> {
     term_seeds: Vec<TermSeed<B>>,
     /// The columns of each table the statement references.
     columns_read: crate::ColumnsRead,
+    /// Where the statement's outputs sit and the type each is stored as.
+    storage_layout: Option<crate::emit::StorageLayout>,
 }
 
 struct AggregateRegistration<I: IdTypes, B: Backend> {
@@ -763,6 +765,7 @@ where
             projection,
             terms,
             columns_read,
+            storage_layout,
         } = compiled;
 
         // A mean is a quotient, so an aggregate that computes one needs the
@@ -806,6 +809,7 @@ where
             term_plans,
             term_seeds,
             columns_read,
+            storage_layout,
         })
     }
 
@@ -1698,6 +1702,7 @@ where
                 evicted: Vec::new(),
                 not_served_because: None,
                 columns_read: compiled.columns_read,
+                storage_layout: compiled.storage_layout,
             });
         }
 
@@ -1799,6 +1804,7 @@ where
             evicted,
             not_served_because: None,
             columns_read: compiled.columns_read,
+            storage_layout: compiled.storage_layout,
         })
     }
 
@@ -1861,12 +1867,17 @@ where
                     }
                 };
                 self.persist_reads_after_change(subscription_id)?;
+                let delivers_aggregates =
+                    matches!(tier, Tier::Scalar { .. } | Tier::GroupedScalar { .. });
+                let (columns_read, storage_layout) =
+                    self.statement_facts_of(source_query, delivers_aggregates);
                 Ok(Registered {
                     subscription_id,
                     tier,
                     evicted: Vec::new(),
                     not_served_because: Some(Self::lift_refusal(refusal)),
-                    columns_read: self.columns_read_of(source_query),
+                    columns_read,
+                    storage_layout,
                 })
             }
             // No tier can serve it either, so the registration is refused
@@ -1921,12 +1932,27 @@ where
         }
     }
 
-    /// The columns of each table `query` references, parsed again because the
-    /// in-process compiler, which reports them while compiling, refused it.
-    fn columns_read_of(&self, query: &crate::reexec::BoundQuery<E::Backend>) -> crate::ColumnsRead {
-        crate::compiler::sql_shape::parse_single_statement(query.sql(), &self.dialect)
-            .map(|statement| crate::ColumnsRead::of::<E::Backend, DB>(&statement, &self.database))
-            .unwrap_or_default()
+    /// The columns of each table `query` references and its storage layout,
+    /// parsed again because the in-process compiler, which reports them
+    /// while compiling, refused it.
+    fn statement_facts_of(
+        &self,
+        query: &crate::reexec::BoundQuery<E::Backend>,
+        delivers_aggregates: bool,
+    ) -> (crate::ColumnsRead, Option<crate::emit::StorageLayout>) {
+        crate::compiler::sql_shape::parse_single_statement(query.sql(), &self.dialect).map_or_else(
+            |_| (crate::ColumnsRead::default(), None),
+            |statement| {
+                (
+                    crate::ColumnsRead::of::<E::Backend, DB>(&statement, &self.database),
+                    crate::compiler::storage_layout::storage_layout::<E::Backend, DB>(
+                        &statement,
+                        &self.database,
+                        delivers_aggregates,
+                    ),
+                )
+            },
+        )
     }
 
     /// The registration-time row-security refusal for one planned tier, or
@@ -1999,12 +2025,14 @@ where
         };
         let tier = self.capture_whole(subscription_id, plan, &registration);
         self.persist_reads_after_change(subscription_id)?;
+        let (columns_read, storage_layout) = self.statement_facts_of(source_query, false);
         Ok(Registered {
             subscription_id,
             tier,
             evicted: Vec::new(),
             not_served_because: Some(Self::lift_refusal(refusal)),
-            columns_read: self.columns_read_of(source_query),
+            columns_read,
+            storage_layout,
         })
     }
 
@@ -3483,6 +3511,7 @@ where
                             evicted: Vec::new(),
                             not_served_because: None,
                             columns_read: compiled_spec.columns_read,
+                            storage_layout: compiled_spec.storage_layout,
                         }));
                         compiled.push(None); // already handled
                         continue;
@@ -3506,6 +3535,7 @@ where
                             evicted: Vec::new(),
                             not_served_because: None,
                             columns_read: compiled_spec.columns_read,
+                            storage_layout: compiled_spec.storage_layout,
                         }));
                         compiled.push(None);
                         continue;
@@ -3528,6 +3558,7 @@ where
                         evicted: Vec::new(),
                         not_served_because: None,
                         columns_read: core::mem::take(&mut compiled_spec.columns_read),
+                        storage_layout: compiled_spec.storage_layout.take(),
                     }));
                     compiled.push(Some(compiled_spec));
                 }

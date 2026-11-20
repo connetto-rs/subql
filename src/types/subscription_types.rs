@@ -889,6 +889,11 @@ pub struct Registered<B: Backend = crate::backend::Postgres> {
     /// maintains it. A caller whose readers hold column privileges answers
     /// `Subject::columns_read` from it.
     pub columns_read: crate::ColumnsRead,
+    /// Where the statement's outputs sit in its select list and the type the
+    /// replica stores each as, which lays a delivered aggregate value and
+    /// its group's values out as the row they belong to. `None` when the
+    /// select list does not resolve to the catalog.
+    pub storage_layout: Option<crate::emit::StorageLayout>,
 }
 
 impl<B: Backend> Registered<B> {

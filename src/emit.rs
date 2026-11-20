@@ -35,6 +35,7 @@
 //! the old and new value of every changed column and so can carry a
 //! primary-key-changing UPDATE that a patchset cannot.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -42,7 +43,7 @@ use alloc::vec::Vec;
 use alloc::sync::Arc;
 use hashbrown::HashMap;
 use maxwell_cdc::Message as MaxwellMessage;
-use sql_traits::prelude::{ColumnLike, DataTypeLike, DatabaseLike, VectorKind};
+use sql_traits::prelude::{ColumnLike, DataTypeLike, DatabaseLike, TableLike, VectorKind};
 use sqlite_diff_rs::maxwell::{ConversionError as MaxwellConversionError, Maxwell};
 #[cfg(feature = "pgoutput-emit")]
 use sqlite_diff_rs::pg_walstream::{
@@ -61,6 +62,11 @@ use sqlite_diff_rs::{
 use crate::backend::ScalarFamily;
 use crate::catalog_helpers;
 use crate::types::TableId;
+
+#[cfg(feature = "pgoutput-emit")]
+mod storage;
+#[cfg(feature = "pgoutput-emit")]
+pub use storage::{StorageEncoder, StorageError};
 
 /// Map a subql catalog [`ScalarFamily`] to the source-independent
 /// [`WireType`] that selects a decoder in `sqlite-diff-rs`'s `digest`.
@@ -264,6 +270,155 @@ fn column_wire_type<DB: DatabaseLike>(database: &DB, column: &DB::Column) -> Opt
                 .map_or(WireType::Decimal, |scale| WireType::ScaledDecimal { scale }),
             other => scalar_kind_to_wire_type(other),
         })
+}
+
+/// The type an output of a subscription is stored as in the replica.
+///
+/// A [`WireType`], plus the one fact a `WireType` leaves out: whether a
+/// `real` is held at PostgreSQL's single precision, which the encoder
+/// needs to hand the decoder the value's own send form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StorageType {
+    wire_type: WireType,
+    single_precision: bool,
+}
+
+impl StorageType {
+    /// Stored as `wire_type`, a `real` at double precision.
+    #[must_use]
+    pub const fn new(wire_type: WireType) -> Self {
+        Self {
+            wire_type,
+            single_precision: false,
+        }
+    }
+
+    /// A `real` held at single precision, PostgreSQL's `real`/`float4`.
+    #[must_use]
+    pub const fn single_precision() -> Self {
+        Self {
+            wire_type: WireType::Real,
+            single_precision: true,
+        }
+    }
+
+    /// The type the replica stores the output as.
+    #[must_use]
+    pub const fn wire_type(self) -> WireType {
+        self.wire_type
+    }
+
+    /// Whether the output is a `real` held at single precision.
+    #[must_use]
+    pub const fn is_single_precision(self) -> bool {
+        self.single_precision
+    }
+
+    /// The SQLite storage class every non-NULL value of this type is stored
+    /// in under [`pgoutput_adapter`] and [`pgbinary_adapter`], the class a
+    /// `STRICT` column holding it declares.
+    ///
+    /// A NaN `real` is stored as NULL, which SQLite holds in any column that
+    /// allows it.
+    #[must_use]
+    pub const fn storage_class(self) -> StorageClass {
+        match self.wire_type {
+            WireType::Bool | WireType::Int | WireType::ScaledDecimal { .. } => {
+                StorageClass::Integer
+            }
+            WireType::Real => StorageClass::Real,
+            WireType::Bytes | WireType::Uuid | WireType::Vector { .. } => StorageClass::Blob,
+            // Text, decimal, temporal, interval, JSON, array and opaque types
+            // are stored as text, and so is a type added to the
+            // non-exhaustive `WireType` until its decoder is named here.
+            _ => StorageClass::Text,
+        }
+    }
+}
+
+/// A SQLite storage class, as a `STRICT` table declares a column's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StorageClass {
+    /// `INTEGER`.
+    Integer,
+    /// `REAL`.
+    Real,
+    /// `TEXT`.
+    Text,
+    /// `BLOB`.
+    Blob,
+}
+
+/// Where a registration's outputs sit in its select list and the type each
+/// is stored as.
+///
+/// Every row a registration delivers is in select order, so `outputs`
+/// types them. An aggregate value arrives apart from its group's values,
+/// and `groups` and `aggregate` place both in that same order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageLayout {
+    pub(crate) outputs: Box<[Option<StorageType>]>,
+    pub(crate) groups: Box<[Option<usize>]>,
+    pub(crate) aggregate: Option<usize>,
+}
+
+impl StorageLayout {
+    /// One entry per output column in select order, a wildcard expanded to
+    /// its table's columns. A column reference takes its column's type and
+    /// the maintained aggregate the type its value is held in. `None` is any
+    /// other expression, which [`StorageEncoder`] stores by its value's
+    /// family.
+    #[must_use]
+    pub fn outputs(&self) -> &[Option<StorageType>] {
+        &self.outputs
+    }
+
+    /// For each value of a delivered group, in [`GroupIdentity::values`]
+    /// order, its position in [`Self::outputs`], or `None` when the select
+    /// list does not project it. Empty for a registration that delivers no
+    /// aggregate values.
+    ///
+    /// [`GroupIdentity::values`]: crate::GroupIdentity::values
+    #[must_use]
+    pub fn groups(&self) -> &[Option<usize>] {
+        &self.groups
+    }
+
+    /// The position in [`Self::outputs`] of the one aggregate whose value
+    /// the registration delivers, or `None` when it delivers rows.
+    #[must_use]
+    pub const fn aggregate(&self) -> Option<usize> {
+        self.aggregate
+    }
+}
+
+/// The [`StorageType`] of column `column_id` of table `table_id`, the type
+/// its rows travel as, or `None` when the catalog has no such column.
+pub(crate) fn column_storage_type<B: crate::backend::Backend, DB: DatabaseLike>(
+    database: &DB,
+    table_id: TableId,
+    column_id: crate::ColumnId,
+) -> Option<StorageType> {
+    let table = database.table_by_id(usize::try_from(table_id).ok()?)?;
+    let column = table
+        .column_by_id(usize::from(column_id), database)
+        .ok()??;
+    Some(
+        match column_wire_type(database, column).unwrap_or(WireType::Opaque) {
+            WireType::Real
+                if catalog_helpers::classify_scalar_kind::<B>(
+                    &column.data_type(database).name(database),
+                )
+                .and_then(|kind| kind.declared_type())
+                    == Some(crate::backend::DeclaredType::Float(
+                        crate::backend::FloatWidth::Single,
+                    )) =>
+            {
+                StorageType::single_precision()
+            }
+            wire_type => StorageType::new(wire_type),
+        },
+    )
 }
 
 /// The [`ArrayElement`] an array of `element` travels as, or `None` when the
