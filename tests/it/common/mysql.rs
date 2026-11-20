@@ -264,3 +264,79 @@ pub fn orders_row(id: i64, price: f64) -> Vec<subql::backend::Value<subql::backe
         Value::String("paid".into()),
     ]
 }
+
+/// Two rows holding one column of every scalar family a MySQL re-read
+/// answers in.
+#[cfg(any(
+    feature = "executor-diesel-mysql",
+    feature = "executor-diesel-async-mysql",
+))]
+pub const FAMILY_CELLS: &str = r#"
+    CREATE TABLE family_cells (
+        id INT PRIMARY KEY, whole BIGINT, narrow SMALLINT, ratio DOUBLE, single FLOAT,
+        flag BOOLEAN, label VARCHAR(16), payload VARBINARY(4), local DATETIME(6),
+        day DATE, moment TIME(6), amount DECIMAL(10, 2), document JSON
+    );
+    INSERT INTO family_cells VALUES
+        (1, -3, 2, 0.5, 0.1, FALSE, 'apple', X'00ff', '2026-11-19 08:00:00', '2026-11-19',
+         '08:00:00.25', 3.10, '{"a": 1}'),
+        (2, 40, 7, 2.25, 0.7, TRUE, 'pear', X'fe01', '2026-11-20 09:30:00.123456', '2026-11-20',
+         '23:59:59.999999', 12.50, '{"b": [true, null]}');
+"#;
+
+/// An extreme over each [`FAMILY_CELLS`] column, projected as `v` as the
+/// re-read planner names it.
+#[cfg(any(
+    feature = "executor-diesel-mysql",
+    feature = "executor-diesel-async-mysql",
+))]
+pub const FAMILY_SCALARS: [(&str, subql::backend::ScalarFamily); 12] = {
+    use subql::backend::ScalarFamily;
+    [
+        (
+            "SELECT MAX(whole) AS v FROM family_cells",
+            ScalarFamily::Int,
+        ),
+        (
+            "SELECT MAX(narrow) AS v FROM family_cells",
+            ScalarFamily::Int,
+        ),
+        (
+            "SELECT MAX(ratio) AS v FROM family_cells",
+            ScalarFamily::Float,
+        ),
+        (
+            "SELECT MAX(single) AS v FROM family_cells",
+            ScalarFamily::Float,
+        ),
+        (
+            "SELECT MAX(flag) AS v FROM family_cells",
+            ScalarFamily::Bool,
+        ),
+        (
+            "SELECT MAX(label) AS v FROM family_cells",
+            ScalarFamily::String,
+        ),
+        (
+            "SELECT MAX(payload) AS v FROM family_cells",
+            ScalarFamily::Bytes,
+        ),
+        (
+            "SELECT MAX(local) AS v FROM family_cells",
+            ScalarFamily::Timestamp,
+        ),
+        ("SELECT MAX(day) AS v FROM family_cells", ScalarFamily::Date),
+        (
+            "SELECT MAX(moment) AS v FROM family_cells",
+            ScalarFamily::Time,
+        ),
+        (
+            "SELECT MAX(amount) AS v FROM family_cells",
+            ScalarFamily::Decimal,
+        ),
+        (
+            "SELECT document AS v FROM family_cells WHERE id = 2",
+            ScalarFamily::Json,
+        ),
+    ]
+};

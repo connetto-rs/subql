@@ -21,17 +21,14 @@ use diesel::QueryResult;
 struct UnsupportedReadBinds;
 
 /// Bridge trait: names the subql [`crate::backend::Backend`] a diesel-backed connector
-/// produces [`Value`]s for.
-///
-/// Constructs those [`Value`]s from the scalar wire shapes diesel's `sql_query`
-/// hands back.
+/// produces [`Value`]s for, and spells its binds.
 ///
 /// Implemented for the three shipped backends ([`crate::backend::Postgres`],
 /// [`crate::backend::MySql`], [`crate::backend::SQLite`]). The standard
-/// carriers are part of the contract rather than a coincidence, which is what
-/// lets the three value constructors be defaults and keeps the generic
-/// [`DieselConnector<C, B>`](super::DieselConnector) backend-agnostic at the
-/// type level while producing correctly typed [`Value<B>`]s.
+/// carriers are part of the contract rather than a coincidence, which keeps
+/// the generic [`DieselConnector<C, B>`](super::DieselConnector)
+/// backend-agnostic at the type level while producing correctly typed
+/// [`Value<B>`]s.
 ///
 /// Stated as supertrait equality, not a `where` clause: a `where` clause on a
 /// trait is not an implied bound, so every `B: DieselBackend` site would have
@@ -40,21 +37,6 @@ struct UnsupportedReadBinds;
 pub trait DieselBackend:
     crate::backend::Backend<Int = i64, Float = f64, String = String> + Sized
 {
-    /// Wrap an `i64` decoded via `Nullable<BigInt>` as [`Value::Int`].
-    #[must_use]
-    fn value_from_i64(x: i64) -> Value<Self> {
-        Value::Int(x)
-    }
-    /// Wrap an `f64` decoded via `Nullable<Double>` as [`Value::Float`].
-    #[must_use]
-    fn value_from_f64(x: f64) -> Value<Self> {
-        Value::Float(x)
-    }
-    /// Wrap a `String` decoded via `Nullable<Text>` as [`Value::String`].
-    #[must_use]
-    fn value_from_string(s: String) -> Value<Self> {
-        Value::String(s)
-    }
     /// Converts a subql value to the shared diesel bind vocabulary.
     fn read_bind(value: &Value<Self>) -> Option<DieselReadBind<'_>>;
     /// SQL type name to cast a `SUM` component to double precision in this
@@ -64,14 +46,6 @@ pub trait DieselBackend:
     #[must_use]
     fn double_cast_type() -> &'static str {
         "DOUBLE PRECISION"
-    }
-    /// SQL type name to cast an integer scalar read to eight bytes, so an
-    /// aggregate over a column narrower than `bigint` decodes through
-    /// `Nullable<BigInt>`. Defaults to `BIGINT` (PostgreSQL, and SQLite via
-    /// `INTEGER` affinity); MySQL overrides to `SIGNED`, its `CAST` spelling.
-    #[must_use]
-    fn int_cast_type() -> &'static str {
-        "BIGINT"
     }
 }
 
@@ -139,9 +113,6 @@ impl<C: crate::backend::MySqlTableNameCase> DieselBackend for crate::backend::My
     fn double_cast_type() -> &'static str {
         "DOUBLE"
     }
-    fn int_cast_type() -> &'static str {
-        "SIGNED"
-    }
 }
 
 #[cfg(feature = "executor-diesel")]
@@ -183,10 +154,6 @@ macro_rules! define_scalar_sql_backend {
         /// change. The matching Rust-side `ToSql` pairings stay explicit at
         /// the consumers, because rustc does not elaborate trait `where`
         /// clauses into generic contexts, so only supertraits survive.
-        ///
-        /// The `RowFieldDecode` peer is deliberately NOT folded in. Scalar
-        /// reads do not need a row decoder, and requiring it would widen the
-        /// scalar call sites for no reason.
         pub trait ScalarSqlBackend:
             diesel::backend::Backend
             + diesel::backend::DieselReserveSpecialization

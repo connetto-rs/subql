@@ -729,11 +729,9 @@ mod tests {
 
 /// A field's value in its canonical Rust spelling, before any backend spells it.
 ///
-/// The row path's counterpart to the scalar path's `i64` / `f64` / `String`:
-/// reading a raw field is the connection's job and produces one of these,
+/// Reading a raw field is the connection's job and produces one of these,
 /// turning it into a [`Value<B>`] is `B`'s job. Keeping those apart is what lets
-/// a connector declare a backend that differs from its connection's, which the
-/// scalar path has always allowed.
+/// a connector declare a backend that differs from its connection's.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[non_exhaustive]
@@ -786,8 +784,7 @@ pub trait RowFieldDecode: Backend {
 
 /// Spell a [`Canonical`] as this backend's own [`Value`].
 ///
-/// The row path's peer of the scalar path's `value_from_i64` and friends, and
-/// the half of decoding that belongs to the backend a caller declared rather
+/// The half of decoding that belongs to the backend a caller declared rather
 /// than to the connection it read through. A backend that spells a payload
 /// differently says so here once: SQLite has no boolean or uuid storage class,
 /// so both arrive as the shape it does carry.

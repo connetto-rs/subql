@@ -38,7 +38,7 @@ use super::connector::boxed_mysql_read_query_owned;
 use super::connector::boxed_postgres_read_query_owned;
 #[cfg(feature = "executor-diesel-async-mysql")]
 use super::connector::LogStatusRow;
-use super::connector::{FloatRow, IntRow, ReadQuery, TextRow};
+use super::connector::ReadQuery;
 #[cfg(feature = "executor-diesel-async-mysql")]
 use super::connector::{ScalarRowError, SessionSetup, Snapshot};
 use crate::backend::{Backend, ScalarFamily, Value};
@@ -95,38 +95,23 @@ pub enum DieselAsyncError {
     Diesel(diesel::result::Error),
 }
 
-/// Async counterpart of `load_scalar` (module-private there): route the
-/// projected column through the `Nullable<BigInt|Double|Text>` row shape
-/// that matches `kind`, then lift into [`Value<B>`]. Decimals travel as text
-/// so precision is not lost through `f64`.
+/// Async counterpart of `load_scalar` (module-private there): read the
+/// one-column scalar as a seed row of `kind`, decoded from the type the
+/// database reports for the column. An interval answers [`Value::Missing`]
+/// without a read, so the re-execution escalates.
 #[cfg(feature = "executor-diesel-async-postgres")]
 pub(super) async fn load_scalar_postgres_async(
     conn: &mut diesel_async::AsyncPgConnection,
     query: &ReadQuery<'_, crate::backend::Postgres>,
     kind: ScalarFamily,
 ) -> diesel::QueryResult<Value<crate::backend::Postgres>> {
-    let value = match kind {
-        ScalarFamily::Int => {
-            let sql = widened_int_sql::<crate::backend::Postgres>(query);
-            let query = ReadQuery::borrowed(&sql, query.binds());
-            boxed_postgres_read_query_owned(&query)?
-                .get_result::<IntRow>(conn)
-                .await?
-                .v
-                .map_or(Value::Null, Value::Int)
-        }
-        ScalarFamily::Float => boxed_postgres_read_query_owned(query)?
-            .get_result::<FloatRow>(conn)
-            .await?
-            .v
-            .map_or(Value::Null, Value::Float),
-        _ => boxed_postgres_read_query_owned(query)?
-            .get_result::<TextRow>(conn)
-            .await?
-            .v
-            .map_or(Value::Null, Value::String),
-    };
-    Ok(value)
+    if kind == ScalarFamily::Interval {
+        return Ok(Value::Missing);
+    }
+    Ok(load_scalar_row_postgres_async(conn, query, &[kind])
+        .await?
+        .pop()
+        .unwrap_or(Value::Missing))
 }
 
 #[cfg(feature = "executor-diesel-async-mysql")]
@@ -135,28 +120,13 @@ pub(super) async fn load_scalar_mysql_async<C: crate::backend::MySqlTableNameCas
     query: &ReadQuery<'_, crate::backend::MySql<C>>,
     kind: ScalarFamily,
 ) -> diesel::QueryResult<Value<crate::backend::MySql<C>>> {
-    let value = match kind {
-        ScalarFamily::Int => {
-            let sql = widened_int_sql::<crate::backend::MySql<C>>(query);
-            let query = ReadQuery::borrowed(&sql, query.binds());
-            boxed_mysql_read_query_owned(&query)?
-                .get_result::<IntRow>(conn)
-                .await?
-                .v
-                .map_or(Value::Null, Value::Int)
-        }
-        ScalarFamily::Float => boxed_mysql_read_query_owned(query)?
-            .get_result::<FloatRow>(conn)
-            .await?
-            .v
-            .map_or(Value::Null, Value::Float),
-        _ => boxed_mysql_read_query_owned(query)?
-            .get_result::<TextRow>(conn)
-            .await?
-            .v
-            .map_or(Value::Null, Value::String),
-    };
-    Ok(value)
+    if kind == ScalarFamily::Interval {
+        return Ok(Value::Missing);
+    }
+    Ok(load_scalar_row_mysql_async(conn, query, &[kind])
+        .await?
+        .pop()
+        .unwrap_or(Value::Missing))
 }
 
 #[cfg(feature = "executor-diesel-async-postgres")]
@@ -397,23 +367,6 @@ impl<S: SessionSetup + Send + Sync, C: crate::backend::MySqlTableNameCase> Async
     }
 }
 
-/// SQL for an eight-byte integer scalar read: wraps the projected column in
-/// the backend's own widening `CAST` (see
-/// [`DieselBackend::int_cast_type`](super::connector::DieselBackend::int_cast_type)),
-/// so an aggregate over a column narrower than `bigint` decodes through
-/// `Nullable<BigInt>`.
-#[cfg(any(
-    feature = "executor-diesel-async-postgres",
-    feature = "executor-diesel-async-mysql"
-))]
-fn widened_int_sql<B: super::connector::DieselBackend>(query: &ReadQuery<'_, B>) -> String {
-    alloc::format!(
-        "SELECT CAST(({}) AS {cast}) AS v",
-        query.sql(),
-        cast = B::int_cast_type()
-    )
-}
-
 /// Check an aggregate seed row's arity and lift it through
 /// [`Backend::decode_group_value`], the same decoding the sync connector
 /// applies.
@@ -505,29 +458,11 @@ fn finish_page<B: crate::backend::Backend>(
 
 #[cfg(all(test, feature = "executor-diesel-async-postgres"))]
 mod shared_loader_helpers_tests {
-    use super::{seed_row_values, widened_int_sql};
-    use crate::backend::{MySql, NamesStoredAsWritten, Postgres, ScalarFamily, Value};
+    use super::seed_row_values;
+    use crate::backend::{Postgres, ScalarFamily, Value};
     use crate::diesel_decode::DynamicRow;
-    use crate::reexec::connector::ReadQuery;
     use alloc::string::ToString as _;
     use alloc::vec;
-
-    #[test]
-    fn the_int_widening_cast_follows_the_backend() {
-        // A wrong spelling makes the widened read fail (PG) or silently
-        // change width (MySQL), so both spellings are pinned here rather
-        // than discovered by a container test.
-        let query = ReadQuery::<Postgres>::without_binds("SELECT amount FROM orders");
-        assert_eq!(
-            widened_int_sql::<Postgres>(&query),
-            "SELECT CAST((SELECT amount FROM orders) AS BIGINT) AS v"
-        );
-        let query = ReadQuery::<MySql<NamesStoredAsWritten>>::without_binds("SELECT 1");
-        assert_eq!(
-            widened_int_sql::<MySql<NamesStoredAsWritten>>(&query),
-            "SELECT CAST((SELECT 1) AS SIGNED) AS v"
-        );
-    }
 
     #[test]
     fn a_seed_row_of_matching_arity_decodes_column_by_column() {
