@@ -1021,7 +1021,7 @@ fn a_membership_rule_describes_its_seed_and_moves_its_admissions() {
         panic!("one membership seed read, got {described:?}")
     };
     assert_eq!(membership.pairs[0].column, "team_id");
-    assert_eq!(membership.member_table, "team_members");
+    assert_eq!(membership.member_table.name, "team_members");
     assert_eq!(membership.member_subject, "user_id");
     assert_eq!(membership.caller, TermCaller::Identity);
     assert_eq!(membership.subject_kind, ScalarFamily::String);
@@ -1597,7 +1597,7 @@ fn a_parent_inheritance_rule_folds_its_parent_gate() {
         "the term compares the child's foreign key"
     );
     assert_eq!(
-        membership.member_table, "projects",
+        membership.member_table.name, "projects",
         "the admission moves through the parent table"
     );
     assert_eq!(
@@ -1821,7 +1821,7 @@ fn a_partial_grade_abac_rule_folds_when_the_floor_allows_it() {
         panic!("one membership seed read, got {described:?}")
     };
     assert_eq!(membership.pairs[0].column, "team_id");
-    assert_eq!(membership.member_table, "team_members");
+    assert_eq!(membership.member_table.name, "team_members");
     assert_eq!(membership.member_subject, "user_id");
     assert_eq!(membership.caller, TermCaller::Identity);
 

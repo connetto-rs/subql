@@ -185,22 +185,61 @@ pub fn table_name<B: crate::backend::Backend, DB: DatabaseLike>(
 
 /// A table's schema and name as the database stores them, as
 /// [`table_name`] answers the name.
-pub(crate) struct StoredTableName<'a> {
-    pub(crate) schema: Option<alloc::borrow::Cow<'a, str>>,
-    pub(crate) name: alloc::borrow::Cow<'a, str>,
+///
+/// Both parts are identifier values, not SQL text, so a table stored as
+/// `Members` is not the `members` that text would fold to. Resolve one back
+/// with [`stored_table_id`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredTableName<'a> {
+    /// The schema the table was declared in, or [`None`] for a table declared
+    /// without one, which resides in the default schema.
+    pub schema: Option<alloc::borrow::Cow<'a, str>>,
+    /// The table's own name.
+    pub name: alloc::borrow::Cow<'a, str>,
 }
 
 impl StoredTableName<'_> {
+    /// The same name holding its own strings.
+    #[must_use]
+    pub fn into_owned(self) -> StoredTableName<'static> {
+        use alloc::borrow::Cow;
+
+        StoredTableName {
+            schema: self.schema.map(|schema| Cow::Owned(schema.into_owned())),
+            name: Cow::Owned(self.name.into_owned()),
+        }
+    }
+
     /// The table with both parts quoted, so reading it back under any
     /// engine's comparison reaches the stored names exactly.
     #[cfg(feature = "membership-term")]
     pub(crate) fn target(&self) -> TargetName<'_> {
-        let target = TargetName::new(&self.name, true);
-        match self.schema.as_deref() {
-            Some(schema) => target.with_schema(schema, true),
-            None => target,
-        }
+        parts_target(self.schema.as_deref(), &self.name)
     }
+}
+
+/// Resolve a table by the schema and name the database stores, as
+/// [`StoredTableName`] carries them, to subql's compact [`TableId`].
+///
+/// Each part is compared as the engine compares a quoted identifier, and no
+/// search path is consulted, so a table stored without a schema is the one
+/// in the default schema rather than whichever table of that name the path
+/// reaches first.
+///
+/// Returns `None` when the catalog holds no such table, when the engine's
+/// comparison reaches more than one, or when the table's index exceeds
+/// `u32::MAX`.
+#[must_use]
+pub fn stored_table_id<B: crate::backend::Backend, DB: DatabaseLike>(
+    database: &DB,
+    stored: &StoredTableName<'_>,
+) -> Option<TableId> {
+    table_id_for_parts(
+        database,
+        stored.schema.as_deref(),
+        &stored.name,
+        B::WRITTEN_TABLE_NAME_CASE,
+    )
 }
 
 /// The schema and name the database stores for `table_id`.

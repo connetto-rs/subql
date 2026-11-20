@@ -1202,7 +1202,7 @@ mod changed_membership {
 mod describe_terms {
     use super::{engine, rows_of, subscribe, translator, Engine, SET_TERM, TERM};
     use sqlparser::dialect::PostgreSqlDialect;
-    use subql::backend::{ScalarFamily, Value};
+    use subql::backend::{Postgres, ScalarFamily, Value};
     use subql::term::TermCaller;
     use subql::testing::{deployment, TestEvent};
     use subql::{catalog_helpers, RegisterError, SubscriptionEngine, SubscriptionRequest, Tier};
@@ -1224,7 +1224,11 @@ mod describe_terms {
             panic!("one compared column, got {:?}", term.pairs);
         };
         assert_eq!(pair.column, "project_id", "the term_values key");
-        assert_eq!(term.member_table, "project_members");
+        assert_eq!(
+            term.member_table.schema, None,
+            "declared in no explicit schema"
+        );
+        assert_eq!(term.member_table.name, "project_members");
         assert_eq!(pair.member_key, "project_id");
         assert_eq!(term.member_subject, "user_id");
         assert_eq!(
@@ -1624,7 +1628,77 @@ mod describe_terms {
             panic!("one membership subquery, got {described:?}");
         };
 
-        assert_eq!(term.member_table, "projectmembers");
+        assert_eq!(term.member_table.name, "projectmembers");
+    }
+
+    /// A membership table outside the search path is described by its schema
+    /// and name, which resolve back to it even beside a same-named table the
+    /// search path reaches first.
+    #[test]
+    fn a_membership_table_under_a_schema_is_described_with_its_schema() {
+        const ORG_DDL: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY);
+         CREATE SCHEMA org;
+         CREATE TABLE org.members(project_id INTEGER, user_id TEXT, PRIMARY KEY(project_id, user_id));
+         CREATE TABLE public.members(project_id INTEGER, user_id TEXT, PRIMARY KEY(project_id, user_id));
+         CREATE TABLE docs(id INTEGER PRIMARY KEY, project_id INTEGER, title TEXT);";
+        const ORG_TERM: &str = "SELECT * FROM docs WHERE project_id IN \
+         (SELECT project_id FROM org.members WHERE user_id = current_setting('app.user_id', true))";
+
+        let catalog = deployment::db(ORG_DDL);
+        let engine: Engine = SubscriptionEngine::new(deployment::db(ORG_DDL), PostgreSqlDialect {})
+            .with_translator(translator());
+        let described = engine
+            .describe_terms(&SubscriptionRequest::new(1u64, ORG_TERM))
+            .expect("the term is describable");
+        let [subql::term::TermDescription::Membership(term)] = described.as_slice() else {
+            panic!("one membership subquery, got {described:?}");
+        };
+
+        assert_eq!(term.member_table.schema.as_deref(), Some("org"));
+        assert_eq!(term.member_table.name, "members");
+        let resolved =
+            catalog_helpers::stored_table_id::<Postgres, _>(&catalog, &term.member_table);
+        assert_eq!(
+            resolved,
+            catalog_helpers::table_id::<Postgres, _>(&catalog, "org.members"),
+            "the table the seed read names"
+        );
+        assert_ne!(
+            resolved,
+            catalog_helpers::table_id::<Postgres, _>(&catalog, "public.members"),
+            "the same-named table the search path reaches"
+        );
+    }
+
+    /// A quoted mixed-case membership table under a schema resolves back by
+    /// its stored spelling rather than a folded one.
+    #[test]
+    fn a_quoted_membership_table_under_a_schema_resolves_to_itself() {
+        const QUOTED_DDL: &str = "CREATE TABLE projects(id INTEGER PRIMARY KEY);
+         CREATE SCHEMA org;
+         CREATE TABLE org.\"Members\"(project_id INTEGER, user_id TEXT, PRIMARY KEY(project_id, user_id));
+         CREATE TABLE org.members(project_id INTEGER, user_id TEXT, PRIMARY KEY(project_id, user_id));
+         CREATE TABLE docs(id INTEGER PRIMARY KEY, project_id INTEGER, title TEXT);";
+        const QUOTED_TERM: &str = "SELECT * FROM docs WHERE project_id IN \
+         (SELECT project_id FROM org.\"Members\" WHERE user_id = current_setting('app.user_id', true))";
+
+        let catalog = deployment::db(QUOTED_DDL);
+        let engine: Engine =
+            SubscriptionEngine::new(deployment::db(QUOTED_DDL), PostgreSqlDialect {})
+                .with_translator(translator());
+        let described = engine
+            .describe_terms(&SubscriptionRequest::new(1u64, QUOTED_TERM))
+            .expect("the term is describable");
+        let [subql::term::TermDescription::Membership(term)] = described.as_slice() else {
+            panic!("one membership subquery, got {described:?}");
+        };
+
+        assert_eq!(term.member_table.schema.as_deref(), Some("org"));
+        assert_eq!(term.member_table.name, "Members");
+        assert_eq!(
+            catalog_helpers::stored_table_id::<Postgres, _>(&catalog, &term.member_table),
+            catalog_helpers::table_id::<Postgres, _>(&catalog, "org.\"Members\""),
+        );
     }
 }
 
@@ -1742,7 +1816,7 @@ mod acting_role {
         let [TermDescription::Membership(term)] = described.as_slice() else {
             panic!("one membership subquery, got {described:?}");
         };
-        assert_eq!(term.member_table, "team_members");
+        assert_eq!(term.member_table.name, "team_members");
         assert_eq!(term.member_subject, "member_id");
 
         engine
