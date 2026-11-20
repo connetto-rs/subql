@@ -435,4 +435,79 @@ mod tests {
             assert!(layout(sql, false).is_none(), "{sql}");
         }
     }
+
+    const SPANS: &str =
+        "CREATE TABLE spans (id INT PRIMARY KEY, took INTERVAL, ratio DOUBLE PRECISION);";
+
+    fn layout_in<B: crate::backend::Backend>(
+        dialect: &dyn sqlparser::dialect::Dialect,
+        sql: &str,
+    ) -> Option<StorageLayout> {
+        let database =
+            ParserDB::parse::<PostgreSqlDialect>(&alloc::format!("{DDL}{SPANS}")).unwrap();
+        let statement = crate::compiler::sql_shape::parse_single_statement(sql, dialect).unwrap();
+        storage_layout::<B, _>(&statement, &database, true)
+    }
+
+    #[test]
+    fn outputs_resolve_through_every_reference_form() {
+        let layout = layout("SELECT *, (title), public.chats.title FROM chats", false).unwrap();
+        assert_eq!(layout.outputs(), [UUID, TEXT, TEXT, TEXT]);
+        let layout = layout_of("SELECT public.chats.title FROM chats c").unwrap();
+        assert_eq!(layout.outputs(), [None]);
+        assert!(layout_of("INSERT INTO chats (title) VALUES ('x')").is_none());
+    }
+
+    #[test]
+    fn calls_other_than_plain_aggregates_have_no_type() {
+        let layout = layout_of(
+            "SELECT current_timestamp, coalesce(title, 'x'), upper(title), count(*) OVER (), \
+             count(*) FROM chats GROUP BY 3, 9, upper(title)",
+        )
+        .unwrap();
+        assert_eq!(layout.outputs(), [None, None, None, None, INT]);
+        assert_eq!(layout.groups(), [Some(2), None, Some(2)]);
+        assert_eq!(layout.aggregate(), Some(4));
+    }
+
+    #[test]
+    fn aggregates_take_the_type_their_backend_answers() {
+        const INTERVAL: Option<StorageType> = Some(StorageType::new(WireType::Interval));
+        const REAL: Option<StorageType> = Some(StorageType::new(WireType::Real));
+        let postgres = PostgreSqlDialect {};
+        let sqlite = sqlparser::dialect::SQLiteDialect {};
+        for (layout, expected) in [
+            (
+                layout_in::<Postgres>(&postgres, "SELECT avg(took) FROM spans"),
+                INTERVAL,
+            ),
+            (
+                layout_in::<Postgres>(&postgres, "SELECT sum(ratio) FROM spans"),
+                REAL,
+            ),
+            (
+                layout_in::<crate::backend::SQLite>(&sqlite, "SELECT avg(id) FROM spans"),
+                REAL,
+            ),
+            (
+                layout_in::<crate::backend::SQLite>(&sqlite, "SELECT sum(id) FROM spans"),
+                None,
+            ),
+        ] {
+            let layout = layout.unwrap();
+            assert_eq!(layout.aggregate(), Some(0));
+            assert_eq!(layout.outputs(), [expected]);
+        }
+    }
+
+    #[test]
+    fn filtered_wildcards_have_no_layout() {
+        let generic = sqlparser::dialect::GenericDialect {};
+        for sql in [
+            "SELECT * EXCLUDE (title) FROM chats",
+            "SELECT c.* EXCLUDE (title) FROM chats c",
+        ] {
+            assert!(layout_in::<Postgres>(&generic, sql).is_none(), "{sql}");
+        }
+    }
 }

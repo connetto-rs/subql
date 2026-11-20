@@ -41,8 +41,8 @@ pub enum StorageError {
         wire_type: WireType,
     },
     /// The value lies outside what PostgreSQL's binary form of its type
-    /// carries, such as a date beyond `i32` days or a decimal scale above
-    /// 16383.
+    /// carries, such as a decimal scale above 16383 or a `jsonb` number
+    /// exponent past `i64`.
     #[error("a {0:?} value outside PostgreSQL's range for its type")]
     OutOfRange(ScalarFamily),
     /// The decoder refused the value, as it would refuse the same value in
@@ -91,7 +91,7 @@ impl StorageEncoder {
     ) -> Result<WireValue<String, Vec<u8>>, StorageError> {
         let cell = match value {
             Value::Missing => return Err(StorageError::Missing),
-            Value::Null => Cell::Null,
+            Value::Null => return Ok(WireValue::Null),
             Value::Bool(flag) => Cell::Bool(*flag),
             Value::Int(integer) => Cell::Int(*integer),
             Value::Float(double) => Cell::Float(*double),
@@ -125,7 +125,7 @@ impl StorageEncoder {
         let cell = match value {
             AggValue::CountStar(count) | AggValue::CountColumn(count) => Cell::Int(*count),
             AggValue::Sum(number) | AggValue::Avg(number) => match number {
-                None => Cell::Null,
+                None => return Ok(WireValue::Null),
                 Some(NumericValue::Integer(integer)) => Cell::Int(*integer),
                 Some(NumericValue::Decimal(decimal)) => Cell::Decimal(decimal),
                 Some(NumericValue::Double(double)) => Cell::Float(*double),
@@ -134,7 +134,10 @@ impl StorageEncoder {
             AggValue::VarPop(real)
             | AggValue::VarSamp(real)
             | AggValue::StddevPop(real)
-            | AggValue::StddevSamp(real) => real.map_or(Cell::Null, Cell::Float),
+            | AggValue::StddevSamp(real) => match real {
+                None => return Ok(WireValue::Null),
+                Some(real) => Cell::Float(*real),
+            },
         };
         self.store(cell, storage_type)
     }
@@ -144,9 +147,7 @@ impl StorageEncoder {
         cell: Cell<'_>,
         storage_type: Option<StorageType>,
     ) -> Result<WireValue<String, Vec<u8>>, StorageError> {
-        let Some(family) = cell.family() else {
-            return Ok(WireValue::Null);
-        };
+        let family = cell.family();
         let storage_type =
             storage_type.unwrap_or_else(|| StorageType::new(scalar_kind_to_wire_type(family)));
         let wire_type = storage_type.wire_type();
@@ -201,7 +202,6 @@ const fn holds(wire_type: WireType, family: ScalarFamily) -> bool {
 
 /// One value, borrowed, in the shape its send form is written from.
 enum Cell<'a> {
-    Null,
     Bool(bool),
     Int(i64),
     Float(f64),
@@ -252,14 +252,9 @@ const PG_EPOCH: chrono::NaiveDate = match chrono::NaiveDate::from_ymd_opt(2000, 
     None => panic!("2000-01-01 is a date"),
 };
 
-const fn epoch() -> chrono::NaiveDateTime {
-    PG_EPOCH.and_time(chrono::NaiveTime::MIN)
-}
-
 impl<'a> Cell<'a> {
-    const fn family(&self) -> Option<ScalarFamily> {
-        Some(match self {
-            Self::Null => return None,
+    const fn family(&self) -> ScalarFamily {
+        match self {
             Self::Bool(_) => ScalarFamily::Bool,
             Self::Int(_) => ScalarFamily::Int,
             Self::Float(_) => ScalarFamily::Float,
@@ -274,14 +269,15 @@ impl<'a> Cell<'a> {
             Self::Json(_) => ScalarFamily::Json,
             Self::Jsonb(_) => ScalarFamily::Jsonb,
             Self::Interval(_) => ScalarFamily::Interval,
-        })
+        }
     }
 
     /// The value in its type's PostgreSQL send form, a float in `float4`'s
     /// when `single_precision`.
     fn send(&self, single_precision: bool) -> Result<Sent<'a>, StorageError> {
+        use chrono::{Datelike as _, Timelike as _};
+
         Ok(match *self {
-            Self::Null => Sent::Borrowed(&[]),
             Self::Bool(flag) => Sent::fixed(&[&[u8::from(flag)]]),
             Self::Int(integer) => Sent::fixed(&[&integer.to_be_bytes()]),
             Self::Float(double) if single_precision => {
@@ -296,21 +292,23 @@ impl<'a> Cell<'a> {
             Self::Text(text) => Sent::Borrowed(text.as_bytes()),
             Self::Bytes(bytes) => Sent::Borrowed(bytes),
             Self::Uuid(uuid) => Sent::Borrowed(uuid),
+            // chrono's range of dates is narrower than what `i64`
+            // microseconds and `i32` days reach, so neither count overflows.
             Self::Timestamp(timestamp) | Self::TimestampTz(timestamp) => {
-                let micros = (timestamp - epoch())
-                    .num_microseconds()
-                    .ok_or(StorageError::OutOfRange(ScalarFamily::Timestamp))?;
+                let micros = timestamp.and_utc().timestamp_micros()
+                    - PG_EPOCH
+                        .and_time(chrono::NaiveTime::MIN)
+                        .and_utc()
+                        .timestamp_micros();
                 Sent::fixed(&[&micros.to_be_bytes()])
             }
             Self::Date(date) => {
-                let days = i32::try_from((date - epoch().date()).num_days())
-                    .map_err(|_| StorageError::OutOfRange(ScalarFamily::Date))?;
+                let days = date.num_days_from_ce() - PG_EPOCH.num_days_from_ce();
                 Sent::fixed(&[&days.to_be_bytes()])
             }
             Self::Time(time) => {
-                let micros = (time - chrono::NaiveTime::MIN)
-                    .num_microseconds()
-                    .ok_or(StorageError::OutOfRange(ScalarFamily::Time))?;
+                let micros = i64::from(time.num_seconds_from_midnight()) * 1_000_000
+                    + i64::from(time.nanosecond() / 1_000);
                 Sent::fixed(&[&micros.to_be_bytes()])
             }
             Self::Interval(interval) => Sent::fixed(&[
@@ -342,9 +340,8 @@ fn jsonb_out(value: &serde_json::Value, out: &mut String) -> Result<(), StorageE
                 .as_str()
                 .parse()
                 .map_err(|_| StorageError::OutOfRange(ScalarFamily::Jsonb))?;
-            decimal
-                .write_plain_string(out)
-                .map_err(|_| StorageError::OutOfRange(ScalarFamily::Jsonb))?;
+            // Writing to a `String` cannot fail.
+            let _ = decimal.write_plain_string(out);
         }
         serde_json::Value::String(text) => escape_json(text, out),
         serde_json::Value::Array(items) => {
@@ -485,8 +482,8 @@ mod tests {
     use sqlite_diff_rs::{ParsedDiffSet, PatchsetOp, Value as WireValue};
     use sqlparser::dialect::PostgreSqlDialect;
 
-    use super::StorageEncoder;
-    use crate::backend::{Postgres, Value};
+    use super::{StorageEncoder, StorageError};
+    use crate::backend::{Postgres, ScalarFamily, Value};
     use crate::emit::{pgoutput_patchset, StorageClass, StorageLayout, StorageType};
     use crate::{catalog_helpers, AggValue, NumericValue};
 
@@ -502,6 +499,7 @@ mod tests {
         ("double precision", "0.1"),
         ("numeric", "-12.50"),
         ("numeric", "0.000120"),
+        ("numeric", "0.00"),
         ("numeric", "123456789012345678901234567890"),
         ("numeric(12,2)", "12.50"),
         ("text", "h\u{e9}llo"),
@@ -521,6 +519,7 @@ mod tests {
             "jsonb",
             r#"{"a": 1, "c": {"d": 0.0, "e": 100}, "bb": [1.50, "x\ny", null, true]}"#,
         ),
+        ("jsonb", r#"{"s": "q\"b\\s\bf\fr\rt\tc\u0001"}"#),
         ("integer[]", "{1,2,3}"),
         ("vector(3)", "[1,2,3]"),
         ("inet", "10.0.0.1/8"),
@@ -695,7 +694,13 @@ mod tests {
                 ))),
                 WireValue::Text("1 day 02:00:00".into()),
             ),
+            (
+                "sum(n)",
+                AggValue::Sum(Some(NumericValue::Decimal(decimal("12E+2")))),
+                WireValue::Text("1200".into()),
+            ),
             ("sum(n)", AggValue::Sum(None), WireValue::Null),
+            ("var_pop(d)", AggValue::VarPop(None), WireValue::Null),
         ];
         for (aggregate, value, expected) in cases {
             let layout = layout(&database, &alloc::format!("SELECT {aggregate} FROM t"));
@@ -707,5 +712,62 @@ mod tests {
                 "{aggregate}"
             );
         }
+    }
+
+    /// A `json` value stores the document's compact text.
+    #[test]
+    fn json_stores_its_document_as_text() {
+        let document = serde_json::from_str(r#"{ "a" : [1, "x"] }"#).unwrap();
+        let stored = StorageEncoder::new()
+            .value(
+                &Value::<Postgres>::Json(document),
+                Some(StorageType::new(sqlite_diff_rs::WireType::Json)),
+            )
+            .unwrap();
+        assert_eq!(stored, WireValue::Text(r#"{"a":[1,"x"]}"#.into()));
+    }
+
+    /// A value with no storage form under its type is refused with the
+    /// reason.
+    #[test]
+    fn values_without_a_storage_form_are_refused() {
+        let database =
+            ParserDB::parse::<PostgreSqlDialect>("CREATE TABLE a (id INT PRIMARY KEY, x INT[]);")
+                .unwrap();
+        let array = layout(&database, "SELECT x FROM a").outputs()[0];
+        let uuid = Some(StorageType::new(sqlite_diff_rs::WireType::Uuid));
+        let jsonb = Some(StorageType::new(sqlite_diff_rs::WireType::Jsonb));
+        let encoder = StorageEncoder::default();
+        assert_eq!(
+            encoder.value(&Value::<Postgres>::Missing, uuid),
+            Err(StorageError::Missing)
+        );
+        assert_eq!(
+            encoder.value(&Value::<Postgres>::Int(1), uuid),
+            Err(StorageError::Mismatch {
+                family: ScalarFamily::Int,
+                wire_type: sqlite_diff_rs::WireType::Uuid,
+            })
+        );
+        assert_eq!(
+            encoder.value(
+                &Value::<Postgres>::Decimal("1E-16384".parse().unwrap()),
+                None
+            ),
+            Err(StorageError::OutOfRange(ScalarFamily::Decimal))
+        );
+        assert_eq!(
+            encoder.value(
+                &Value::<Postgres>::Jsonb(
+                    serde_json::from_str("[1e99999999999999999999]").unwrap()
+                ),
+                jsonb
+            ),
+            Err(StorageError::OutOfRange(ScalarFamily::Jsonb))
+        );
+        assert!(matches!(
+            encoder.value(&Value::<Postgres>::String("{1,".into()), array),
+            Err(StorageError::Decode(_))
+        ));
     }
 }
