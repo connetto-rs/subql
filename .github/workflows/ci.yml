@@ -75,6 +75,10 @@ jobs:
           # neighbour is also on.
           - name: sqlite-cdc
             args: "--all-targets --features sqlite-cdc"
+          # The sync PostgreSQL connector alone, whose tests share helpers
+          # with the async and r2d2 connectors' tests.
+          - name: executor-diesel-postgres
+            args: "--all-targets --features executor-diesel-postgres"
           # Async execution features exercised in isolation, same rationale
           # as the sqlite-cdc row: catch items that should be gated behind
           # the async features but leak out unconditionally, which the

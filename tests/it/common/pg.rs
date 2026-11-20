@@ -284,8 +284,8 @@ pub fn read_wal2json_v2(messages: &[String]) -> Vec<subql::Wal2JsonV2Event> {
 
 /// `row` framed as the only row of a wal2json v2 transaction.
 #[cfg(any(
-    feature = "executor-diesel-async-postgres",
-    feature = "executor-diesel-postgres-r2d2"
+    feature = "executor-diesel-postgres",
+    feature = "executor-diesel-async-postgres"
 ))]
 pub fn in_transaction(row: &str) -> Vec<String> {
     vec![

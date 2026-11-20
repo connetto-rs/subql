@@ -286,8 +286,8 @@ pub use mysql::{maxwell_collect, mysql_database, start_maxwell};
 ))]
 pub use parked_reads::{park_a_mysql_read, park_a_read, PARK};
 #[cfg(any(
-    feature = "executor-diesel-async-postgres",
-    feature = "executor-diesel-postgres-r2d2"
+    feature = "executor-diesel-postgres",
+    feature = "executor-diesel-async-postgres"
 ))]
 pub use pg::in_transaction;
 #[cfg(feature = "postgres-18")]
