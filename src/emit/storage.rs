@@ -496,6 +496,7 @@ mod tests {
         ("integer", "42"),
         ("bigint", "-9007199254740993"),
         ("real", "1.5"),
+        ("real", "0.1"),
         ("double precision", "0.1"),
         ("numeric", "-12.50"),
         ("numeric", "0.000120"),
