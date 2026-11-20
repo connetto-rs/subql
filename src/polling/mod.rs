@@ -89,8 +89,11 @@ pub struct PollingPgCdcConfig {
     /// Ask pgoutput for `binary on`, read once when the source connects.
     /// Default off.
     ///
-    /// A binary source refuses to connect when a published column nests a
-    /// type without a send function, which PostgreSQL cannot send in binary.
+    /// A binary source ends with [`PollingPgCdcError::BinaryUnavailable`]
+    /// when a published column nests a type without a send function, which
+    /// PostgreSQL cannot send in binary. It refuses such a column at connect,
+    /// and reports one added later when a peek raises. The consumer then
+    /// reconnects with `binary(false)`.
     pub binary: bool,
 }
 
@@ -160,7 +163,7 @@ pub enum PollingPgCdcError {
     /// A published column nests a type without a send function, so a
     /// binary stream cannot carry it.
     #[error(transparent)]
-    Unsendable(#[from] crate::wal::UnsendableColumn),
+    BinaryUnavailable(#[from] crate::wal::BinaryUnavailable),
 }
 
 /// Polling-based Postgres CDC source.
@@ -434,7 +437,7 @@ fn refuse_unsendable_columns(
             &column(row, 2)?,
             type_oid,
         ) {
-            return Err(refusal.into());
+            return Err(crate::wal::BinaryUnavailable::from(refusal).into());
         }
     }
     Ok(())

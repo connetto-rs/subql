@@ -116,8 +116,12 @@ pub(super) fn polling_loop(
         polls_issued.fetch_add(1, Ordering::Relaxed);
         let result = match conn.exec(&query) {
             Ok(r) => r,
-            Err(e) => {
-                let _ = event_tx.blocking_send(Err(PollingPgCdcError::Postgres(e)));
+            Err(error) => {
+                // Only a binary peek calls send functions, since every type
+                // has an output function.
+                let error = crate::wal::BinaryUnavailable::mid_stream(&error)
+                    .map_or(PollingPgCdcError::Postgres(error), Into::into);
+                let _ = event_tx.blocking_send(Err(error));
                 return;
             }
         };

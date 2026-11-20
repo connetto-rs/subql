@@ -103,8 +103,12 @@ impl PgStreamingConfig {
 
     /// Ask pgoutput for its binary format (default text).
     ///
-    /// A binary source refuses to connect when a published column nests a
-    /// type without a send function, which PostgreSQL cannot send in binary.
+    /// A binary source ends with [`PgStreamingError::BinaryUnavailable`] when
+    /// a published column nests a type without a send function, which
+    /// PostgreSQL cannot send in binary. It refuses such a column at connect,
+    /// and reports one added later when the server's send call raises.
+    /// The consumer then reconnects from its resume position with
+    /// `binary(false)`.
     #[must_use]
     pub const fn binary(mut self, binary: bool) -> Self {
         self.binary = binary;
@@ -134,7 +138,17 @@ pub enum PgStreamingError {
     /// A published column nests a type without a send function, so a
     /// binary stream cannot carry it.
     #[error(transparent)]
-    Unsendable(#[from] crate::wal::UnsendableColumn),
+    BinaryUnavailable(#[from] crate::wal::BinaryUnavailable),
+}
+
+impl PgStreamingError {
+    /// `error` from the reader, as [`Self::BinaryUnavailable`] when the
+    /// server's send call refused a value. Only a binary stream calls send
+    /// functions, since every type has an output function.
+    fn from_reader(error: ReplicationError) -> Self {
+        crate::wal::BinaryUnavailable::mid_stream(&error)
+            .map_or_else(|| Self::Postgres(error), Self::BinaryUnavailable)
+    }
 }
 
 /// One point where a later timeline branched from `timeline`.
@@ -201,7 +215,7 @@ impl PgStreamingCdcSource {
     ///
     /// # Errors
     ///
-    /// Returns an error if connection setup, identity discovery, slot lookup or replication startup fails, and [`PgStreamingError::Unsendable`] when a binary source's publication sends a column nesting a type without a send function.
+    /// Returns an error if connection setup, identity discovery, slot lookup or replication startup fails, and [`PgStreamingError::BinaryUnavailable`] when a binary source's publication sends a column nesting a type without a send function.
     pub fn connect<DB: DatabaseLike + 'static>(
         config: PgStreamingConfig,
         catalog: DB,
@@ -278,7 +292,7 @@ impl PgStreamingCdcSource {
                         &column.name,
                         column.type_id,
                     ) {
-                        return Err(refusal.into());
+                        return Err(crate::wal::BinaryUnavailable::from(refusal).into());
                     }
                 }
             }
@@ -372,7 +386,7 @@ impl crate::CdcSource for PgStreamingCdcSource {
             }
             let staged = match self.reader.next_event(&self.cancel).await {
                 Ok(change) => self.delivery.stage(change).map_err(PgStreamingError::from),
-                Err(error) => Err(PgStreamingError::from(error)),
+                Err(error) => Err(PgStreamingError::from_reader(error)),
             };
             if let Err(error) = staged {
                 self.terminal = true;

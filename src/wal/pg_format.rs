@@ -19,7 +19,8 @@ pub enum PgCellFormat {
 
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 pub use registry::{
-    ColumnPlan, PgRelationFormat, PgTypeRegistry, PgTypeRegistryError, UnsendableColumn,
+    BinaryUnavailable, ColumnPlan, PgRelationFormat, PgTypeRegistry, PgTypeRegistryError,
+    UnsendableColumn,
 };
 
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
@@ -86,6 +87,34 @@ mod registry {
         #[must_use]
         pub const fn unsendable_type_oid(&self) -> u32 {
             self.unsendable_type_oid
+        }
+    }
+
+    /// A binary pgoutput stream cannot carry a published column, so the
+    /// consumer reconnects with `binary(false)` and stays in text for that
+    /// source.
+    #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+    pub enum BinaryUnavailable {
+        /// Found at connect from the publication and `pg_type`, naming the column.
+        #[error(transparent)]
+        AtConnect(#[from] UnsendableColumn),
+        /// Raised by the server's send call while streaming, naming only the
+        /// type, as for a column added after the source connected.
+        #[error("the server cannot send a published value in binary: {0}")]
+        MidStream(alloc::boxed::Box<pg_walstream::ServerError>),
+    }
+
+    impl BinaryUnavailable {
+        /// The server's `undefined_function` refusal behind `error`, the code
+        /// a send call raises for a nested type without a send function.
+        #[cfg(feature = "pg-streaming")]
+        pub(crate) fn mid_stream(error: &pg_walstream::ReplicationError) -> Option<Self> {
+            error
+                .server_error()
+                .filter(|server| {
+                    server.code == Some(pg_walstream::sqlstate::pg::UNDEFINED_FUNCTION)
+                })
+                .map(|server| Self::MidStream(alloc::boxed::Box::new(server.clone())))
         }
     }
 
