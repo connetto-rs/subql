@@ -1435,7 +1435,7 @@ dependencies = [
 [[package]]
 name = "sqlite-diff-rs"
 version = "0.20.0"
-source = "git+https://github.com/connetto-rs/sqlite-diff-rs?branch=main#6f085b7b705d6551265e7a168d08058b4221e757"
+source = "git+https://github.com/connetto-rs/sqlite-diff-rs?branch=main#1d704201ff7df2e1fa7c385e0d6e2b43e875d30f"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
