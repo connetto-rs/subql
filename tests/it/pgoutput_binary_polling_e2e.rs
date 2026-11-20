@@ -11,13 +11,14 @@ use crate::common::{self, decisions};
 use std::time::Duration;
 
 use diesel::{sql_query, RunQueryDsl};
-use pg_walstream::{ColumnValue, EventType};
+use pg_walstream::{sqlstate::pg, ColumnValue, EventType, ServerError};
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::{CdcEvent, RowKind, Value};
 use subql::{
-    catalog_helpers, CdcSource, DefaultIds, EventKind, PgChangeEvent, PgStreamingCdcSource,
-    PgStreamingConfig, PollingPgCdcConfig, PollingPgCdcSource, SubscriptionEngine,
+    catalog_helpers, BinaryUnavailable, CdcSource, DefaultIds, EventKind, PgChangeEvent,
+    PgCommitPosition, PgStreamingCdcSource, PgStreamingConfig, PgStreamingError,
+    PollingPgCdcConfig, PollingPgCdcError, PollingPgCdcSource, SourceItemOf, SubscriptionEngine,
     SubscriptionRequest,
 };
 
@@ -325,7 +326,9 @@ fn a_binary_source_refuses_a_column_nesting_a_type_without_send() {
                     .await
                     .err()
                     .expect("the binary source refuses");
-            let subql::PollingPgCdcError::Unsendable(column) = refusal else {
+            let PollingPgCdcError::BinaryUnavailable(BinaryUnavailable::AtConnect(column)) =
+                refusal
+            else {
                 panic!("expected an unsendable column, got {refusal}");
             };
             assert_eq!(
@@ -349,7 +352,8 @@ fn a_binary_source_refuses_a_column_nesting_a_type_without_send() {
                     .await
                     .err()
                     .expect("the binary push source refuses");
-            let subql::PgStreamingError::Unsendable(column) = refusal else {
+            let PgStreamingError::BinaryUnavailable(BinaryUnavailable::AtConnect(column)) = refusal
+            else {
                 panic!("expected an unsendable column, got {refusal}");
             };
             assert_eq!(
@@ -370,6 +374,201 @@ fn a_binary_source_refuses_a_column_nesting_a_type_without_send() {
                     .await
                     .expect("the column list leaves the column out of the push source"),
             );
+        });
+
+    common::drop_slot(&mut setup, &slot);
+}
+
+/// `grants` as the catalog names it once `ADD_ACLS` has run.
+const GRANTS_WITH_ACLS: &str = "CREATE TABLE grants (id INT PRIMARY KEY, acls ACLITEM[]);";
+
+/// Adds a column a binary stream cannot carry after the source has
+/// connected, which the connect-time check therefore never saw.
+const ADD_ACLS: &str = "ALTER TABLE grants ADD COLUMN acls ACLITEM[]";
+
+/// `grants` before its `aclitem[]` column exists, published as `grants_pub`,
+/// with the slots `slots` created before its first row is written.
+fn grants_before_acls(db: &common::PgDatabase, slots: &[&str]) -> diesel::PgConnection {
+    let mut setup = db.connect();
+    // DDL, which the query DSL does not express.
+    sql_query("CREATE TABLE grants (id INT PRIMARY KEY)")
+        .execute(&mut setup)
+        .expect("create table");
+    common::create_publication(&mut setup, "grants_pub", "grants");
+    for slot in slots {
+        common::create_pgoutput_slot(&mut setup, slot);
+    }
+    sql_query("INSERT INTO grants (id) VALUES (1)")
+        .execute(&mut setup)
+        .expect("first row");
+    setup
+}
+
+/// Add the `aclitem[]` column and write a row holding a value in it.
+fn add_acls_and_write_one(setup: &mut diesel::PgConnection) {
+    sql_query(ADD_ACLS).execute(setup).expect("add column");
+    // `aclitem` has no diesel SQL type, so the DML is raw.
+    sql_query(
+        "INSERT INTO grants (id, acls) VALUES (2, ARRAY[\
+         makeaclitem(0, (SELECT oid FROM pg_roles WHERE rolname = current_user), 'SELECT', FALSE)])",
+    )
+        .execute(setup)
+        .expect("second row");
+}
+
+/// The next item of `source`, failing the test past ten seconds.
+async fn next_of<S: CdcSource>(source: &mut S) -> Result<Option<SourceItemOf<S>>, S::Error> {
+    tokio::time::timeout(Duration::from_secs(10), source.next_item())
+        .await
+        .expect("an item within the timeout")
+}
+
+/// The position of the first commit `source` yields, after exactly one row.
+async fn first_commit<S: CdcSource<Event = PgChangeEvent, Commit = subql::PgCommit>>(
+    source: &mut S,
+) -> PgCommitPosition {
+    let mut rows = 0;
+    loop {
+        match next_of(source)
+            .await
+            .expect("the source reads")
+            .expect("the source is open")
+        {
+            subql::SourceItem::Event(_) => rows += 1,
+            subql::SourceItem::Relation(_) => {}
+            subql::SourceItem::Commit(commit) => {
+                assert_eq!(rows, 1, "the first transaction writes one row");
+                return commit.position();
+            }
+        }
+    }
+}
+
+/// The error `source` ends with, after yielding no further row.
+async fn error_after_no_row<S: CdcSource>(source: &mut S) -> S::Error {
+    loop {
+        match next_of(source).await {
+            Ok(Some(subql::SourceItem::Relation(_))) => {}
+            Ok(Some(_)) => panic!("a row or commit past the refused row"),
+            Ok(None) => panic!("the source closed without an error"),
+            Err(error) => return error,
+        }
+    }
+}
+
+/// The first row `source` yields.
+async fn first_row<S: CdcSource<Event = PgChangeEvent>>(source: &mut S) -> PgChangeEvent {
+    loop {
+        let item = next_of(source)
+            .await
+            .expect("the source reads")
+            .expect("the source is open");
+        if let Some(event) = item.into_event() {
+            return event;
+        }
+    }
+}
+
+/// The server's refusal to send a value in binary, which names only the type.
+fn assert_mid_stream_refusal(server: &ServerError) {
+    assert_eq!(server.code, Some(pg::UNDEFINED_FUNCTION), "{server}");
+    assert!(server.message.contains("aclitem"), "{server}");
+}
+
+/// A column added after a binary push source connects reaches the server's
+/// send call, which ends the stream. The source reports it as binary
+/// unavailable after the rows before it, and a text source resumed from the
+/// last delivered commit reads the refused row.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_binary_push_source_reports_a_column_added_mid_stream() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let binary_slot = db.slot("subql_binary_mid_stream");
+    // The walsender releases a slot only after it reports the error, and the
+    // stream yields nothing at that release, so the text source resumes on a
+    // second slot created at the same position.
+    let text_slot = db.slot("subql_text_mid_stream");
+    let mut setup = grants_before_acls(&db, &[&binary_slot, &text_slot]);
+    let catalog = || ParserDB::parse::<PostgreSqlDialect>(GRANTS_WITH_ACLS).expect("parse DDL");
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let config = PgStreamingConfig::new(db.url(), &binary_slot, "grants_pub").binary(true);
+            let mut binary = PgStreamingCdcSource::connect(config, catalog())
+                .await
+                .expect("no published column is refused yet");
+            let delivered = first_commit(&mut binary).await;
+            add_acls_and_write_one(&mut setup);
+
+            let error = error_after_no_row(&mut binary).await;
+            let PgStreamingError::BinaryUnavailable(BinaryUnavailable::MidStream(server)) = &error
+            else {
+                panic!("expected a mid-stream refusal, got {error}");
+            };
+            assert_mid_stream_refusal(server);
+            drop(binary);
+
+            let config =
+                PgStreamingConfig::new(db.url(), &text_slot, "grants_pub").start(Some(delivered));
+            let mut text = PgStreamingCdcSource::connect(config, catalog())
+                .await
+                .expect("text source");
+            let row = first_row(&mut text).await;
+            assert_eq!(carried(&row, "acls"), Some("text"), "the refused row");
+        });
+
+    for slot in [&binary_slot, &text_slot] {
+        common::drop_slot(&mut setup, slot);
+    }
+}
+
+/// A column added after a binary polling source connects fails its peek.
+/// The source reports it as binary unavailable, and a text source on the
+/// same slot, which the failed peek released, reads the refused row once
+/// the delivered commit is acknowledged.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_binary_polling_source_reports_a_column_added_mid_stream() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let slot = db.slot("subql_binary_polling_mid_stream");
+    let mut setup = grants_before_acls(&db, &[&slot]);
+    let catalog = || ParserDB::parse::<PostgreSqlDialect>(GRANTS_WITH_ACLS).expect("parse DDL");
+    let config = || {
+        PollingPgCdcConfig::new(db.url(), &slot, "grants_pub")
+            .poll_interval(Duration::from_millis(20))
+    };
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut binary = PollingPgCdcSource::connect(config().binary(true), catalog())
+                .await
+                .expect("no published column is refused yet");
+            let delivered = first_commit(&mut binary).await;
+            // The loop consumes an acknowledged commit before its next peek.
+            binary.ack(delivered).await.expect("ack");
+            add_acls_and_write_one(&mut setup);
+
+            let error = error_after_no_row(&mut binary).await;
+            let PollingPgCdcError::BinaryUnavailable(BinaryUnavailable::MidStream(server)) = &error
+            else {
+                panic!("expected a mid-stream refusal, got {error}");
+            };
+            assert_mid_stream_refusal(server);
+            drop(binary);
+
+            let mut text = PollingPgCdcSource::connect(config(), catalog())
+                .await
+                .expect("text source");
+            let row = first_row(&mut text).await;
+            assert_eq!(carried(&row, "acls"), Some("text"), "the refused row");
         });
 
     common::drop_slot(&mut setup, &slot);
