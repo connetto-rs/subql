@@ -9,13 +9,10 @@ use super::{
 };
 use crate::backend::{ScalarFamily, Value};
 use alloc::boxed::Box;
-use alloc::string::String;
 use core::cell::RefCell;
 use diesel::query_builder::{BoxedSqlQuery, SqlQuery};
 use diesel::query_dsl::LoadQuery;
-use diesel::sql_types::{
-    BigInt, Binary, Bool, Date, Double, Json, Nullable, Numeric, Text, Time, Timestamp,
-};
+use diesel::sql_types::{BigInt, Binary, Bool, Date, Double, Json, Numeric, Text, Time, Timestamp};
 use diesel::{Connection, QueryResult, RunQueryDsl};
 
 /// Returned when the aggregate seed row has the wrong column count.
@@ -43,10 +40,10 @@ pub enum ReadShapeError {
 ///   [`crate::backend::SQLite`] for `SqliteConnection`,
 ///   [`crate::backend::MySql`] for `MysqlConnection`).
 ///
-/// Bounds on the [`Connector`] impl: an HRTB on [`diesel::sql_query`] so the
-/// nullable scalar rows (`Nullable<BigInt>`, `Nullable<Double>`,
-/// `Nullable<Text>`) decode. PostgreSQL, MySQL, and SQLite all satisfy
-/// these.
+/// Bounds on the [`Connector`] impl: every read, a scalar one included,
+/// decodes into a [`DynamicRow`](crate::diesel_decode::DynamicRow) from the
+/// types the database reports for its columns. PostgreSQL, MySQL, and SQLite
+/// all satisfy these.
 ///
 /// # Errors
 ///
@@ -89,34 +86,12 @@ impl<C: Connection, B: DieselBackend, S: SessionSetup> DieselConnector<C, B, S> 
     }
 }
 
-#[cfg(feature = "executor-diesel")]
-#[derive(diesel::QueryableByName)]
-pub struct IntRow {
-    #[diesel(sql_type = Nullable<BigInt>)]
-    pub v: Option<i64>,
-}
-
-#[cfg(feature = "executor-diesel")]
-#[derive(diesel::QueryableByName)]
-pub struct FloatRow {
-    #[diesel(sql_type = Nullable<Double>)]
-    pub v: Option<f64>,
-}
-
-#[cfg(feature = "executor-diesel")]
-#[derive(diesel::QueryableByName)]
-pub struct TextRow {
-    #[diesel(sql_type = Nullable<Text>)]
-    pub v: Option<String>,
-}
-
-/// Route the projected column through the `Nullable<BigInt|Double|Text>`
-/// row shape that matches `kind`, then lift into [`Value<B>`].
+/// Read a one-column scalar the way the row path reads a cell, decoding it
+/// from the type the database reports for the column, then lift it into
+/// `kind` through [`Backend::decode_group_value`](crate::backend::Backend::decode_group_value).
 ///
-/// Aggregate-only column kinds ([`ScalarFamily::Int`] / [`ScalarFamily::Float`])
-/// map to the numeric rows; every other kind reads through the `Text`
-/// row. Decimals are carried as text through this path so precision is
-/// not lost through `f64`.
+/// An interval scalar answers [`Value::Missing`] without a read, so the
+/// re-execution escalates.
 #[cfg(feature = "executor-diesel")]
 pub(super) fn load_scalar<C, B>(
     conn: &mut C,
@@ -125,8 +100,8 @@ pub(super) fn load_scalar<C, B>(
 ) -> QueryResult<Value<B>>
 where
     C: Connection,
-    C::Backend: super::ScalarSqlBackend,
-    B: DieselBackend,
+    C::Backend: super::ScalarSqlBackend + crate::diesel_decode::RowFieldDecode,
+    B: DieselBackend + crate::diesel_decode::SpellCanonical,
     bool: diesel::serialize::ToSql<Bool, C::Backend>,
     i64: diesel::serialize::ToSql<BigInt, C::Backend>,
     f64: diesel::serialize::ToSql<Double, C::Backend>,
@@ -138,47 +113,14 @@ where
     for<'b> &'b bigdecimal::BigDecimal: diesel::serialize::ToSql<Numeric, C::Backend>,
     for<'b> &'b serde_json::Value: diesel::serialize::ToSql<Json, C::Backend>,
     for<'q> BoxedSqlQuery<'q, C::Backend, SqlQuery>:
-        LoadQuery<'q, C, IntRow> + LoadQuery<'q, C, FloatRow> + LoadQuery<'q, C, TextRow>,
+        LoadQuery<'q, C, crate::diesel_decode::DynamicRow<B>>,
 {
-    let value = match kind {
-        ScalarFamily::Int => {
-            let widened = alloc::format!(
-                "SELECT CAST(({}) AS {cast}) AS v",
-                query.sql(),
-                cast = B::int_cast_type()
-            );
-            let widened = ReadQuery::borrowed(&widened, query.binds());
-            let value = boxed_read_query::<C::Backend, B>(&widened)?
-                .get_result::<IntRow>(conn)?
-                .v
-                .map_or(Value::Null, B::value_from_i64);
-            value
-        }
-        ScalarFamily::Float => boxed_read_query::<C::Backend, B>(query)?
-            .get_result::<FloatRow>(conn)?
-            .v
-            .map_or(Value::Null, B::value_from_f64),
-        ScalarFamily::Bool
-        | ScalarFamily::String
-        | ScalarFamily::Bytes
-        | ScalarFamily::Uuid
-        | ScalarFamily::Timestamp
-        | ScalarFamily::TimestampTz
-        | ScalarFamily::Date
-        | ScalarFamily::Time
-        | ScalarFamily::Decimal
-        | ScalarFamily::Json
-        | ScalarFamily::Jsonb => boxed_read_query::<C::Backend, B>(query)?
-            .get_result::<TextRow>(conn)?
-            .v
-            .map_or(Value::Null, B::value_from_string),
-        // subql holds no interval value, so the read escalates.
-        ScalarFamily::Interval => Value::Missing,
-    };
-    Ok(
-        B::decode_group_value(crate::backend::ValueKind::from(kind), value)
-            .unwrap_or(Value::Missing),
-    )
+    if kind == ScalarFamily::Interval {
+        return Ok(Value::Missing);
+    }
+    Ok(load_scalar_row::<C, B>(conn, query, &[kind])?
+        .pop()
+        .unwrap_or(Value::Missing))
 }
 
 /// Decodes one aggregate seed row using its runtime database types.
@@ -242,14 +184,9 @@ where
     for<'b> &'b chrono::NaiveTime: diesel::serialize::ToSql<Time, C::Backend>,
     for<'b> &'b bigdecimal::BigDecimal: diesel::serialize::ToSql<Numeric, C::Backend>,
     for<'b> &'b serde_json::Value: diesel::serialize::ToSql<Json, C::Backend>,
-    for<'q> SqlQuery: LoadQuery<'q, C, IntRow>
-        + LoadQuery<'q, C, FloatRow>
-        + LoadQuery<'q, C, TextRow>
-        + diesel::query_dsl::methods::ExecuteDsl<C, C::Backend>,
-    for<'q> BoxedSqlQuery<'q, C::Backend, SqlQuery>: LoadQuery<'q, C, IntRow>
-        + LoadQuery<'q, C, FloatRow>
-        + LoadQuery<'q, C, TextRow>
-        + LoadQuery<'q, C, crate::diesel_decode::DynamicRow<B>>,
+    SqlQuery: diesel::query_dsl::methods::ExecuteDsl<C, C::Backend>,
+    for<'q> BoxedSqlQuery<'q, C::Backend, SqlQuery>:
+        LoadQuery<'q, C, crate::diesel_decode::DynamicRow<B>>,
 {
     type AuthContext = S;
     type Error = diesel::result::Error;

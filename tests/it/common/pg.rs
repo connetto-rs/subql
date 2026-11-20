@@ -389,3 +389,79 @@ pub fn orders_catalog() -> sql_traits::structs::ParserDB {
     sql_traits::structs::ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(ORDERS_DDL)
         .expect("parse DDL")
 }
+
+/// Two rows holding one column of every scalar family a re-read answers in.
+#[cfg(any(
+    feature = "executor-diesel-postgres",
+    feature = "executor-diesel-async-postgres",
+    feature = "executor-diesel-postgres-r2d2",
+))]
+pub const FAMILY_CELLS: &str = r#"
+    CREATE TABLE family_cells (
+        id INT PRIMARY KEY, whole BIGINT, narrow SMALLINT, ratio DOUBLE PRECISION,
+        single REAL, flag BOOLEAN, label TEXT, payload BYTEA, token UUID, local TIMESTAMP,
+        observed TIMESTAMPTZ, day DATE, moment TIME, amount NUMERIC(10, 2), document JSON,
+        binary_document JSONB
+    );
+    INSERT INTO family_cells VALUES
+        (1, -3, 2, 0.5, 0.1, FALSE, 'apple', '\x00ff', '00000000-0000-0000-0000-000000000001',
+         '2026-11-19 08:00:00', '2026-11-19 08:00:00+02', '2026-11-19', '08:00:00.25', 3.10,
+         '{"a": 1}', '{"a": 1}'),
+        (2, 40, 7, 2.25, 0.7, TRUE, 'pear', '\xfe01', 'ffffffff-0000-0000-0000-000000000002',
+         '2026-11-20 09:30:00.123456', '2026-11-20 09:30:00.123456+00', '2026-11-20',
+         '23:59:59.999999', 12.50, '{"b": [true, null]}', '{"b": [true, null]}');
+"#;
+
+/// A scalar read over [`FAMILY_CELLS`] for each family, an extreme where
+/// PostgreSQL defines `MAX` for the type and the greatest cell otherwise,
+/// projected as `v` as the re-read planner names it.
+#[cfg(any(
+    feature = "executor-diesel-postgres",
+    feature = "executor-diesel-async-postgres",
+    feature = "executor-diesel-postgres-r2d2",
+))]
+pub const FAMILY_SCALARS: [(&str, subql::backend::ScalarFamily); 15] =
+    {
+        use subql::backend::ScalarFamily;
+        [
+        ("SELECT MAX(whole) AS v FROM family_cells", ScalarFamily::Int),
+        ("SELECT MAX(narrow) AS v FROM family_cells", ScalarFamily::Int),
+        ("SELECT MAX(ratio) AS v FROM family_cells", ScalarFamily::Float),
+        ("SELECT MAX(single) AS v FROM family_cells", ScalarFamily::Float),
+        (
+            "SELECT flag AS v FROM family_cells ORDER BY flag DESC LIMIT 1",
+            ScalarFamily::Bool,
+        ),
+        ("SELECT MAX(label) AS v FROM family_cells", ScalarFamily::String),
+        (
+            "SELECT payload AS v FROM family_cells ORDER BY payload DESC LIMIT 1",
+            ScalarFamily::Bytes,
+        ),
+        (
+            "SELECT token AS v FROM family_cells ORDER BY token DESC LIMIT 1",
+            ScalarFamily::Uuid,
+        ),
+        (
+            "SELECT MAX(local) AS v FROM family_cells",
+            ScalarFamily::Timestamp,
+        ),
+        (
+            "SELECT MAX(observed) AS v FROM family_cells",
+            ScalarFamily::TimestampTz,
+        ),
+        ("SELECT MAX(day) AS v FROM family_cells", ScalarFamily::Date),
+        ("SELECT MAX(moment) AS v FROM family_cells", ScalarFamily::Time),
+        (
+            "SELECT MAX(amount) AS v FROM family_cells",
+            ScalarFamily::Decimal,
+        ),
+        (
+            "SELECT document AS v FROM family_cells WHERE id = 2",
+            ScalarFamily::Json,
+        ),
+        (
+            "SELECT binary_document AS v FROM family_cells ORDER BY binary_document DESC LIMIT 1",
+            ScalarFamily::Jsonb,
+        ),
+    ]
+    };

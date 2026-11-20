@@ -76,13 +76,6 @@ pub use diesel_connector::DieselConnector;
 pub use diesel_connector::ReadShapeError;
 #[cfg(feature = "executor-diesel")]
 pub use diesel_failure_class::DieselFailureClass;
-// The scalar row shapes travel to the async connectors only, so the
-// re-export follows their backend features rather than `executor-diesel`.
-#[cfg(any(
-    feature = "executor-diesel-async-postgres",
-    feature = "executor-diesel-async-mysql"
-))]
-pub use diesel_connector::{FloatRow, IntRow, TextRow};
 #[cfg(feature = "executor-diesel-async-mysql")]
 pub use mysql_diesel_connector::LogStatusRow;
 // The parse is shared with the async MySQL connector, which reads the same

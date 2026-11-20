@@ -840,3 +840,30 @@ fn a_sync_cursor_pages_one_snapshot_of_a_keyless_result() {
         "the closed cursor's snapshot is gone"
     );
 }
+
+/// A scalar re-read answers each family in that family, as the row path
+/// decodes the same cell, whatever its binary send form is.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn every_scalar_family_reads_as_its_row_cell() {
+    use diesel::connection::SimpleConnection as _;
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.connect()
+        .batch_execute(common::pg::FAMILY_CELLS)
+        .expect("family cells");
+    let connector = PgDieselConnector::new(db.connect());
+    common::reexec::assert_scalars_match_rows(
+        &common::pg::FAMILY_SCALARS,
+        |query, family| {
+            connector
+                .execute_scalar(query, family, &())
+                .map(|(value, _)| value)
+        },
+        |query| {
+            connector
+                .read_page(query, 1 << 20, &())
+                .map(|page| page.value.rows)
+        },
+    );
+}

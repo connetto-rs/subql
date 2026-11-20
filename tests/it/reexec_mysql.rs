@@ -555,3 +555,29 @@ fn a_sync_cursor_pages_one_snapshot_of_a_keyless_result() {
         Err(CursorError::Unknown(id)) if id == cursor
     ));
 }
+
+/// A scalar re-read answers each family in that family, as the row path
+/// decodes the same cell.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn every_scalar_family_reads_as_its_row_cell() {
+    common::assert_docker_available();
+    let db = common::mysql_database();
+    db.connect()
+        .batch_execute(common::mysql::FAMILY_CELLS)
+        .expect("family cells");
+    let connector = MysqlDieselConnector::new(db.connect());
+    common::reexec::assert_scalars_match_rows(
+        &common::mysql::FAMILY_SCALARS,
+        |query, family| {
+            connector
+                .execute_scalar(query, family, &())
+                .map(|(value, _)| value)
+        },
+        |query| {
+            connector
+                .read_page(query, 1 << 20, &())
+                .map(|page| page.value.rows)
+        },
+    );
+}

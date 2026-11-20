@@ -1898,3 +1898,29 @@ fn a_seed_row_of_the_wrong_width_is_refused_async_pg() {
         );
     });
 }
+
+/// A scalar re-read answers each family in that family, as the row path
+/// decodes the same cell, whatever its binary send form is.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn every_scalar_family_reads_as_its_row_cell_async() {
+    use diesel::connection::SimpleConnection as _;
+    common::assert_docker_available();
+    let db = common::pg_database();
+    db.connect()
+        .batch_execute(common::pg::FAMILY_CELLS)
+        .expect("family cells");
+    let rt = common::multi_thread_rt();
+    let connector = PgAsyncDieselConnector::new(rt.block_on(pg_async_pool(&db.url())));
+    common::reexec::assert_scalars_match_rows(
+        &common::pg::FAMILY_SCALARS,
+        |query, family| {
+            rt.block_on(connector.execute_scalar(query, family, &()))
+                .map(|(value, _)| value)
+        },
+        |query| {
+            rt.block_on(connector.read_page(query, 1 << 20, &()))
+                .map(|page| page.value.rows)
+        },
+    );
+}

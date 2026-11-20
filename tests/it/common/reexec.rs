@@ -33,3 +33,43 @@ where
         other => panic!("expected the scalar re-execution tier for {sql}, got {other:?}"),
     }
 }
+
+/// Require each scalar read in `cases` to answer, through `scalar`, the value
+/// `page` reads for the same cell, which the row path decodes from the type
+/// the database reports for the column.
+pub fn assert_scalars_match_rows<B, Error>(
+    cases: &[(&str, subql::backend::ScalarFamily)],
+    mut scalar: impl FnMut(
+        &subql::reexec::ReadQuery<'_, B>,
+        subql::backend::ScalarFamily,
+    ) -> Result<subql::backend::Value<B>, Error>,
+    mut page: impl FnMut(
+        &subql::reexec::ReadQuery<'_, B>,
+    ) -> Result<Vec<Vec<subql::backend::Value<B>>>, Error>,
+) where
+    B: subql::backend::Backend,
+    subql::backend::Value<B>: PartialEq + core::fmt::Debug,
+    Error: core::fmt::Debug,
+{
+    let mismatches: Vec<String> = cases
+        .iter()
+        .filter_map(|&(sql, family)| {
+            let query = subql::reexec::ReadQuery::without_binds(sql);
+            let rows = page(&query).unwrap_or_else(|error| panic!("{sql} as a page: {error:?}"));
+            assert_eq!(rows.len(), 1, "{sql} reads one row");
+            assert_ne!(
+                rows[0][0],
+                subql::backend::Value::Null,
+                "{sql} reads a cell"
+            );
+            match scalar(&query, family) {
+                Ok(value) if value == rows[0][0] => None,
+                answer => Some(format!(
+                    "{sql} as {family:?}: scalar {answer:?}, row {:?}",
+                    rows[0][0]
+                )),
+            }
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
