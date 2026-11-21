@@ -379,4 +379,62 @@ mod tests {
             );
         }
     }
+
+    /// wal2json writes an array column as `PostgreSQL`'s array text, in both
+    /// formats, so both read the same elements.
+    #[test]
+    fn an_array_cell_reads_its_elements_in_both_formats() {
+        use crate::backend::ArrayCell;
+
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE notes (id INT PRIMARY KEY, editors TEXT[], scores INT[]);",
+        )
+        .expect("parse DDL");
+        let v2 = one_v2(
+            br#"{"action":"I","schema":"public","table":"notes",
+                 "columns":[{"name":"id","type":"integer","value":7},
+                            {"name":"editors","type":"text[]","value":"{alice,NULL,\"b c\"}"},
+                            {"name":"scores","type":"integer[]","value":null}]}"#,
+        );
+        let v1 = parse_wal2json_v1(
+            br#"{"change":[{"kind":"insert","schema":"public","table":"notes",
+                 "columnnames":["id","editors","scores"],
+                 "columntypes":["integer","text[]","integer[]"],
+                 "columnvalues":[7,"{alice,NULL,\"b c\"}",null]}]}"#,
+        )
+        .expect("parse");
+        let editors = || {
+            ArrayCell::Elements(alloc::vec![
+                Value::String("alice".into()),
+                Value::Null,
+                Value::String("b c".into()),
+            ])
+        };
+        assert_eq!(v2.list_at(&db, RowKind::New, 1), Ok(editors()));
+        assert_eq!(v1[0].list_at(&db, RowKind::New, 1), Ok(editors()));
+        assert_eq!(v2.list_at(&db, RowKind::New, 2), Ok(ArrayCell::Null));
+        assert_eq!(v1[0].list_at(&db, RowKind::New, 2), Ok(ArrayCell::Null));
+        assert_eq!(
+            v2.list_at(&db, RowKind::Old, 1),
+            Ok(ArrayCell::Missing),
+            "an insert carries no old image"
+        );
+    }
+
+    #[test]
+    fn an_array_cell_that_is_not_array_text_is_refused() {
+        let db = ParserDB::parse::<PostgreSqlDialect>(
+            "CREATE TABLE notes (id INT PRIMARY KEY, editors TEXT[]);",
+        )
+        .expect("parse DDL");
+        let v2 = one_v2(
+            br#"{"action":"I","schema":"public","table":"notes",
+                 "columns":[{"name":"id","type":"integer","value":7},
+                            {"name":"editors","type":"text[]","value":["alice"]}]}"#,
+        );
+        assert_eq!(
+            v2.list_at(&db, RowKind::New, 1),
+            Err(crate::ValueError::Array { column: 1 })
+        );
+    }
 }

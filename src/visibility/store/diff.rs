@@ -327,7 +327,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
           WHERE team_leads.team_id = docs.team_id AND team_leads.user_id = current_setting('app.user_id', true)));
 ";
 
-    /// The subjects live in a list column, which no row image can expand.
+    /// The subjects live in the elements of an array column.
     const ARRAY: &str = "
 CREATE TABLE docs(id INTEGER PRIMARY KEY, members TEXT[]);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -832,36 +832,82 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
         );
     }
 
-    // Naming what is not covered
+    // Naming what is and is not covered
 
-    /// A list column can be neither differenced nor queried, so the caller
-    /// is told rather than left to assume the store is complete.
+    /// `event_type` as the first row of transaction 3, committing at `0x10`.
+    fn on_pgoutput(event_type: pg_walstream::EventType) -> crate::PgChangeEvent {
+        crate::PgChangeEvent::new(
+            pg_walstream::ChangeEvent {
+                event_type,
+                lsn: pg_walstream::Lsn::new(0x10),
+                metadata: None,
+                xid: None,
+            },
+            crate::PgCommitPosition::new(crate::PgLsn(0x10), crate::PgXid(3), 1),
+        )
+    }
+
+    /// A [`ARRAY`] `docs` row 4 whose `members` cell reads `members`.
+    fn array_doc(members: &str) -> pg_walstream::RowData {
+        pg_walstream::RowData::from_pairs(vec![
+            ("id", pg_walstream::ColumnValue::text("4")),
+            ("members", pg_walstream::ColumnValue::text(members)),
+        ])
+    }
+
+    /// The `members` subjects among `records`.
+    fn members_of(records: &[Record]) -> alloc::collections::BTreeSet<&str> {
+        records
+            .iter()
+            .filter(|record| record.relation.as_str() == "members")
+            .map(|record| record.subject.as_str())
+            .collect()
+    }
+
+    /// A list column is differenced from the row, one record per element, so
+    /// it is not named as uncovered.
     #[test]
-    fn a_list_column_shape_is_named_as_uncovered() {
+    fn a_list_column_states_one_record_per_element() {
         let store = shapes(ARRAY);
-        let docs = table(&store, "docs");
+        assert!(store.uncovered().is_empty(), "{:?}", store.uncovered());
 
-        let uncovered = store.uncovered();
-        assert_eq!(uncovered.len(), 1, "{uncovered:?}");
-        assert_eq!(uncovered[0].type_name, "docs");
-        assert_eq!(uncovered[0].relation, "members");
-        assert_eq!(uncovered[0].table, "public.docs");
-        assert_eq!(uncovered[0].reason, UncoveredReason::UnreadableColumn);
-
-        // And it is refused rather than reported as a row granting nobody.
-        let event = TestEvent::<Postgres>::insert(docs, vec![Value::Int(4), Value::Missing])
-            .with_pk_columns([0u16]);
+        let event = on_pgoutput(pg_walstream::EventType::Insert {
+            schema: "public".into(),
+            table: "docs".into(),
+            relation_oid: 1,
+            data: array_doc("{alice,NULL,bob}"),
+        });
         let (diff, _requeries) = store.diff(&event).unwrap();
-        assert!(
-            diff.added
-                .iter()
-                .all(|record| record.relation.as_str() != "members"),
-            "an unreadable column cannot state membership grants"
+        assert_eq!(
+            members_of(&diff.added),
+            alloc::collections::BTreeSet::from(["user:alice", "user:bob"])
         );
         assert!(
             diff.removed.is_empty(),
             "the row is new so nothing was held before"
         );
+    }
+
+    /// A full previous image whose only non-key column is an array carries
+    /// that array, so its elements are withdrawn rather than the image refused
+    /// as key-only.
+    #[test]
+    fn a_full_image_of_a_list_column_withdraws_its_elements() {
+        let store = shapes(ARRAY);
+        let event = on_pgoutput(pg_walstream::EventType::Delete {
+            schema: "public".into(),
+            table: "docs".into(),
+            relation_oid: 1,
+            old_data: array_doc("{alice,bob}"),
+            replica_identity: pg_walstream::ReplicaIdentity::Full,
+            key_columns: vec!["id".into()],
+        });
+        let (diff, _requeries) = store.diff(&event).unwrap();
+        assert_eq!(
+            members_of(&diff.removed),
+            alloc::collections::BTreeSet::from(["user:alice", "user:bob"])
+        );
+        assert!(diff.added.is_empty(), "a delete adds nothing");
     }
 
     /// A schema whose every shape is readable reports nothing uncovered, so
@@ -920,6 +966,14 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
                     kind: crate::backend::ScalarFamily::String,
                 })
             }
+            fn list_at<DB: DatabaseLike>(
+                &self,
+                _db: &DB,
+                _row: RowKind,
+                col: ColumnId,
+            ) -> Result<crate::backend::ArrayCell<Postgres>, ValueError> {
+                Err(ValueError::Array { column: col })
+            }
         }
 
         let store = shapes(OWNERSHIP);
@@ -974,6 +1028,14 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
                     column: col,
                     kind: crate::backend::ScalarFamily::Int,
                 })
+            }
+            fn list_at<DB: DatabaseLike>(
+                &self,
+                _db: &DB,
+                _row: RowKind,
+                col: ColumnId,
+            ) -> Result<crate::backend::ArrayCell<Postgres>, ValueError> {
+                Err(ValueError::Array { column: col })
             }
         }
 

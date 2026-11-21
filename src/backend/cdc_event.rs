@@ -28,6 +28,40 @@ pub enum CellPresence {
     Undecodable,
 }
 
+/// One array cell of a row image, read against its column's element type.
+///
+/// A multidimensional value is flattened in row-major order, the order in
+/// which `UNNEST` and `= ANY` visit its elements.
+pub enum ArrayCell<B: Backend> {
+    /// The source's row image did not carry this cell, or the catalog does
+    /// not declare the column an array of a type subql can decode.
+    Missing,
+    /// The cell carries SQL `NULL`.
+    Null,
+    /// The elements, each [`Value::Null`] for a `NULL` element.
+    Elements(Vec<Value<B>>),
+}
+
+impl<B: Backend> core::fmt::Debug for ArrayCell<B> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("Missing"),
+            Self::Null => f.write_str("Null"),
+            Self::Elements(elements) => f.debug_tuple("Elements").field(elements).finish(),
+        }
+    }
+}
+
+impl<B: Backend> PartialEq for ArrayCell<B> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Missing, Self::Missing) | (Self::Null, Self::Null) => true,
+            (Self::Elements(left), Self::Elements(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
 /// One CDC row event as seen by the engine.
 ///
 /// An impl exposes the event's structure (kind, table, PK layout, changed
@@ -224,6 +258,39 @@ pub trait CdcEvent {
     ) -> Result<Value<Self::Backend>, crate::ValueError> {
         self.value_at_resolved(db, table_id, RowKind::Pk, col)
     }
+
+    /// Decode one array cell into its elements.
+    ///
+    /// Each element is decoded as the column's declared element type, as
+    /// [`value_at`](Self::value_at) decodes a scalar cell. A
+    /// multidimensional value is flattened in row-major order.
+    ///
+    /// Returns `Ok(ArrayCell::Missing)` for a cell the source did not carry
+    /// and for a column the catalog does not declare an array of a type
+    /// subql decodes, `Ok(ArrayCell::Null)` for SQL NULL, and `Err` when the
+    /// source carried a value that is not a well-formed array or holds an
+    /// element its type cannot decode.
+    ///
+    /// [`RowKind::Pk`] answers `Ok(ArrayCell::Missing)` for a column outside
+    /// the key, as [`value_at`](Self::value_at) does.
+    fn list_at<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        row: RowKind,
+        col: ColumnId,
+    ) -> Result<ArrayCell<Self::Backend>, crate::ValueError>;
+
+    #[doc(hidden)]
+    fn list_at_resolved<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        table_id: TableId,
+        row: RowKind,
+        col: ColumnId,
+    ) -> Result<ArrayCell<Self::Backend>, crate::ValueError> {
+        let _ = table_id;
+        self.list_at(db, row, col)
+    }
 }
 
 type DecodedCell<B> = OnceCell<Result<Value<B>, crate::ValueError>>;
@@ -398,6 +465,28 @@ impl<E: CdcEvent> CdcEvent for ResolvedEvent<'_, E> {
         self.event
             .value_at_known_pk_resolved(db, self.table_id, col)
     }
+
+    /// An update's old array the event does not carry, for a column the event
+    /// lists as unchanged, is its new array, as [`cell_at`](Self::cell_at)
+    /// reads a scalar.
+    fn list_at<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        row: RowKind,
+        col: ColumnId,
+    ) -> Result<ArrayCell<Self::Backend>, crate::ValueError> {
+        let cell = self.event.list_at_resolved(db, self.table_id, row, col)?;
+        if row == RowKind::Old
+            && matches!(cell, ArrayCell::Missing)
+            && self.event.kind() == EventKind::Update
+            && self.unchanged(db, col)
+        {
+            return self
+                .event
+                .list_at_resolved(db, self.table_id, RowKind::New, col);
+        }
+        Ok(cell)
+    }
 }
 
 /// Decode one cell whose column kind may name a custom type, by handing a
@@ -558,6 +647,15 @@ mod cell_presence_tests {
                     column: col,
                     kind: crate::backend::ScalarFamily::Int,
                 })
+            }
+
+            fn list_at<DB: sql_traits::prelude::DatabaseLike>(
+                &self,
+                _db: &DB,
+                _row: RowKind,
+                col: crate::ColumnId,
+            ) -> Result<super::ArrayCell<Self::Backend>, crate::ValueError> {
+                Err(crate::ValueError::Array { column: col })
             }
         }
 

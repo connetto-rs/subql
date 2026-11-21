@@ -6175,6 +6175,15 @@ mod tests {
                 .set(self.resolved_value_at_calls.get() + 1);
             self.inner.value_at(db, RowKind::Pk, col)
         }
+
+        fn list_at<DB: DatabaseLike>(
+            &self,
+            db: &DB,
+            row: RowKind,
+            col: crate::ColumnId,
+        ) -> Result<crate::backend::ArrayCell<Self::Backend>, crate::ValueError> {
+            self.inner.list_at(db, row, col)
+        }
     }
 
     #[test]

@@ -335,6 +335,14 @@ pub enum ValueError {
         /// The column's type, when its relation named one.
         type_oid: Option<u32>,
     },
+    /// An array column carried a value that is not a well-formed array, such
+    /// as a malformed literal, sub-arrays of unequal length, or a binary
+    /// header that disagrees with its elements.
+    #[error("column {column} carried a value that is not a well-formed array")]
+    Array {
+        /// Column ordinal whose carried cell failed to read as an array.
+        column: crate::ColumnId,
+    },
 }
 
 /// Errors during event dispatch

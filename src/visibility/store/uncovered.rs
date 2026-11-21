@@ -9,8 +9,8 @@ use crate::backend::{Backend, Value};
 /// Why a shape's records cannot be kept current from the change stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UncoveredReason {
-    /// The shape reads a column a row image cannot answer, a list column or
-    /// one whose declared kind has no row-side spelling.
+    /// The shape reads a column a row image cannot answer, one whose declared
+    /// kind, or whose array element kind, has no row-side spelling.
     UnreadableColumn,
     /// The shape reads this table but carries no query bound to it, so a
     /// change arriving here has nothing to replay.

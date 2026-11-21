@@ -49,7 +49,7 @@ pub(crate) mod shipped;
 
 pub use crate::compiler::value_cmp::cross_kind_numeric_ordering;
 pub(crate) use cdc_event::ResolvedEvent;
-pub use cdc_event::{decode_cell, encode_value_key, CdcEvent, CellPresence};
+pub use cdc_event::{decode_cell, encode_value_key, ArrayCell, CdcEvent, CellPresence};
 pub use interval::Interval;
 pub use row_kind::RowKind;
 pub use scalar_value::at_float4;

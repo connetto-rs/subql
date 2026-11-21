@@ -1,5 +1,5 @@
 use super::{PgChangeEvent, PgOutputOrder, PgRowItem};
-use crate::backend::{CdcEvent, RowKind, Value};
+use crate::backend::{ArrayCell, CdcEvent, RowKind, Value};
 use crate::wal::{PgCellFormat, PgTypeRegistry};
 use crate::ValueError;
 use bytes::Bytes;
@@ -467,4 +467,92 @@ fn a_cell_of_another_family_than_the_column_declares_is_refused() {
             kind: crate::backend::ScalarFamily::String
         })
     );
+}
+
+/// `array_send`'s bytes for a one-dimensional array of `element`, lower
+/// bound 1.
+fn vector_send(element: u32, items: &[Option<&[u8]>]) -> Vec<u8> {
+    let length = i32::try_from(items.len()).expect("a short test array");
+    crate::wal::pg_array::array_send(element, &[(length, 1)], items)
+}
+
+fn lists() -> ParserDB {
+    ParserDB::parse::<PostgreSqlDialect>(
+        "CREATE TABLE kinds (id INT PRIMARY KEY, editors TEXT[], scores INT[]);",
+    )
+    .expect("parse DDL")
+}
+
+#[test]
+fn an_array_reads_the_same_elements_from_text_and_binary() {
+    let db = lists();
+    let announce = || relation(&[("id", 23), ("editors", 1009), ("scores", 1007)]);
+    let text = deliver(
+        PgOutputOrder::new(),
+        announce(),
+        RowData::from_pairs(vec![
+            ("id", ColumnValue::text("7")),
+            ("editors", ColumnValue::text(r#"{alice,NULL,"b c"}"#)),
+            ("scores", ColumnValue::text("{3,-4}")),
+        ]),
+    );
+    let editors = vector_send(25, &[Some(b"alice"), None, Some(b"b c")]);
+    let scores = vector_send(
+        23,
+        &[Some(&3_i32.to_be_bytes()), Some(&(-4_i32).to_be_bytes())],
+    );
+    let binary = deliver(
+        binary_order(),
+        announce(),
+        RowData::from_pairs(vec![
+            ("id", int4(7)),
+            ("editors", ColumnValue::binary_bytes(Bytes::from(editors))),
+            ("scores", ColumnValue::binary_bytes(Bytes::from(scores))),
+        ]),
+    );
+    for event in [&text, &binary] {
+        assert_eq!(
+            event.list_at(&db, RowKind::New, 1),
+            Ok(ArrayCell::Elements(vec![
+                Value::String("alice".into()),
+                Value::Null,
+                Value::String("b c".into()),
+            ]))
+        );
+        assert_eq!(
+            event.list_at(&db, RowKind::New, 2),
+            Ok(ArrayCell::Elements(vec![Value::Int(3), Value::Int(-4)]))
+        );
+    }
+}
+
+#[test]
+fn a_binary_array_of_another_element_type_is_refused() {
+    let db = lists();
+    let event = deliver(
+        binary_order(),
+        relation(&[("editors", 1009)]),
+        RowData::from_pairs(vec![(
+            "editors",
+            ColumnValue::binary_bytes(Bytes::from(vector_send(23, &[Some(&3_i32.to_be_bytes())]))),
+        )]),
+    );
+    assert_eq!(
+        event.list_at(&db, RowKind::New, 1),
+        Err(ValueError::Builtin {
+            column: 1,
+            kind: crate::backend::ScalarFamily::String
+        })
+    );
+}
+
+#[test]
+fn a_scalar_column_has_no_elements() {
+    let db = lists();
+    let event = deliver(
+        PgOutputOrder::new(),
+        relation(&[("id", 23)]),
+        RowData::from_pairs(vec![("id", ColumnValue::text("7"))]),
+    );
+    assert_eq!(event.list_at(&db, RowKind::New, 0), Ok(ArrayCell::Missing));
 }

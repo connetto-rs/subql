@@ -10,6 +10,7 @@
 
 mod change_event;
 mod maxwell;
+mod pg_array;
 mod pg_format;
 #[cfg(feature = "pg-streaming")]
 mod pg_streaming;

@@ -4,13 +4,13 @@ use hashbrown::HashMap;
 use sql_traits::prelude::DatabaseLike;
 use wal2json_events::ChangeV1;
 
-use crate::backend::{Postgres, RowKind, Value};
+use crate::backend::{ArrayCell, Postgres, RowKind, Value};
 use crate::catalog_helpers;
 use crate::types::{ColumnId, EventKind, TableId};
 use crate::wal::wire_event::{wire_cdc_event, WireEvent};
 use crate::wal::{changed_columns_by_name, resolve_table};
 
-use super::decode_helpers::{decode_cell, IndexedName};
+use super::decode_helpers::{decode_cell, decode_list, IndexedName};
 use super::parse_helpers::v1_row_kind;
 
 /// The `(names, values)` parallel arrays `row` selects for `change`, or
@@ -112,18 +112,36 @@ impl WireEvent for ChangeV1 {
         row: RowKind,
         col: ColumnId,
     ) -> Result<Value<Postgres>, crate::ValueError> {
-        if row == RowKind::Pk
-            && !catalog_helpers::primary_key_columns(db, table_id)
-                .is_ok_and(|columns| columns.contains(&col))
-        {
-            return Ok(Value::Missing);
-        }
-        let Some((names, values)) = v1_image(self, row) else {
-            return Ok(Value::Missing);
-        };
-        let Some(name) = catalog_helpers::column_name::<Postgres, DB>(db, table_id, col) else {
-            return Ok(Value::Missing);
-        };
-        decode_cell(v1_value(names, values, &name), db, table_id, col)
+        decode_cell(v1_cell(self, db, table_id, row, col), db, table_id, col)
     }
+
+    fn wire_list_at<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        table_id: TableId,
+        row: RowKind,
+        col: ColumnId,
+    ) -> Result<ArrayCell<Postgres>, crate::ValueError> {
+        decode_list(v1_cell(self, db, table_id, row, col), db, table_id, col)
+    }
+}
+
+/// The JSON cell the `row` image of `change` carries for `col`, or `None`
+/// when it carries none.
+fn v1_cell<'a, DB: DatabaseLike>(
+    change: &'a ChangeV1,
+    db: &DB,
+    table_id: TableId,
+    row: RowKind,
+    col: ColumnId,
+) -> Option<&'a serde_json::Value> {
+    if row == RowKind::Pk
+        && !catalog_helpers::primary_key_columns(db, table_id)
+            .is_ok_and(|columns| columns.contains(&col))
+    {
+        return None;
+    }
+    let (names, values) = v1_image(change, row)?;
+    let name = catalog_helpers::column_name::<Postgres, DB>(db, table_id, col)?;
+    v1_value(names, values, &name)
 }

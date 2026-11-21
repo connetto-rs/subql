@@ -775,48 +775,70 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
 
     // Refusing, never answering empty
 
-    /// A list subject cannot be read from a row image, and an empty subject
-    /// set would read as "this row grants nobody". The recipe is dropped at
-    /// construction so every such row is delegated.
+    /// `can_select: editor`, read from the elements of an array column.
+    const EDITORS: &str = "
+CREATE TABLE notes(id INTEGER PRIMARY KEY, editors TEXT[]);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON notes FOR SELECT USING (current_setting('app.user_id', true) = ANY (editors));
+";
+
+    /// A `notes` insert whose `editors` cell travels on a text pgoutput
+    /// stream as `editors`.
+    fn notes_insert(editors: &str) -> crate::PgChangeEvent {
+        crate::PgChangeEvent::new(
+            pg_walstream::ChangeEvent {
+                event_type: pg_walstream::EventType::Insert {
+                    schema: "public".into(),
+                    table: "notes".into(),
+                    relation_oid: 1,
+                    data: pg_walstream::RowData::from_pairs(vec![
+                        ("id", pg_walstream::ColumnValue::text("4")),
+                        ("editors", pg_walstream::ColumnValue::text(editors)),
+                    ]),
+                },
+                lsn: pg_walstream::Lsn::new(0x10),
+                metadata: None,
+                xid: None,
+            },
+            crate::PgCommitPosition::new(crate::PgLsn(0x10), crate::PgXid(3), 1),
+        )
+    }
+
+    /// What a policy over [`EDITORS`] tells alice about a note whose
+    /// `editors` cell reads `editors`, and how often it asked the backend.
+    fn alice_sees_note(editors: &str) -> (Vec<Verdict>, usize) {
+        let (db, relations) = translated(EDITORS);
+        let notes = catalog_helpers::table_id::<Postgres, _>(&db, "notes").unwrap();
+        let policy = RowPolicy::new(
+            shared(db, &relations),
+            Granting::<Principal>::to("user:alice"),
+        );
+        assert!(policy.answers_locally(notes, ActionStatement::Select));
+
+        let event = notes_insert(editors);
+        let view = EventRow::current(&event, policy.catalog()).unwrap();
+        let mut verdicts = Vec::new();
+        Verdict::reset(&mut verdicts, 1);
+        block_on(policy.may_see(&view, &[Principal::identity("user:alice")], &mut verdicts))
+            .unwrap();
+        (verdicts, policy.inner().calls())
+    }
+
     #[test]
-    fn a_list_subject_is_delegated_rather_than_answered_empty() {
-        let (db, _) = translated(OWNERSHIP);
-        let docs = docs_id(&db);
-        let relations = vec![RelationShapes {
-            type_name: test_names::docs_type(),
-            relation: can_select_relation(),
-            from_one_row: true,
-            shapes: Vec::new(),
-            decision: Some(RowDecision::Leaf {
-                relation: test_names::relation("owner"),
-                shapes: vec![RecordDescription {
-                    tables: vec![test_names::table("docs")],
-                    derivation: RecordDerivation::FromRow {
-                        table: test_names::table("docs"),
-                        template: Box::new(RecordTemplate {
-                            object_type: TypeName::canonicalized("docs"),
-                            object_key: id_key(),
-                            relation: test_names::relation("owner"),
-                            subject_type: TypeName::canonicalized("user"),
-                            subject_key: SubjectKey::new(ValueSource::ListElements(
-                                test_names::column_read("owner_id"),
-                            )),
-                            context: None,
-                        }),
-                        guards: Vec::new(),
-                    },
-                }],
-            }),
-            grants_nobody: false,
-        }];
-        let event = insert(docs, docs_row(text("alice"), Value::Null));
-        let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:alice"));
+    fn an_array_naming_the_watcher_grants_from_the_row() {
+        assert_eq!(alice_sees_note("{bob,alice}"), (vec![Verdict::Allow], 0));
+    }
 
-        assert!(!policy.answers_locally(docs, ActionStatement::Select));
-        let got = see(&policy, &event, &watchers(&["user:alice"])).unwrap();
+    #[test]
+    fn an_array_lacking_the_watcher_denies_from_the_row() {
+        assert_eq!(alice_sees_note("{bob,NULL}"), (vec![Verdict::Deny], 0));
+    }
 
-        assert_eq!(got, [Verdict::Allow]);
-        assert_eq!(policy.inner().see_calls(), 1);
+    /// An array the row carried but subql could not read is not an empty
+    /// one. Denying from it would silently withdraw access.
+    #[test]
+    fn an_undecodable_array_is_delegated_rather_than_answered_empty() {
+        assert_eq!(alice_sees_note("{alice"), (vec![Verdict::Allow], 1));
     }
 
     /// A cell the row carried but could not be decoded is not a row that
@@ -837,6 +859,12 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
                     column: col,
                     kind: crate::backend::ScalarFamily::String,
                 })
+            }
+            fn list_at(
+                &self,
+                col: ColumnId,
+            ) -> Result<crate::backend::ArrayCell<Postgres>, ValueError> {
+                Err(ValueError::Array { column: col })
             }
         }
 

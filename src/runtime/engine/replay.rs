@@ -20,8 +20,9 @@ use sql_traits::prelude::DatabaseLike;
 
 use super::SubscriptionEngine;
 use crate::backend::{
-    Backend, CdcEvent, ColumnComparisonOf, ComparisonContext, DivisionPrecisionIncrement,
-    GroupKeyEncoder, RowKind, ScalarFamily, TextOperation, TextRule, Value,
+    ArrayCell, Backend, CdcEvent, ColumnComparisonOf, ComparisonContext,
+    DivisionPrecisionIncrement, GroupKeyEncoder, RowKind, ScalarFamily, TextOperation, TextRule,
+    Value,
 };
 use crate::checkpoint::NoCheckpoint;
 use crate::compiler::{
@@ -908,6 +909,17 @@ impl<B: Backend> CdcEvent for RowImage<'_, B> {
             .get(usize::from(col))
             .cloned()
             .unwrap_or(Value::Missing))
+    }
+
+    /// A replayed image holds the scalar cells a predicate reads, never an
+    /// array.
+    fn list_at<DB: DatabaseLike>(
+        &self,
+        _db: &DB,
+        _row: RowKind,
+        _col: ColumnId,
+    ) -> Result<ArrayCell<B>, crate::ValueError> {
+        Ok(ArrayCell::Missing)
     }
 }
 

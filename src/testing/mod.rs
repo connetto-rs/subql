@@ -12,7 +12,7 @@
 #[doc(hidden)]
 use alloc::vec::Vec;
 
-use crate::backend::{Backend, CdcEvent, RowKind, Value};
+use crate::backend::{ArrayCell, Backend, CdcEvent, RowKind, Value};
 use crate::checkpoint::{Checkpoint, NoCheckpoint};
 use crate::{ColumnId, EventKind, TableId};
 use sql_traits::prelude::DatabaseLike;
@@ -218,6 +218,16 @@ impl<B: Backend, C: Checkpoint> CdcEvent for TestEvent<B, C> {
             alloc::borrow::Cow::Owned(Value::Missing),
             alloc::borrow::Cow::Borrowed,
         ))
+    }
+
+    /// A test event holds scalar cells only, so it carries no array.
+    fn list_at<DB: DatabaseLike>(
+        &self,
+        _db: &DB,
+        _row: RowKind,
+        _col: ColumnId,
+    ) -> Result<ArrayCell<Self::Backend>, crate::ValueError> {
+        Ok(ArrayCell::Missing)
     }
 }
 

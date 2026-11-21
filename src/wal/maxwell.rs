@@ -21,7 +21,7 @@ use sql_traits::prelude::DatabaseLike;
 
 use super::pg_type::json_value_to_mysql_value_by_kind;
 use super::{resolve_table, WalParseError};
-use crate::backend::{MySql, RowKind, ScalarFamily, Value};
+use crate::backend::{ArrayCell, MySql, RowKind, ScalarFamily, Value};
 use crate::catalog_helpers;
 use crate::types::{ColumnId, EventKind, TableId};
 use crate::wal::wire_event::{wire_cdc_event, WireEvent};
@@ -251,6 +251,17 @@ impl<C: crate::backend::MySqlTableNameCase> WireEvent for MaxwellEvent<C> {
             },
             EventKind::Truncate => Ok(Value::Missing),
         }
+    }
+
+    /// MySQL has no array type, so no column of its catalog is an array.
+    fn wire_list_at<DB: DatabaseLike>(
+        &self,
+        _db: &DB,
+        _table_id: TableId,
+        _row: RowKind,
+        _col: ColumnId,
+    ) -> Result<ArrayCell<MySql<C>>, crate::ValueError> {
+        Ok(ArrayCell::Missing)
     }
 }
 

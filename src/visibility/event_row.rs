@@ -1,6 +1,6 @@
 use sql_traits::prelude::DatabaseLike;
 
-use crate::backend::{CdcEvent, RowKind, Value};
+use crate::backend::{ArrayCell, CdcEvent, RowKind, Value};
 use crate::{ColumnId, EventKind, TableId, ValueError};
 
 use super::RowView;
@@ -120,5 +120,9 @@ impl<E: CdcEvent, DB: DatabaseLike> RowView for EventRow<'_, E, DB> {
 
     fn value_at(&self, col: ColumnId) -> Result<Value<Self::Backend>, ValueError> {
         self.event.value_at(self.db, self.row, col)
+    }
+
+    fn list_at(&self, col: ColumnId) -> Result<ArrayCell<Self::Backend>, ValueError> {
+        self.event.list_at(self.db, self.row, col)
     }
 }

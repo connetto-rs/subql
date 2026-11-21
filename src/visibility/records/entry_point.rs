@@ -168,7 +168,10 @@ fn unsupported_value<B: crate::backend::Backend, DB: DatabaseLike>(
             expect_column_kind::<B, DB>(column, db, table, ColumnKind::Json)
         }
         ValueSource::Literal(_) => None,
-        ValueSource::ListElements(_) => Some(RowRecordError::UnsupportedValueSource("list")),
+        ValueSource::ListElements(column) => match element_read_kind::<B, DB>(column, db, table) {
+            Ok(kind) => direct_kind_read(column, kind),
+            Err(refusal) => Some(refusal),
+        },
         _ => Some(RowRecordError::UnsupportedValueSource("unrecognised")),
     }
 }
@@ -339,6 +342,35 @@ fn column_read_kind<B: crate::backend::Backend, DB: DatabaseLike>(
     db: &DB,
     table: TableId,
 ) -> Result<ColumnKind, RowRecordError> {
+    declared_read_kind::<B, DB>(
+        column,
+        db,
+        table,
+        catalog_helpers::column_scalar_kind::<B, DB>,
+    )
+}
+
+/// The kind of each element of the array `column` reads, checked as
+/// [`column_read_kind`] checks a scalar.
+fn element_read_kind<B: crate::backend::Backend, DB: DatabaseLike>(
+    column: &ColumnRead,
+    db: &DB,
+    table: TableId,
+) -> Result<ColumnKind, RowRecordError> {
+    declared_read_kind::<B, DB>(
+        column,
+        db,
+        table,
+        catalog_helpers::column_array_element_kind::<B, DB>,
+    )
+}
+
+fn declared_read_kind<B: crate::backend::Backend, DB: DatabaseLike>(
+    column: &ColumnRead,
+    db: &DB,
+    table: TableId,
+    declared: fn(&DB, TableId, crate::ColumnId) -> Option<ScalarKindOf<B>>,
+) -> Result<ColumnKind, RowRecordError> {
     let refuse = || {
         RowRecordError::UnreadableColumn(alloc::format!(
             "column {column}, which the catalog does not know or cannot type"
@@ -346,7 +378,7 @@ fn column_read_kind<B: crate::backend::Backend, DB: DatabaseLike>(
     };
     let id = catalog_helpers::contract_column_id::<B, _>(db, table, column.as_str())
         .ok_or_else(refuse)?;
-    let scalar = catalog_helpers::column_scalar_kind::<B, DB>(db, table, id).ok_or_else(refuse)?;
+    let scalar = declared(db, table, id).ok_or_else(refuse)?;
     // A custom type answers `None`: it has no renderable column kind, so a
     // shape that reads this column is refused rather than served a spelling
     // subql cannot prove (R1).
