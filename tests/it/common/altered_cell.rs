@@ -78,4 +78,13 @@ impl<E: CdcEvent> CdcEvent for AlteredCell<E> {
         }
         self.inner.value_at(db, row, col)
     }
+
+    fn list_at<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        row: RowKind,
+        col: ColumnId,
+    ) -> Result<subql::backend::ArrayCell<E::Backend>, ValueError> {
+        self.inner.list_at(db, row, col)
+    }
 }

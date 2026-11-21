@@ -366,27 +366,31 @@ mod registry {
         },
     }
 
-    /// The plan of every column of one relation on a binary stream.
+    /// The plan of every column of one relation on a binary stream, and the
+    /// registry that plans the elements of its array columns.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct PgRelationFormat {
         columns: Vec<(Arc<str>, ColumnPlan)>,
+        registry: Arc<PgTypeRegistry>,
     }
 
     impl PgRelationFormat {
         /// Plan `columns` as `registry` says their types are sent.
-        pub fn plan(registry: &PgTypeRegistry, columns: &[RelationColumn]) -> Self {
+        pub fn plan(registry: &Arc<PgTypeRegistry>, columns: &[RelationColumn]) -> Self {
             Self {
                 columns: columns
                     .iter()
                     .map(|column| (Arc::clone(&column.name), registry.plan(column.type_id)))
                     .collect(),
+                registry: Arc::clone(registry),
             }
         }
 
         /// The format of a relation the stream never announced.
-        pub const fn unannounced() -> Self {
+        pub fn unannounced(registry: &Arc<PgTypeRegistry>) -> Self {
             Self {
                 columns: Vec::new(),
+                registry: Arc::clone(registry),
             }
         }
 
@@ -396,6 +400,13 @@ mod registry {
                 .iter()
                 .find(|(column, _)| &**column == name)
                 .map_or(ColumnPlan::Unresolved { type_oid: None }, |&(_, plan)| plan)
+        }
+
+        /// The plan of one element of a binary array whose header names the
+        /// element type `element_oid`. `array_send` writes each element with
+        /// that type's send function, a domain's being its base type's.
+        pub fn element(&self, element_oid: u32) -> ColumnPlan {
+            self.registry.plan(element_oid)
         }
     }
 

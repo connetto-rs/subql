@@ -4,7 +4,7 @@ use hashbrown::HashMap;
 use sql_traits::prelude::DatabaseLike;
 use wal2json_events::{Action, Column, MessageV2, RowV2, TransactionBoundary};
 
-use crate::backend::{Postgres, RowKind, Value};
+use crate::backend::{ArrayCell, Postgres, RowKind, Value};
 use crate::catalog_helpers;
 use crate::types::{ColumnId, EventKind, TableId};
 use crate::wal::transaction_order::{TransactionOrder, TransactionOrderError};
@@ -12,7 +12,7 @@ use crate::wal::wire_event::{wire_cdc_event, WireEvent};
 use crate::wal::{changed_columns_by_name, resolve_table, WalParseError};
 use crate::{PgCommitPosition, PgLsn, PgXid};
 
-use super::decode_helpers::{column_value, decode_cell, IndexedName};
+use super::decode_helpers::{column_value, decode_cell, decode_list, IndexedName};
 use super::parse_helpers::v2_row_kind;
 
 /// A wal2json v2 row message and where it falls in commit order.
@@ -280,18 +280,36 @@ impl WireEvent for Wal2JsonV2Event {
         row: RowKind,
         col: ColumnId,
     ) -> Result<Value<Postgres>, crate::ValueError> {
-        if row == RowKind::Pk
-            && !catalog_helpers::primary_key_columns(db, table_id)
-                .is_ok_and(|columns| columns.contains(&col))
-        {
-            return Ok(Value::Missing);
-        }
-        let Some(columns) = v2_image(&self.message, row) else {
-            return Ok(Value::Missing);
-        };
-        let Some(name) = catalog_helpers::column_name::<Postgres, DB>(db, table_id, col) else {
-            return Ok(Value::Missing);
-        };
-        decode_cell(column_value(columns, &name), db, table_id, col)
+        decode_cell(v2_cell(self, db, table_id, row, col), db, table_id, col)
     }
+
+    fn wire_list_at<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        table_id: TableId,
+        row: RowKind,
+        col: ColumnId,
+    ) -> Result<ArrayCell<Postgres>, crate::ValueError> {
+        decode_list(v2_cell(self, db, table_id, row, col), db, table_id, col)
+    }
+}
+
+/// The JSON cell the `row` image of `event` carries for `col`, or `None`
+/// when it carries none.
+fn v2_cell<'a, DB: DatabaseLike>(
+    event: &'a Wal2JsonV2Event,
+    db: &DB,
+    table_id: TableId,
+    row: RowKind,
+    col: ColumnId,
+) -> Option<&'a serde_json::Value> {
+    if row == RowKind::Pk
+        && !catalog_helpers::primary_key_columns(db, table_id)
+            .is_ok_and(|columns| columns.contains(&col))
+    {
+        return None;
+    }
+    let columns = v2_image(&event.message, row)?;
+    let name = catalog_helpers::column_name::<Postgres, DB>(db, table_id, col)?;
+    column_value(columns, &name)
 }

@@ -1,4 +1,4 @@
-use crate::backend::{Backend, Value};
+use crate::backend::{ArrayCell, Backend, Value};
 use crate::{ColumnId, TableId, ValueError};
 
 use super::WriteOp;
@@ -170,4 +170,12 @@ pub trait RowView {
     /// completeness contract above, a well-formed view does not answer
     /// [`Value::Missing`] for a column of its own table.
     fn value_at(&self, col: ColumnId) -> Result<Value<Self::Backend>, ValueError>;
+
+    /// Decode one array cell of this row into its elements, as
+    /// [`CdcEvent::list_at`](crate::backend::CdcEvent::list_at) does.
+    ///
+    /// Returns [`ArrayCell::Null`] for SQL NULL, `Err` for a cell that is not
+    /// a well-formed array or holds an element its type cannot decode, and
+    /// [`ArrayCell::Missing`] for a column the view carries no array for.
+    fn list_at(&self, col: ColumnId) -> Result<ArrayCell<Self::Backend>, ValueError>;
 }

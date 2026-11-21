@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::backend::{CdcEvent, RowKind, SQLite, Value};
+use crate::backend::{ArrayCell, CdcEvent, RowKind, SQLite, Value};
 use crate::{ColumnId, EventKind, NoCheckpoint, TableId};
 use sql_traits::prelude::DatabaseLike;
 
@@ -98,5 +98,15 @@ impl CdcEvent for SqliteChangesetEvent {
             alloc::borrow::Cow::Owned(Value::Missing),
             alloc::borrow::Cow::Borrowed,
         ))
+    }
+
+    /// SQLite has no array type, so no column of its catalog is an array.
+    fn list_at<DB: DatabaseLike>(
+        &self,
+        _db: &DB,
+        _row: RowKind,
+        _col: ColumnId,
+    ) -> Result<ArrayCell<Self::Backend>, crate::ValueError> {
+        Ok(ArrayCell::Missing)
     }
 }

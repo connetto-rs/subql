@@ -22,6 +22,9 @@ use pg_walstream::RelationColumn;
 use pg_walstream::{ChangeEvent, ColumnValue, EventType, ReplicaIdentity, RowData};
 use sql_traits::prelude::DatabaseLike;
 
+#[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+use super::pg_array::binary_array_elements;
+use super::pg_array::text_array_cell;
 use super::pg_format::PgCellFormat;
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 use super::pg_format::{ColumnPlan, PgRelationFormat};
@@ -33,7 +36,7 @@ use super::resolve_table;
 use super::transaction_order::{TransactionOrder, TransactionOrderError};
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 use super::PgSourceItem;
-use crate::backend::{Postgres, RowKind, Value};
+use crate::backend::{ArrayCell, Postgres, RowKind, Value};
 use crate::catalog_helpers;
 use crate::types::{ColumnId, EventKind, TableId};
 use crate::wal::wire_event::{wire_cdc_event, WireEvent};
@@ -107,6 +110,54 @@ impl PgChangeEvent {
                 type_oid,
             }),
         }
+    }
+
+    /// The array cell `bytes`, in PostgreSQL's binary array format, carries,
+    /// each element read by the type its header names and decoded as
+    /// `element`, the column's declared element type.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::ValueError::Array`] for bytes that are not such an array,
+    /// [`crate::ValueError::UnresolvedFormat`] for an element type the stream
+    /// does not know, and the error [`crate::backend::decode_cell`] gives for
+    /// an element that is not a value of `element`.
+    #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+    fn binary_array_cell(
+        &self,
+        col: ColumnId,
+        element: crate::backend::ScalarKindOf<Postgres>,
+        bytes: &[u8],
+    ) -> Result<ArrayCell<Postgres>, crate::ValueError> {
+        let elements = binary_array_elements(col, bytes)?;
+        let plan = self
+            .format
+            .as_ref()
+            .map_or(ColumnPlan::Unresolved { type_oid: None }, |format| {
+                format.element(elements.element_oid())
+            });
+        let reader_oid = match plan {
+            ColumnPlan::Binary { reader_oid } => reader_oid,
+            // `array_send` raises on an element type without a send
+            // function, so no binary array holds text elements.
+            ColumnPlan::Text => return Err(crate::ValueError::Array { column: col }),
+            ColumnPlan::Unresolved { type_oid } => {
+                return Err(crate::ValueError::UnresolvedFormat {
+                    column: col,
+                    type_oid,
+                })
+            }
+        };
+        let mut values = Vec::with_capacity(elements.capacity());
+        for item in elements {
+            values.push(match item? {
+                None => Value::Null,
+                Some(item) => crate::backend::decode_cell(col, element, |builtin| {
+                    binary_to_pg_value_by_kind(item, reader_oid, builtin)
+                })?,
+            });
+        }
+        Ok(ArrayCell::Elements(values))
     }
 
     /// Where the change falls in commit order.
@@ -369,7 +420,7 @@ pub struct PgOutputOrder {
 /// What a binary stream knows about how each announced relation is sent.
 #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
 struct BinaryStream {
-    registry: super::pg_format::PgTypeRegistry,
+    registry: Arc<super::pg_format::PgTypeRegistry>,
     relations: alloc::collections::BTreeMap<u32, Arc<PgRelationFormat>>,
     unannounced: Arc<PgRelationFormat>,
 }
@@ -387,12 +438,13 @@ impl PgOutputOrder {
     /// The order of a stream that asked for `binary on`, whose types
     /// `registry` describes.
     pub fn binary(registry: super::pg_format::PgTypeRegistry) -> Self {
+        let registry = Arc::new(registry);
         Self {
             order: TransactionOrder::new(),
             binary: Some(BinaryStream {
+                unannounced: Arc::new(PgRelationFormat::unannounced(&registry)),
                 registry,
                 relations: alloc::collections::BTreeMap::new(),
-                unannounced: Arc::new(PgRelationFormat::unannounced()),
             }),
         }
     }
@@ -766,6 +818,60 @@ impl WireEvent for PgChangeEvent {
                                 binary_to_pg_value_by_kind(bytes, reader_oid, builtin)
                             })
                         });
+                }
+                #[cfg(not(any(feature = "pg-streaming", feature = "pg-sqlite-emu")))]
+                let _ = bytes;
+                Err(crate::ValueError::CellFormat {
+                    column: col,
+                    expected: PgCellFormat::Text,
+                })
+            }
+        }
+    }
+
+    fn wire_list_at<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        table_id: TableId,
+        row: RowKind,
+        col: ColumnId,
+    ) -> Result<ArrayCell<Postgres>, crate::ValueError> {
+        if row == RowKind::Pk && !WireEvent::wire_pk_columns(self, db, table_id).contains(&col) {
+            return Ok(ArrayCell::Missing);
+        }
+        let Some(image) = image_for(&self.change, row) else {
+            return Ok(ArrayCell::Missing);
+        };
+        let Some(name) = catalog_helpers::column_name::<Postgres, DB>(db, table_id, col) else {
+            return Ok(ArrayCell::Missing);
+        };
+        let Some(element) =
+            catalog_helpers::column_array_element_kind::<Postgres, DB>(db, table_id, col)
+        else {
+            return Ok(ArrayCell::Missing);
+        };
+        match image.get(&name) {
+            None => Ok(ArrayCell::Missing),
+            Some(ColumnValue::Null) if is_padding(&self.change, row, &name) => {
+                Ok(ArrayCell::Missing)
+            }
+            Some(ColumnValue::Null) => Ok(ArrayCell::Null),
+            Some(ColumnValue::Text(bytes)) => {
+                #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+                if self.binary_reader(col, &name)?.is_some() {
+                    return Err(crate::ValueError::CellFormat {
+                        column: col,
+                        expected: PgCellFormat::Binary,
+                    });
+                }
+                let text = core::str::from_utf8(bytes)
+                    .map_err(|_| crate::ValueError::Array { column: col })?;
+                text_array_cell(col, element, text)
+            }
+            Some(ColumnValue::Binary(bytes)) => {
+                #[cfg(any(feature = "pg-streaming", feature = "pg-sqlite-emu"))]
+                if self.binary_reader(col, &name)?.is_some() {
+                    return self.binary_array_cell(col, element, bytes);
                 }
                 #[cfg(not(any(feature = "pg-streaming", feature = "pg-sqlite-emu")))]
                 let _ = bytes;

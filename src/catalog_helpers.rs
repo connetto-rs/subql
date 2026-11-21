@@ -589,6 +589,27 @@ pub fn column_scalar_kind<B: crate::backend::Backend, DB: DatabaseLike>(
     classify_scalar_kind::<B>(&column.data_type(database).name(database))
 }
 
+/// Resolve an array column's declared element type into its runtime
+/// [`ScalarKind`], classified as [`column_scalar_kind`] classifies a scalar
+/// column.
+///
+/// A nested declaration such as `INT[][]` answers its innermost element.
+/// Returns `None` when the table or column id is unknown, when the column is
+/// not an array, or when its element type matches no supported scalar.
+#[must_use]
+pub fn column_array_element_kind<B: crate::backend::Backend, DB: DatabaseLike>(
+    database: &DB,
+    table_id: TableId,
+    column_id: ColumnId,
+) -> Option<ScalarKindOf<B>> {
+    let table = database.table_by_id(usize::try_from(table_id).ok()?)?;
+    let column = table
+        .column_by_id(usize::from(column_id), database)
+        .ok()??;
+    let element = column.data_type(database).array_element(database)?;
+    classify_scalar_kind::<B>(&element.name(database))
+}
+
 /// The width a fixed-length binary column pads its values to with zero
 /// bytes, as MySQL's `BINARY(n)` does, or `None` for any other column.
 #[must_use]

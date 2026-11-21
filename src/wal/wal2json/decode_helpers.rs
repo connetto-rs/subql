@@ -3,9 +3,10 @@ use core::hash::{Hash, Hasher};
 use sql_traits::prelude::DatabaseLike;
 use wal2json_events::Column;
 
-use crate::backend::{Postgres, ScalarFamily, Value};
+use crate::backend::{ArrayCell, Postgres, ScalarFamily, Value};
 use crate::catalog_helpers;
 use crate::types::{ColumnId, TableId};
+use crate::wal::pg_array::text_array_cell;
 use crate::wal::pg_type::json_value_to_pg_value_by_kind;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,4 +84,32 @@ pub fn column_value<'a>(columns: &'a [Column], name: &str) -> Option<&'a serde_j
         .iter()
         .find(|c| c.name == name)
         .and_then(|c| c.value.as_ref())
+}
+
+/// Decode one wal2json JSON cell of an array column into its elements.
+/// wal2json writes an array as a JSON string holding the type's text
+/// output, so `None` yields `Ok(ArrayCell::Missing)`, a JSON null
+/// `Ok(ArrayCell::Null)`, and anything but such a string `Err`.
+///
+/// A column the catalog does not declare an array of a type subql decodes
+/// yields `Ok(ArrayCell::Missing)`.
+pub fn decode_list<DB: DatabaseLike>(
+    value: Option<&serde_json::Value>,
+    db: &DB,
+    table_id: TableId,
+    col: ColumnId,
+) -> Result<ArrayCell<Postgres>, crate::ValueError> {
+    let Some(value) = value else {
+        return Ok(ArrayCell::Missing);
+    };
+    let Some(element) =
+        catalog_helpers::column_array_element_kind::<Postgres, DB>(db, table_id, col)
+    else {
+        return Ok(ArrayCell::Missing);
+    };
+    match value {
+        serde_json::Value::Null => Ok(ArrayCell::Null),
+        serde_json::Value::String(text) => text_array_cell(col, element, text),
+        _ => Err(crate::ValueError::Array { column: col }),
+    }
 }

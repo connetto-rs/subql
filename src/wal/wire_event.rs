@@ -8,7 +8,7 @@
 //! and hand it down, and the doc-hidden resolved hooks pass through the id
 //! their caller already holds.
 
-use crate::backend::{Backend, RowKind, Value};
+use crate::backend::{ArrayCell, Backend, RowKind, Value};
 use crate::types::{ColumnId, EventKind, TableId};
 use crate::Checkpoint;
 use alloc::vec::Vec;
@@ -38,6 +38,16 @@ pub trait WireEvent {
         row: RowKind,
         col: ColumnId,
     ) -> Result<Value<Self::Backend>, crate::ValueError>;
+
+    /// One array cell of the `row` image, as
+    /// [`CdcEvent::list_at`](crate::backend::CdcEvent::list_at) answers it.
+    fn wire_list_at<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        table_id: TableId,
+        row: RowKind,
+        col: ColumnId,
+    ) -> Result<ArrayCell<Self::Backend>, crate::ValueError>;
 
     /// The columns an UPDATE moved, empty for every other kind.
     fn wire_changed_columns<DB: DatabaseLike>(&self, db: &DB, table_id: TableId) -> Vec<ColumnId>;
@@ -170,6 +180,26 @@ macro_rules! wire_cdc_event {
                 col: $crate::types::ColumnId,
             ) -> Result<$crate::backend::Value<Self::Backend>, $crate::ValueError> {
                 $crate::wal::wire_event::WireEvent::wire_value_at_known_pk(self, db, table_id, col)
+            }
+
+            fn list_at<DB: sql_traits::prelude::DatabaseLike>(
+                &self,
+                db: &DB,
+                row: $crate::backend::RowKind,
+                col: $crate::types::ColumnId,
+            ) -> Result<$crate::backend::ArrayCell<Self::Backend>, $crate::ValueError> {
+                let table_id = $crate::wal::wire_event::WireEvent::wire_table_id(self, db);
+                $crate::wal::wire_event::WireEvent::wire_list_at(self, db, table_id, row, col)
+            }
+
+            fn list_at_resolved<DB: sql_traits::prelude::DatabaseLike>(
+                &self,
+                db: &DB,
+                table_id: $crate::types::TableId,
+                row: $crate::backend::RowKind,
+                col: $crate::types::ColumnId,
+            ) -> Result<$crate::backend::ArrayCell<Self::Backend>, $crate::ValueError> {
+                $crate::wal::wire_event::WireEvent::wire_list_at(self, db, table_id, row, col)
             }
         }
     };

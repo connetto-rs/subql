@@ -5,7 +5,7 @@ use core::cell::Cell;
 use rls2fga_types::{ColumnKind, RowCell, RowList, RowValues};
 use sql_traits::prelude::DatabaseLike;
 
-use crate::backend::{Backend, JsonDocument, ScalarText, ScalarTruth, Value};
+use crate::backend::{ArrayCell, Backend, JsonDocument, ScalarText, ScalarTruth, Value};
 use crate::catalog_helpers;
 use crate::visibility::RowView;
 use crate::ValueError;
@@ -40,21 +40,27 @@ where
     DB: DatabaseLike,
 {
     fn value(&self, column: &str) -> Result<Value<R::Backend>, CellRead> {
-        let Some(id) = catalog_helpers::contract_column_id::<R::Backend, _>(
-            self.db,
-            self.row.table_id(),
-            column,
-        ) else {
-            return Err(CellRead::Absent);
-        };
-        match self.row.value_at(id) {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                let seen = self.undecodable.take();
-                self.undecodable.set(seen.or(Some(error)));
-                Err(CellRead::Undecodable)
-            }
-        }
+        let id = self.column_id(column)?;
+        self.record(self.row.value_at(id))
+    }
+
+    fn list_value(&self, column: &str) -> Result<ArrayCell<R::Backend>, CellRead> {
+        let id = self.column_id(column)?;
+        self.record(self.row.list_at(id))
+    }
+
+    fn column_id(&self, column: &str) -> Result<crate::ColumnId, CellRead> {
+        catalog_helpers::contract_column_id::<R::Backend, _>(self.db, self.row.table_id(), column)
+            .ok_or(CellRead::Absent)
+    }
+
+    /// `read`, keeping the first decode failure so the caller can report it.
+    fn record<T>(&self, read: Result<T, ValueError>) -> Result<T, CellRead> {
+        read.map_err(|error| {
+            let seen = self.undecodable.take();
+            self.undecodable.set(seen.or(Some(error)));
+            CellRead::Undecodable
+        })
     }
 }
 
@@ -72,10 +78,13 @@ where
     }
 
     fn list(&self, column: &str, _kind: ColumnKind) -> RowList<'_> {
-        match self.value(column) {
-            Ok(Value::Missing) | Err(CellRead::Absent) => RowList::Absent,
-            Ok(Value::Null) => RowList::Null,
-            Ok(_) | Err(CellRead::Undecodable) => RowList::Undecodable,
+        match self.list_value(column) {
+            Ok(ArrayCell::Missing) | Err(CellRead::Absent) => RowList::Absent,
+            Ok(ArrayCell::Null) => RowList::Null,
+            Ok(ArrayCell::Elements(elements)) => {
+                RowList::Values(elements.iter().map(row_cell).collect())
+            }
+            Err(CellRead::Undecodable) => RowList::Undecodable,
         }
     }
 
@@ -237,11 +246,11 @@ mod tests {
 
     const DDL: &str = "CREATE TABLE docs (id INT PRIMARY KEY, owner TEXT, public BOOL, \
                        meta JSONB, key UUID, note JSON, score DOUBLE PRECISION, \
-                       taken DATE, blob BYTEA, at TIMESTAMPTZ);";
+                       taken DATE, blob BYTEA, at TIMESTAMPTZ, editors TEXT[]);";
 
     const POLICIED: &str = "CREATE TABLE docs (id INT PRIMARY KEY, owner TEXT, public BOOL, \
                             meta JSONB, key UUID, note JSON, score DOUBLE PRECISION, \
-                            taken DATE, blob BYTEA, at TIMESTAMPTZ);
+                            taken DATE, blob BYTEA, at TIMESTAMPTZ, editors TEXT[]);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs USING (owner = current_setting('app.user_id', true));";
 
@@ -330,6 +339,38 @@ CREATE POLICY docs_owner ON docs USING (owner = current_setting('app.user_id', t
         let event = event(row);
         let view = EventRow::current(&event, &db).unwrap();
         records_from_row_view(description, &view, &db)
+    }
+
+    /// The records `description` says a `docs` insert implies whose `editors`
+    /// cell travels on a text pgoutput stream as `editors`.
+    fn list_records(
+        description: &RecordDescription,
+        editors: pg_walstream::ColumnValue,
+    ) -> Result<Vec<Record>, RowRecordError> {
+        let db = catalog();
+        let event = crate::PgChangeEvent::new(
+            pg_walstream::ChangeEvent {
+                event_type: pg_walstream::EventType::Insert {
+                    schema: "public".into(),
+                    table: "docs".into(),
+                    relation_oid: 1,
+                    data: pg_walstream::RowData::from_pairs(vec![
+                        ("id", pg_walstream::ColumnValue::text("4")),
+                        ("editors", editors),
+                    ]),
+                },
+                lsn: pg_walstream::Lsn::new(0x10),
+                metadata: None,
+                xid: None,
+            },
+            crate::PgCommitPosition::new(crate::PgLsn(0x10), crate::PgXid(3), 1),
+        );
+        let view = EventRow::current(&event, &db).unwrap();
+        records_from_row_view(description, &view, &db)
+    }
+
+    fn editors_description() -> RecordDescription {
+        description(ValueSource::ListElements(column("editors")), vec![])
     }
 
     fn guarded(column: ColumnRead, test: AttributeTest) -> RecordDescription {
@@ -1006,12 +1047,53 @@ CREATE POLICY docs_owner ON docs USING (\"Owner\" = current_setting('app.user_id
     }
 
     #[test]
-    fn a_list_shape_is_refused_rather_than_answered_empty() {
-        let d = description(ValueSource::ListElements(column("owner")), vec![]);
+    fn a_list_subject_names_one_record_per_element() {
+        let got = list_records(
+            &editors_description(),
+            pg_walstream::ColumnValue::text(r#"{alice,NULL,"bob"}"#),
+        )
+        .unwrap();
+        let subjects: Vec<_> = got.iter().map(|record| record.subject.as_str()).collect();
+        assert_eq!(subjects, ["user:alice", "user:bob"]);
+    }
+
+    #[test]
+    fn a_null_or_empty_list_grants_nobody() {
+        for editors in [
+            pg_walstream::ColumnValue::Null,
+            pg_walstream::ColumnValue::text("{}"),
+        ] {
+            assert_eq!(
+                list_records(&editors_description(), editors),
+                Ok(Vec::new())
+            );
+        }
+    }
+
+    #[test]
+    fn an_undecodable_list_is_refused_rather_than_answered_empty() {
         assert_eq!(
-            records(&d, row_of(Value::String("alice".into()))),
-            Err(RowRecordError::UnsupportedValueSource("list"))
+            list_records(
+                &editors_description(),
+                pg_walstream::ColumnValue::text("{alice")
+            ),
+            Err(RowRecordError::Refused(RecordError::ColumnUndecodable(
+                "editors".into()
+            )))
         );
+    }
+
+    #[test]
+    fn a_list_reads_only_an_array_of_its_element_kind() {
+        let db = catalog();
+        assert!(is_evaluable::<Postgres, _>(&editors_description(), &db));
+        for unreadable in [
+            column("owner"),
+            typed_column("editors", ColumnKind::Integer),
+        ] {
+            let described = description(ValueSource::ListElements(unreadable), vec![]);
+            assert!(!is_evaluable::<Postgres, _>(&described, &db));
+        }
     }
 
     #[test]
@@ -1082,7 +1164,7 @@ CREATE POLICY docs_owner ON docs USING (\"Owner\" = current_setting('app.user_id
             values.cell("owner", ColumnKind::Bool),
             RowCell::Text(_)
         ));
-        assert_eq!(values.list("owner", ColumnKind::Text), RowList::Undecodable);
+        assert_eq!(values.list("owner", ColumnKind::Text), RowList::Absent);
     }
 
     #[test]

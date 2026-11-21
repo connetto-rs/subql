@@ -47,7 +47,7 @@ use alloc::vec::Vec;
 
 use sql_traits::prelude::DatabaseLike;
 
-use crate::backend::{CdcEvent, Value};
+use crate::backend::{ArrayCell, CdcEvent, Value};
 use crate::visibility::{EventRow, RowView, Verdict, VisibilityPolicy};
 use crate::{ColumnId, EventKind};
 
@@ -220,9 +220,9 @@ where
 ///
 /// Postgres under any replica identity but `FULL` sends an update's or a
 /// delete's old image as its key with `NULL` padding in every other column,
-/// and the Postgres adaptor reads that padding as [`Value::Missing`], which
-/// means "the source did not carry this cell" and is a different variant
-/// from SQL NULL.
+/// and the Postgres adaptor reads that padding as [`Value::Missing`] and
+/// [`ArrayCell::Missing`], which mean "the source did not carry this cell"
+/// and are different variants from SQL NULL.
 ///
 /// One absent column beside a present one is not key-only: a single
 /// unchanged large value can go unsent under `FULL`, and refusing that
@@ -256,7 +256,10 @@ where
     if non_key.peek().is_none() {
         return false;
     }
-    non_key.all(|ordinal| matches!(row.value_at(ordinal), Ok(Value::Missing)))
+    non_key.all(|ordinal| {
+        matches!(row.value_at(ordinal), Ok(Value::Missing))
+            && matches!(row.list_at(ordinal), Ok(ArrayCell::Missing))
+    })
 }
 
 #[cfg(test)]
@@ -721,6 +724,12 @@ mod tests {
             }
             fn value_at(&self, _: crate::ColumnId) -> Result<Value<Postgres>, crate::ValueError> {
                 Ok(Value::Int(1))
+            }
+            fn list_at(
+                &self,
+                _: crate::ColumnId,
+            ) -> Result<crate::backend::ArrayCell<Postgres>, crate::ValueError> {
+                Ok(crate::backend::ArrayCell::Missing)
             }
         }
         let (db, docs) = catalog();
