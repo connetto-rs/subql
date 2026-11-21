@@ -161,9 +161,11 @@ pub struct MembershipTermDescription {
     /// [`seed_sql`](Self::seed_sql) projects them and each stated row's values
     /// follow, after the subject it projects first.
     pub pairs: Vec<TermColumnPair>,
-    /// The table whose changed rows move which subscribers the term admits, as
-    /// the database stores its name.
-    pub member_table: String,
+    /// The table whose changed rows move which subscribers the term admits,
+    /// by the schema and name the database stores, which
+    /// [`stored_table_id`](catalog_helpers::stored_table_id) resolves back to
+    /// the table [`seed_sql`](Self::seed_sql) reads.
+    pub member_table: catalog_helpers::StoredTableName<'static>,
     /// The column of `member_table` naming the subscriber a row admits, as
     /// the database stores its name.
     pub member_subject: String,
@@ -333,7 +335,6 @@ impl TermDescription {
                 database,
                 movement.member_table,
             )?
-            .name
             .into_owned(),
             member_subject,
             caller: plan.caller,
