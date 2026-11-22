@@ -15,15 +15,15 @@ pub use compiler::{
 pub use drift::SqliteShapeError;
 pub use drift::{
     judge, refusal_reasons, CollationPathStep, Incompatibility, NoRefusals, Publication,
-    PublishedChange, RefusalView, ReplicaIdentity, TableShape, Verdict,
+    PublishedChange, RefusalView, ReplicaIdentity, TableRules, TableShape, Verdict,
+};
+#[cfg(feature = "std")]
+pub use drift::{
+    read_live_rules, DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, InlineLiveReader,
+    LiveCatalog, LiveRules, LiveShapeReader, RefusedTables, RulesFollowing, RulesLoad,
 };
 #[cfg(feature = "pg-streaming")]
 pub use drift::{BlockingLiveReader, BlockingReadError};
-#[cfg(feature = "std")]
-pub use drift::{
-    DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, InlineLiveReader, LiveCatalog,
-    LiveShapeReader, RefusedTables,
-};
 pub use errors::*;
 #[cfg(feature = "pg-sqlite-emu")]
 pub use pg_sqlite_emu::{PgSqliteEmuError, PgSqliteEmuSource};
