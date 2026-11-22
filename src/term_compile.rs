@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use rls2fga::term::{TermChain, TermShapes};
 use rls2fga::types::RelationShapes;
-use rls2fga::types::{Guard, RecordDerivation, ValueSource};
+use rls2fga::types::{Guard, RecordDerivation, SubjectKey, ValueSource};
 use sql_traits::prelude::DatabaseLike;
 use sqlparser::ast::Expr;
 
@@ -169,7 +169,7 @@ fn caller_plan<B: crate::backend::Backend, DB: DatabaseLike>(
     if rules.served_table(row_table) != Some(table) {
         return Err(refuse("read a table other than the subscribed one"));
     }
-    if column_of::<B, _>(template.subject_key.part(), database, table) != Some(term.columns[0]) {
+    if subject_column::<B, _>(&template.subject_key, database, table) != Some(term.columns[0]) {
         return Err(refuse(
             "name the caller from something other than the compared column",
         ));
@@ -319,14 +319,31 @@ fn read_from_one_row<B: crate::backend::Backend, DB: DatabaseLike>(
         .map(|part| column_of::<B, _>(part, database, table_id))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| refuse("name their object from something other than columns"))?;
-    let subject = column_of::<B, _>(template.subject_key.part(), database, table_id)
-        .ok_or_else(|| refuse("name their subject from something other than a column"))?;
+    let subject = subject_column::<B, _>(&template.subject_key, database, table_id)
+        .ok_or_else(|| refuse("name their subject from something other than one column"))?;
 
     Ok(TermMovement {
         member_table: table_id,
         member_keys,
         member_subject: subject,
     })
+}
+
+/// The column `key` names its subject from, when it names it from exactly one
+/// scalar column of `table`.
+///
+/// A composite key names one object through several columns, and the subject a
+/// term admits or moves is the value of a single column.
+fn subject_column<B: crate::backend::Backend, DB: DatabaseLike>(
+    key: &SubjectKey,
+    database: &DB,
+    table: TableId,
+) -> Option<u16> {
+    let mut parts = key.parts();
+    match (parts.next(), parts.next()) {
+        (Some(part), None) => column_of::<B, _>(part, database, table),
+        _ => None,
+    }
 }
 
 /// The column `source` reads, when it reads exactly one scalar column of
@@ -346,5 +363,155 @@ fn column_of<B: crate::backend::Backend, DB: DatabaseLike>(
             catalog_helpers::contract_column_id::<B, _>(database, table, name.as_str())
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use alloc::format;
+    use alloc::vec;
+
+    use rls2fga::term::TermShapes;
+    use rls2fga::translator::TranslatorBuilder;
+    use rls2fga::types::{ConfidenceLevel, RecordDerivation, SubjectKey, ValueSource};
+    use sql_traits::structs::ParserDB;
+    use sqlparser::ast::{Expr, SetExpr, Statement};
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    use super::{caller_plan, member_columns};
+    use crate::access_rules::{AccessRules, Translation};
+    use crate::backend::Postgres;
+    use crate::term::{CompiledTerm, TermCaller};
+    use crate::testing::deployment;
+    use crate::{catalog_helpers, RegisterError, TableId};
+
+    const DDL: &str = "CREATE TABLE project_members(project_id INTEGER, user_id TEXT, \
+                       PRIMARY KEY(project_id, user_id));
+         CREATE TABLE notes(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER);";
+
+    const CALLER: &str = "owner = current_setting('app.user_id', true)";
+
+    const MEMBERSHIP: &str = "project_id IN (SELECT project_id FROM project_members \
+                              WHERE user_id = current_setting('app.user_id', true))";
+
+    fn notes(database: &ParserDB) -> TableId {
+        catalog_helpers::table_id::<Postgres, _>(database, "notes").unwrap()
+    }
+
+    /// The term filtering `notes` on `filter`, comparing `column`.
+    fn term(database: &ParserDB, filter: &str, column: &str) -> CompiledTerm {
+        let sql = format!("SELECT * FROM notes WHERE {filter}");
+        let Statement::Query(query) = Parser::parse_sql(&PostgreSqlDialect {}, &sql)
+            .unwrap()
+            .remove(0)
+        else {
+            unreachable!("a SELECT parses as a query");
+        };
+        let SetExpr::Select(select) = *query.body else {
+            unreachable!("a plain SELECT has a select body");
+        };
+        let expr: Expr = select.selection.unwrap();
+        CompiledTerm {
+            slot: 0,
+            columns: vec![catalog_helpers::contract_column_id::<Postgres, _>(
+                database,
+                notes(database),
+                column,
+            )
+            .unwrap()],
+            expr,
+        }
+    }
+
+    fn shapes(database: &ParserDB, term: &CompiledTerm) -> TermShapes {
+        let rules = AccessRules::Served(database);
+        let translation = Translation::new(
+            TranslatorBuilder::new(deployment::callers())
+                .with_min_confidence(ConfidenceLevel::B)
+                .build(),
+            &rules,
+        );
+        rules
+            .describe_membership_term(
+                &term.expr,
+                &translation.registry,
+                "notes",
+                translation.translator.min_confidence(),
+                None,
+            )
+            .unwrap()
+    }
+
+    /// `shapes` with the one subject read from `first` joined to `rest`, so the
+    /// first part stays the column the term compares or is keyed on.
+    fn with_composite_subject(mut shapes: TermShapes, first: &str, rest: &str) -> TermShapes {
+        let mut joined = 0;
+        for shape in shapes
+            .relations
+            .iter_mut()
+            .flat_map(|entry| &mut entry.shapes)
+        {
+            let RecordDerivation::FromRow { template, .. } = &mut shape.derivation else {
+                continue;
+            };
+            let reads_first = {
+                let mut parts = template.subject_key.parts();
+                matches!(
+                    (parts.next(), parts.next()),
+                    (Some(ValueSource::Column(read)), None) if read.as_str() == first
+                )
+            };
+            if reads_first {
+                template.subject_key = SubjectKey::composite_sources(
+                    ValueSource::column(first),
+                    vec![ValueSource::column(rest)],
+                );
+                joined += 1;
+            }
+        }
+        assert_eq!(joined, 1, "one shape names its subject from {first}");
+        shapes
+    }
+
+    #[test]
+    fn a_caller_comparison_refuses_a_composite_subject() {
+        let database = deployment::db(DDL);
+        let table = notes(&database);
+        let rules = AccessRules::Served(&database);
+        let term = term(&database, CALLER, "owner");
+        let plan = |shapes: &TermShapes| {
+            caller_plan::<Postgres, _>(
+                &term,
+                table,
+                &database,
+                &rules,
+                shapes,
+                TermCaller::Identity,
+            )
+        };
+        let single = shapes(&database, &term);
+        assert!(plan(&single).is_ok());
+        let composite = with_composite_subject(single, "owner", "project_id");
+        assert!(matches!(
+            plan(&composite),
+            Err(RegisterError::MembershipTermRefused(_))
+        ));
+    }
+
+    #[test]
+    fn a_membership_term_refuses_a_composite_member_subject() {
+        let database = deployment::db(DDL);
+        let table = notes(&database);
+        let rules = AccessRules::Served(&database);
+        let term = term(&database, MEMBERSHIP, "project_id");
+        let single = shapes(&database, &term);
+        assert!(member_columns::<Postgres, _>(&term, table, &single, &database, &rules).is_ok());
+        let composite = with_composite_subject(single, "user_id", "project_id");
+        assert!(matches!(
+            member_columns::<Postgres, _>(&term, table, &composite, &database, &rules),
+            Err(RegisterError::MembershipTermRefused(_))
+        ));
     }
 }

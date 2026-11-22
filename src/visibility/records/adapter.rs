@@ -687,6 +687,19 @@ CREATE POLICY docs_owner ON docs USING (owner = current_setting('app.user_id', t
     }
 
     #[test]
+    fn a_composite_subject_reading_a_missing_column_is_refused_at_setup() {
+        let mut described = owner_description();
+        let RecordDerivation::FromRow { template, .. } = &mut described.derivation else {
+            unreachable!("the ownership description reads the row");
+        };
+        template.subject_key = SubjectKey::composite_sources(
+            ValueSource::column("owner"),
+            vec![ValueSource::column("missing")],
+        );
+        assert!(!is_evaluable::<Postgres, _>(&described, &catalog()));
+    }
+
+    #[test]
     fn a_text_owner_column_becomes_one_record() {
         let described = owner_description();
         let got = records(&described, row_of(Value::String("alice".into()))).unwrap();
