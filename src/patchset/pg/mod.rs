@@ -89,7 +89,7 @@ use crate::patchset::columns::{
 pub(crate) mod array;
 pub(crate) mod custom_type;
 
-pub use array::{bind_array_as, PgArray, PgVector, VectorType};
+pub use array::{bind_array_as, replica_array_cell, PgArray, PgVector, VectorType};
 pub use custom_type::{bind_as, CustomTypePgAdapter, PgCustomBinder};
 
 /// Adapter that resolves column names and native diesel binders for a
