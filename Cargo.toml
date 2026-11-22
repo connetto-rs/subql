@@ -588,6 +588,8 @@ pg-sqlite-emu = [
     "diesel?/sqlite",
     "dep:diesel-sqlite-session",
     "dep:pg2sqlite",
+    # Registers the `jsonb` functions and collation a `jsonb` column's translation names.
+    "pg2sqlite?/diesel",
     "sqlite-diff-rs/pg-walstream",
     # The row-lookup read reads back a row of runtime-known shape.
     "dep:diesel-dynamic-schema",

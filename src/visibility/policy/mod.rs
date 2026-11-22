@@ -1125,49 +1125,53 @@ CREATE POLICY pu ON docs FOR UPDATE USING (EXISTS (SELECT 1 FROM team_members
         );
     }
 
-    /// The row as it is grants, and the half judging the result is the
-    /// service's, so its answer decides the replacement.
+    /// The row as it is grants, and the result is judged from its own columns,
+    /// so the replacement is settled with no round trip.
     ///
-    /// alice holds the row and hands the editorship to bob. The rule admitting
-    /// the result is judged on the row's resulting type, which no recipe reads
-    /// locally, and the service here grants alice.
+    /// alice holds the row. Handing the editorship to bob fails the `WITH
+    /// CHECK` the result must pass, which PostgreSQL refuses, and keeping it
+    /// passes, though the delegate here would grant alice either way.
     #[test]
-    fn a_replacement_the_stored_row_grants_takes_the_services_answer_on_the_result() {
+    fn a_replacement_the_stored_row_grants_is_judged_on_its_result_locally() {
         let (db, relations) = translated(UPDATE_TWO_SIDED);
         let docs = docs_id(&db);
-        let event: TestEvent<_> = TestEvent::update(
-            docs,
-            docs_row(text("alice"), text("alice")),
-            docs_row(text("alice"), text("bob")),
-        )
-        .with_pk_columns([0u16]);
         let policy = RowPolicy::new(
             shared(db, &relations),
             Granting::<Principal>::to("user:alice"),
         );
+        let alice = Principal::identity("user:alice");
+        let replace = |editor: &str| {
+            let event: TestEvent<_> = TestEvent::update(
+                docs,
+                docs_row(text("alice"), text("alice")),
+                docs_row(text("alice"), text(editor)),
+            )
+            .with_pk_columns([0u16]);
+            let old = EventRow::previous(&event, policy.catalog()).unwrap();
+            let new = EventRow::current(&event, policy.catalog()).unwrap();
+            block_on(policy.may_write(
+                RowWrite::Update {
+                    old: &old,
+                    new: &new,
+                    assigned: &[],
+                    read: &[],
+                },
+                &alice,
+            ))
+        };
 
-        let old = EventRow::previous(&event, policy.catalog()).unwrap();
-        let new = EventRow::current(&event, policy.catalog()).unwrap();
-        let got = block_on(policy.may_write(
-            RowWrite::Update {
-                old: &old,
-                new: &new,
-                assigned: &[],
-                read: &[],
-            },
-            &Principal::identity("user:alice"),
-        ));
-
+        assert!(policy.answers_locally(docs, ActionStatement::Update));
         assert_eq!(
-            got,
+            replace("bob"),
+            Ok(Verdict::Deny),
+            "the result names bob as editor, which alice's check refuses"
+        );
+        assert_eq!(
+            replace("alice"),
             Ok(Verdict::Allow),
-            "the service's grant on the resulting row is the answer"
+            "the result keeps alice as editor"
         );
-        assert_eq!(
-            policy.inner().calls(),
-            1,
-            "the row as it is grants her, so the result is asked"
-        );
+        assert_eq!(policy.inner().calls(), 0, "and the service is never asked");
     }
 
     /// `WITH CHECK` through a helper that looks `docs` up at the row's own key,
@@ -2031,68 +2035,47 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
     /// half, so a reader naming the halves asks for relations the model never
     /// defined: the local path answered nothing and the service rejected the
     /// question. Postgres applies a lone `USING` clause to the result as well, so
-    /// the one relation judges both versions and both must grant. The row as it
-    /// is answers locally and the result is the service's, which grants alice
-    /// here.
+    /// the one relation judges both versions and both must grant. Both versions
+    /// are decided from their own columns and the watcher's keys, with no round
+    /// trip, though the delegate here would grant alice.
     #[test]
     fn a_replacement_on_one_condition_is_answered_from_both_versions() {
         let (db, relations) = translated_with_keys(HELD_KEYS);
         let notes = notes_id(&db);
         let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::to("user:alice"));
-
-        assert!(
-            !policy.answers_locally(notes, ActionStatement::Update),
-            "the resulting row is judged on its own type, which only the service holds"
-        );
-
-        // alice holds the row and hands it to bob. The row as it is grants her,
-        // so the result is asked, and the service's answer is the verdict.
         let handover: TestEvent<_> =
             TestEvent::update(notes, notes_row("alice"), notes_row("bob")).with_pk_columns([0u16]);
         let old = EventRow::previous(&handover, policy.catalog()).unwrap();
         let new = EventRow::current(&handover, policy.catalog()).unwrap();
-        let alice = Principal::holding("user:alice", &[]);
-
-        let got = block_on(policy.may_write(
-            RowWrite::Update {
-                old: &old,
-                new: &new,
-                assigned: &[],
-                read: &[],
-            },
-            &alice,
-        ));
-
-        assert_eq!(
-            got,
-            Ok(Verdict::Allow),
-            "the service's grant on the resulting row is the answer"
-        );
-        assert_eq!(
-            policy.inner().calls(),
-            1,
-            "the row as it is grants her, so the result is asked"
-        );
-
-        // bob does not hold the row as it is, which refuses him with no round
-        // trip, whatever he writes into it.
-        let taken: TestEvent<_> =
-            TestEvent::update(notes, notes_row("alice"), notes_row("bob")).with_pk_columns([0u16]);
-        let old = EventRow::previous(&taken, policy.catalog()).unwrap();
-        let new = EventRow::current(&taken, policy.catalog()).unwrap();
-        assert_eq!(
+        let verdict_for = |writer: &Principal| {
             block_on(policy.may_write(
                 RowWrite::Update {
                     old: &old,
                     new: &new,
                     assigned: &[],
-                    read: &[]
+                    read: &[],
                 },
-                &Principal::holding("user:bob", &[])
-            )),
-            Ok(Verdict::Deny)
+                writer,
+            ))
+        };
+
+        assert!(policy.answers_locally(notes, ActionStatement::Update));
+        assert_eq!(
+            verdict_for(&Principal::holding("user:alice", &[])),
+            Ok(Verdict::Deny),
+            "alice holds the row as it is but not the result, which names bob"
         );
-        assert_eq!(policy.inner().calls(), 1);
+        assert_eq!(
+            verdict_for(&Principal::holding("user:alice", &["bob"])),
+            Ok(Verdict::Allow),
+            "holding bob's key, alice holds both versions"
+        );
+        assert_eq!(
+            verdict_for(&Principal::holding("user:bob", &[])),
+            Ok(Verdict::Deny),
+            "bob holds the result but not the row as it is"
+        );
+        assert_eq!(policy.inner().calls(), 0, "and the service is never asked");
     }
 
     /// Each verb carries only the versions it has, so a judgement naming one it

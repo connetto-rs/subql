@@ -3,6 +3,7 @@
 use crate::TableId;
 #[cfg(feature = "std")]
 use crate::{persistence::shard::ShardFingerprintEnvelope, MergeJobId};
+use alloc::boxed::Box;
 use alloc::string::String;
 use thiserror::Error;
 
@@ -54,8 +55,9 @@ pub enum CatalogError {
     Lookup {
         /// Table the lookup was about.
         table_id: TableId,
-        /// The underlying resolver error.
-        error: sql_traits::errors::LookupError,
+        /// The underlying resolver error, boxed so it does not size every
+        /// dispatch error.
+        error: Box<sql_traits::errors::LookupError>,
     },
 }
 

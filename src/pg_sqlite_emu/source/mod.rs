@@ -17,7 +17,9 @@ use bytes::BytesMut;
 use diesel::{sql_query, RunQueryDsl, SqliteConnection};
 use diesel_sqlite_session::{Session, SqliteSessionExt};
 use hashbrown::{HashMap, HashSet};
-use pg2sqlite::{options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite};
+use pg2sqlite::{
+    options::Pg2SqliteOptions, pg2sqlite::Pg2Sqlite, traits::translation_options::JsonbFunctions,
+};
 use pg_walstream::{encode_message, Lsn, PgOutputDecoder};
 use sql_traits::prelude::{DatabaseLike, TableLike};
 use sql_traits::structs::ParserDB;
@@ -147,8 +149,10 @@ impl PgSqliteEmuSource {
     /// The DDL is parsed twice: once as Postgres SQL to build the
     /// engine-facing [`ParserDB`] catalog, and once by `pg2sqlite` to
     /// translate every statement into SQLite DDL applied to
-    /// `connection`. After translation the connection is attached to
-    /// a fresh session tracking every declared table.
+    /// `connection`. The `jsonb` functions and collation the translation
+    /// names are registered on `connection` first. After translation the
+    /// connection is attached to a fresh session tracking every declared
+    /// table.
     ///
     /// # Errors
     ///
@@ -176,11 +180,14 @@ impl PgSqliteEmuSource {
         let pg_catalog = ParserDB::parse::<sqlparser::dialect::PostgreSqlDialect>(pg_ddl)
             .map_err(|e| PgSqliteEmuError::Catalog(alloc::format!("{e:?}")))?;
 
+        let jsonb_functions = JsonbFunctions::new("pg_jsonb", "pg_jsonb_text", "pg_jsonb");
+        jsonb_functions.register(&mut connection)?;
+        let translation_options = Pg2SqliteOptions::default().with_jsonb_functions(jsonb_functions);
         let translator = Pg2Sqlite::default()
             .sql(pg_ddl)
             .map_err(|e| PgSqliteEmuError::Translate(alloc::format!("{e:?}")))?;
         let sqlite_ddl = translator
-            .translate_to_sql(&Pg2SqliteOptions::default())
+            .translate_to_sql(&translation_options)
             .map_err(|e| PgSqliteEmuError::Translate(alloc::format!("{e:?}")))?;
         // DDL from the pg2sqlite translator: diesel cannot express CREATE TABLE
         // DDL through its query DSL, so raw sql_query is correct here.

@@ -996,19 +996,21 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#74f858fee0576a7614977a34a605d5022542f1c5"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#bcaa2738cee23b07ea1e02c041066c26c9b0a03b"
 dependencies = [
+ "diesel",
  "sql-traits",
- "sql-values 0.5.1",
+ "sql-values 0.6.0",
  "sqlparser",
  "sqlparser-plpgsql",
+ "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
 ]
 
 [[package]]
 name = "pg_walstream"
 version = "0.10.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#78c764a2d51ca3a05c25c119bc850be8f55b51e7"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#f842c1836590843210226ea384c7dc576fb645b1"
 dependencies = [
  "bytes",
  "chrono",
@@ -1197,7 +1199,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#e7483cc359fc060a968f3fe0a038395120944286"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#35308c06fe6dcd10e088df81bb1863636c4f6261"
 dependencies = [
  "rls2fga-types",
  "serde",
@@ -1211,7 +1213,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#e7483cc359fc060a968f3fe0a038395120944286"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#35308c06fe6dcd10e088df81bb1863636c4f6261"
 dependencies = [
  "serde",
  "sql-values 0.6.0",
@@ -1387,16 +1389,18 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#8357da400fa75be971af0fd3cafa7ac50af76fce"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#cba6f1062569612cac2c2f730fb62d1230c9800f"
 dependencies = [
  "geometric-traits",
  "once_cell",
  "serde",
  "sha2",
- "sql-values 0.5.1",
+ "sql-values 0.6.0",
  "sqlparser",
  "sqlparser-canonicalize",
+ "sqlparser-expr-eval",
  "sqlparser-plpgsql",
+ "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
  "unicode-normalization",
 ]
@@ -1415,18 +1419,8 @@ dependencies = [
 
 [[package]]
 name = "sql-values"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa63391be723434747b0c2ffc2e7270f4a7a476d083b55cdda961c4773d1d5e4"
-dependencies = [
- "jiff",
- "thiserror",
-]
-
-[[package]]
-name = "sql-values"
 version = "0.6.0"
-source = "git+https://github.com/connetto-rs/sql-values?branch=main#d599af64e6d73950e9f48c5a969a0bdfe9835247"
+source = "git+https://github.com/connetto-rs/sql-values?branch=main#bee0f26da9575f1f0ab38550e3188cb25590058e"
 dependencies = [
  "jiff",
  "thiserror",
@@ -1459,7 +1453,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#9429cd30ce211eeb8676c81b685630560969c147"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
 dependencies = [
  "log",
  "recursive",
@@ -1479,6 +1473,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlparser-expr-eval"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#197fafd3d76a149fe7a4bd105db940d882f80c8a"
+dependencies = [
+ "rpds",
+ "sql-values 0.6.0",
+ "sqlparser",
+]
+
+[[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
 source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#f5ea51d2d98a1ce18fc47f74185836165fcac612"
@@ -1491,7 +1495,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#9429cd30ce211eeb8676c81b685630560969c147"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
 dependencies = [
  "proc-macro2",
  "quote",

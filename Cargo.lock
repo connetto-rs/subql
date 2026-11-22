@@ -332,7 +332,7 @@ dependencies = [
  "regex",
  "rustc-hash 2.1.3",
  "shlex",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1214,9 +1214,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2611,19 +2611,21 @@ dependencies = [
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#d1ba92d9e05b1d51b9f97ed73b7e358710fea97e"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#bcaa2738cee23b07ea1e02c041066c26c9b0a03b"
 dependencies = [
+ "diesel",
  "sql-traits",
- "sql-values 0.5.1",
+ "sql-values 0.6.0",
  "sqlparser",
  "sqlparser-plpgsql",
+ "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
 ]
 
 [[package]]
 name = "pg_diesel"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#09f38835f74df63a7da104aa2fa4254757533944"
 dependencies = [
  "diesel",
  "pg_diesel_core",
@@ -2637,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_core"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#09f38835f74df63a7da104aa2fa4254757533944"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -2650,7 +2652,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg14"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#09f38835f74df63a7da104aa2fa4254757533944"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -2660,7 +2662,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg15"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#09f38835f74df63a7da104aa2fa4254757533944"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -2670,7 +2672,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg16"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#09f38835f74df63a7da104aa2fa4254757533944"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -2680,7 +2682,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg17"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#09f38835f74df63a7da104aa2fa4254757533944"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -2690,7 +2692,7 @@ dependencies = [
 [[package]]
 name = "pg_diesel_pg18"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#053f0dc3d6ec395325e50ec816e21793cd7cb664"
+source = "git+https://github.com/connetto-rs/pg_diesel?branch=main#09f38835f74df63a7da104aa2fa4254757533944"
 dependencies = [
  "bigdecimal",
  "diesel",
@@ -2700,7 +2702,7 @@ dependencies = [
 [[package]]
 name = "pg_walstream"
 version = "0.10.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#78c764a2d51ca3a05c25c119bc850be8f55b51e7"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#f842c1836590843210226ea384c7dc576fb645b1"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -2966,7 +2968,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6e4d69d0fa3e7f6f9cf6b53a0e83e4fc99ba3586f65ce166cff30bd13bb4ad2"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -2985,7 +2987,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3313,7 +3315,7 @@ dependencies = [
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#542e6424dd7b1ac062f7b706c9e0bbd90d676ee0"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#35308c06fe6dcd10e088df81bb1863636c4f6261"
 dependencies = [
  "openfga-client",
  "prost",
@@ -3329,7 +3331,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#542e6424dd7b1ac062f7b706c9e0bbd90d676ee0"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#35308c06fe6dcd10e088df81bb1863636c4f6261"
 dependencies = [
  "serde",
  "sql-values 0.6.0",
@@ -3795,16 +3797,18 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#d1715fc3cf04664287f14178c1539784120b96c2"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#cba6f1062569612cac2c2f730fb62d1230c9800f"
 dependencies = [
  "geometric-traits",
  "once_cell",
  "serde",
  "sha2 0.10.9",
- "sql-values 0.5.1",
+ "sql-values 0.6.0",
  "sqlparser",
  "sqlparser-canonicalize",
+ "sqlparser-expr-eval",
  "sqlparser-plpgsql",
+ "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
  "unicode-normalization",
 ]
@@ -3823,18 +3827,8 @@ dependencies = [
 
 [[package]]
 name = "sql-values"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa63391be723434747b0c2ffc2e7270f4a7a476d083b55cdda961c4773d1d5e4"
-dependencies = [
- "jiff",
- "thiserror",
-]
-
-[[package]]
-name = "sql-values"
 version = "0.6.0"
-source = "git+https://github.com/connetto-rs/sql-values?branch=main#d599af64e6d73950e9f48c5a969a0bdfe9835247"
+source = "git+https://github.com/connetto-rs/sql-values?branch=main#bee0f26da9575f1f0ab38550e3188cb25590058e"
 dependencies = [
  "jiff",
  "thiserror",
@@ -3869,7 +3863,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#2ff068b30954e1d67889550fae8539640422c61a"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
 dependencies = [
  "log",
  "recursive",
@@ -3889,6 +3883,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlparser-expr-eval"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#197fafd3d76a149fe7a4bd105db940d882f80c8a"
+dependencies = [
+ "rpds",
+ "sql-values 0.6.0",
+ "sqlparser",
+]
+
+[[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
 source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#f5ea51d2d98a1ce18fc47f74185836165fcac612"
@@ -3901,7 +3905,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#2ff068b30954e1d67889550fae8539640422c61a"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4627,9 +4631,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

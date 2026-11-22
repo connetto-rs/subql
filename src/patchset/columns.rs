@@ -65,7 +65,7 @@ impl<'db, DB: DatabaseLike> ColumnIndex<'db, DB> {
                         .table_id(table)
                         .and_then(|id| u32::try_from(id).ok())
                         .unwrap_or(u32::MAX),
-                    error,
+                    error: Box::new(error),
                 })?
                 .map(|column| IndexedColumn {
                     column,
