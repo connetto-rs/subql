@@ -929,6 +929,35 @@ mod tests {
         assert_eq!(stored, "2026-09-23 13:42:07.957522+00:00");
     }
 
+    /// A value PostgreSQL refuses for its column is refused before SQLite runs
+    /// the statement.
+    #[test]
+    fn a_value_postgresql_refuses_is_a_translate_error() {
+        let mut src = PgSqliteEmuSource::open_in_memory(
+            "CREATE TABLE stamps (id INT PRIMARY KEY, observed TIMESTAMPTZ NOT NULL);",
+        )
+        .unwrap();
+        assert!(matches!(
+            src.execute_sql("INSERT INTO stamps VALUES (1, 'not a time')"),
+            Err(super::PgSqliteEmuError::Translate(_))
+        ));
+    }
+
+    /// A translated statement SQLite refuses reports the SQLite error.
+    #[test]
+    fn a_statement_sqlite_refuses_is_an_apply_error() {
+        let mut src = PgSqliteEmuSource::open_in_memory(
+            "CREATE TABLE stamps (id INT PRIMARY KEY, observed TIMESTAMPTZ NOT NULL);",
+        )
+        .unwrap();
+        let insert = "INSERT INTO stamps VALUES (1, '2026-09-23 15:42:07+02')";
+        assert_eq!(src.execute_sql(insert).unwrap(), 1);
+        assert!(matches!(
+            src.execute_sql(insert),
+            Err(super::PgSqliteEmuError::ApplyDdl(_))
+        ));
+    }
+
     /// The emulated stream names a table and its columns as PostgreSQL stores
     /// them, so a catalog that wrote them unquoted in mixed case is announced
     /// and read under the folded names a real server sends.
