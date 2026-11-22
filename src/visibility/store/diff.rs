@@ -1308,6 +1308,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         }
     }
 
@@ -1360,6 +1361,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         };
         Shapes::new::<Postgres>(db, &[entry], &[])
     }
@@ -1380,6 +1382,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         }
     }
 
@@ -1549,6 +1552,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         };
         let store = Shapes::new::<Postgres>(db, &[entry], &[]);
 
@@ -1608,6 +1612,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         };
         let store = Shapes::new::<Postgres>(db, &[held("user"), held("team")], &[]);
 
@@ -1700,6 +1705,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         };
         let granted = record("docs:4", can_select_relation(), "user:root");
         let constant = RelationShapes {
@@ -1714,6 +1720,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         };
         let store = Shapes::new::<Postgres>(db, &[replayed, constant], &[]);
 
@@ -1764,6 +1771,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         });
         let store = Shapes::new::<Postgres>(db, &relations, &enumerations);
 
@@ -1817,6 +1825,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         };
         let replayed = RelationShapes {
             type_name: test_names::docs_type(),
@@ -1836,6 +1845,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         };
         let store = Shapes::new::<Postgres>(db, &[unbound, replayed], &[]);
 
@@ -1891,6 +1901,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         });
         let store = Shapes::new::<Postgres>(db, &relations, &[]);
 
@@ -1966,6 +1977,7 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             shapes: vec![shape],
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
         };
         let same = "SELECT object, relation, subject FROM grants;";
         let store = Shapes::new::<Postgres>(
