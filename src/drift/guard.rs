@@ -716,13 +716,9 @@ where
     /// A failed or cancelled read leaves the rules stale, so the next call
     /// reads again.
     async fn settle_rules(&mut self) -> Result<(), R::Error> {
-        if !self
-            .following
-            .as_ref()
-            .is_some_and(|following| following.stale)
-        {
+        let Some(following) = self.following.as_mut().filter(|following| following.stale) else {
             return Ok(());
-        }
+        };
         let tables = self
             .known
             .iter()
@@ -730,9 +726,6 @@ where
             .filter(|table| !self.refusals.is_refused(*table));
         let LiveRules { database, rules } =
             read_rules_of(&self.catalog, &mut self.reader, tables).await?;
-        let Some(following) = &mut self.following else {
-            return Ok(());
-        };
         let changed: Vec<TableId> = rules
             .iter()
             .filter(|(table, read)| following.last.get(table) != Some(read))
@@ -992,7 +985,7 @@ mod tests {
                 .map(|table| {
                     (
                         TableShape::from_table::<Postgres, _>(table, &*catalog).unwrap(),
-                        TableRules::of(table, &*catalog).unwrap(),
+                        TableRules::of(table, &*catalog),
                     )
                 });
             drop(catalog);
@@ -1013,7 +1006,7 @@ mod tests {
                     catalog
                         .table_by_target(table, IdentifierCase::AsWritten)
                         .unwrap()
-                        .map(|found| TableRules::of(found, &catalog).unwrap())
+                        .map(|found| TableRules::of(found, &catalog))
                 })
                 .collect();
             Ok((catalog, rules))
@@ -1174,24 +1167,30 @@ mod tests {
             .table_by_target(TargetName::parse(name).unwrap(), IdentifierCase::AsWritten)
             .unwrap()
             .unwrap();
-        TableRules::of(found, database).unwrap()
+        TableRules::of(found, database)
     }
 
-    /// The tables a `RulesChanged` item names, asserting the database it
-    /// carries holds the rules `live` declares for each.
-    fn rules_changed_tables(
-        item: Option<SourceItemOf<Guard<TransactionSource>>>,
+    /// Assert `item` is a `RulesChanged` naming `changed`, whose database
+    /// holds the rules `live` declares for each table.
+    fn assert_rules_changed(
+        item: Option<&SourceItemOf<Guard<TransactionSource>>>,
         live: &str,
-    ) -> Vec<TableId> {
-        let Some(SourceItem::Relation(DriftSignal::RulesChanged { tables, database })) = item
-        else {
-            panic!("the item must be the changed rules");
-        };
+        changed: &[TableId],
+    ) {
         let expected = parse(live);
-        for name in ["policy_changes", "docs", "notes"] {
-            assert_eq!(rules_in(&database, name), rules_in(&expected, name));
-        }
-        tables
+        let holds_live_rules = |database: &ParserDB| {
+            ["policy_changes", "docs", "notes"]
+                .into_iter()
+                .all(|name| rules_in(database, name) == rules_in(&expected, name))
+        };
+        assert!(
+            matches!(
+                item,
+                Some(SourceItem::Relation(DriftSignal::RulesChanged { tables, database }))
+                    if tables == changed && holds_live_rules(database)
+            ),
+            "the item must name {changed:?} with the live rules: {item:?}"
+        );
     }
 
     fn transaction(items: Vec<SourceItemOf<TransactionSource>>) -> TransactionSource {
@@ -1693,12 +1692,19 @@ mod tests {
         let live = rules_changed("USING (can_read(id))", "USING (can_read(id) AND id > 0)");
         probe.set_live(&live);
 
-        let tables = rules_changed_tables(block_on(guard.next_item()).unwrap(), &live);
-        assert_eq!(tables, [docs]);
-        let Some(SourceItem::Event(event)) = block_on(guard.next_item()).unwrap() else {
-            panic!("the table's event must follow the changed rules");
-        };
-        assert_eq!(event.table_id(guard.catalog()), docs);
+        assert_rules_changed(
+            block_on(guard.next_item()).unwrap().as_ref(),
+            &live,
+            &[docs],
+        );
+        assert_eq!(
+            block_on(guard.next_item())
+                .unwrap()
+                .and_then(SourceItem::into_event)
+                .map(|event| event.table_id(guard.catalog())),
+            Some(docs),
+            "the table's event must follow the changed rules"
+        );
         assert_eq!(
             block_on(guard.next_item())
                 .unwrap()
@@ -1724,8 +1730,11 @@ mod tests {
         let live = format!("{RULES} GRANT SELECT ON notes TO app_user;");
         probe.set_live(&live);
 
-        let tables = rules_changed_tables(block_on(guard.next_item()).unwrap(), &live);
-        assert_eq!(tables, [notes]);
+        assert_rules_changed(
+            block_on(guard.next_item()).unwrap().as_ref(),
+            &live,
+            &[notes],
+        );
         assert_eq!(
             block_on(guard.next_item())
                 .unwrap()
@@ -1765,13 +1774,70 @@ mod tests {
         assert!(poll_once(next.as_mut()).is_pending());
         clock.advance(INTERVAL);
 
-        let Poll::Ready(Ok(Some(SourceItem::Relation(DriftSignal::RulesChanged {
-            tables, ..
-        })))) = poll_once(next.as_mut())
-        else {
-            panic!("the run must find the changed helper");
-        };
-        assert_eq!(tables, [docs]);
+        assert!(
+            matches!(
+                poll_once(next.as_mut()),
+                Poll::Ready(Ok(Some(SourceItem::Relation(DriftSignal::RulesChanged {
+                    tables, ..
+                })))) if tables == [docs]
+            ),
+            "the run must find the changed helper"
+        );
+    }
+
+    #[test]
+    fn a_failed_rules_read_in_an_idle_run_is_returned_and_read_again() {
+        let docs = table(&parse(RULES), "docs");
+        let probe = LiveProbe::new(parse(RULES));
+        let clock = Arc::new(ManualClock::new(0));
+        let mut guard = following_guard(IdleSource(Arc::default()), &probe, &clock);
+        let live = rules_changed("AS $$ SELECT d > 0 $$", "AS $$ SELECT d > 1 $$");
+        probe.set_live(&live);
+        *probe.failing.lock() = Some(EVERY_TABLE);
+        {
+            let mut next = pin!(guard.next_item());
+            assert!(poll_once(next.as_mut()).is_pending());
+            clock.advance(INTERVAL);
+            assert_eq!(
+                poll_once(next.as_mut()).map(|read| read.is_err()),
+                Poll::Ready(true),
+                "the run returns the failed rules read"
+            );
+        }
+
+        assert!(
+            matches!(
+                block_on(guard.next_item()),
+                Ok(Some(SourceItem::Relation(DriftSignal::RulesChanged { tables, .. })))
+                    if tables == [docs]
+            ),
+            "the next item reads the rules again"
+        );
+    }
+
+    #[test]
+    fn a_failed_shape_and_rules_read_is_returned_and_read_again() {
+        let docs = table(&parse(RULES), "docs");
+        let probe = LiveProbe::new(parse(RULES));
+        let clock = Arc::new(ManualClock::new(0));
+        let mut guard = following_guard(IdleSource(Arc::default()), &probe, &clock);
+        let live = rules_changed("USING (can_read(id))", "USING (can_read(id) AND id > 0)");
+        probe.set_live(&live);
+        *probe.failing.lock() = Some("docs");
+        clock.advance(INTERVAL);
+
+        assert!(
+            block_on(guard.next_item()).is_err(),
+            "the run returns the failed read"
+        );
+        assert!(
+            matches!(
+                block_on(guard.next_item()),
+                Ok(Some(SourceItem::Relation(DriftSignal::RulesChanged { tables, .. })))
+                    if tables == [docs]
+            ),
+            "the resumed run reads the table again and finds its changed policy"
+        );
     }
 
     #[test]
@@ -1797,8 +1863,11 @@ mod tests {
         ))
         .unwrap();
 
-        let tables = rules_changed_tables(block_on(guard.next_item()).unwrap(), &live);
-        assert_eq!(tables, [docs]);
+        assert_rules_changed(
+            block_on(guard.next_item()).unwrap().as_ref(),
+            &live,
+            &[docs],
+        );
         assert!(block_on(guard.next_item())
             .unwrap()
             .and_then(SourceItem::into_event)
@@ -1818,12 +1887,15 @@ mod tests {
         probe.set_live(&live);
         *probe.failing.lock() = Some(EVERY_TABLE);
 
-        assert!(matches!(
-            block_on(guard.next_item()),
-            Err(DriftGuardError::Shape(_))
-        ));
-        let tables = rules_changed_tables(block_on(guard.next_item()).unwrap(), &live);
-        assert_eq!(tables, [notes]);
+        assert!(
+            block_on(guard.next_item()).is_err(),
+            "the failed rules read is returned"
+        );
+        assert_rules_changed(
+            block_on(guard.next_item()).unwrap().as_ref(),
+            &live,
+            &[notes],
+        );
         assert_eq!(
             block_on(guard.next_item())
                 .unwrap()
@@ -1849,21 +1921,55 @@ mod tests {
         );
         probe.set_live(&live);
 
-        let Some(SourceItem::Relation(DriftSignal::Refused { table: refused, .. })) =
-            block_on(guard.next_item()).unwrap()
-        else {
-            panic!("the changed shape must refuse the table first");
-        };
-        assert_eq!(refused, docs);
-        let Some(SourceItem::Relation(DriftSignal::RulesChanged { tables, .. })) =
-            block_on(guard.next_item()).unwrap()
-        else {
-            panic!("the changed grant must follow");
-        };
-        assert_eq!(tables, [notes]);
+        assert!(
+            matches!(
+                block_on(guard.next_item()).unwrap(),
+                Some(SourceItem::Relation(DriftSignal::Refused { table, .. })) if table == docs
+            ),
+            "the changed shape must refuse the table first"
+        );
+        assert!(
+            matches!(
+                block_on(guard.next_item()).unwrap(),
+                Some(SourceItem::Relation(DriftSignal::RulesChanged { tables, .. }))
+                    if tables == [notes]
+            ),
+            "the changed grant must follow"
+        );
         assert_eq!(
             probe.reads().last().map(String::as_str),
             Some("rules(notes, policy_changes)")
         );
+    }
+
+    #[test]
+    fn the_live_rules_are_the_rules_of_each_catalog_table_the_one_load_found() {
+        let catalog = parse(RULES);
+        let live = rules_changed("CREATE TABLE notes (id INTEGER PRIMARY KEY);", "");
+        let probe = LiveProbe::new(parse(&live));
+        let read = block_on(read_live_rules(&catalog, &mut LiveReader(probe.clone()))).unwrap();
+        let mut held = [table(&catalog, "policy_changes"), table(&catalog, "docs")];
+        held.sort_unstable();
+        assert_eq!(read.rules().keys().copied().collect::<Vec<_>>(), held);
+        for name in ["policy_changes", "docs"] {
+            assert_eq!(
+                read.rules().get(&table(&catalog, name)),
+                Some(&rules_in(read.database(), name))
+            );
+        }
+        assert_eq!(probe.reads(), [EVERY_TABLE]);
+    }
+
+    #[test]
+    fn rules_changed_signals_are_equal_when_they_name_the_same_tables_from_one_read() {
+        let read = Arc::new(parse(RULES));
+        let docs = table(&read, "docs");
+        let changed = |database: &Arc<ParserDB>| DriftSignal::RulesChanged {
+            tables: vec![docs],
+            database: Arc::clone(database),
+        };
+        assert_eq!(changed(&read), changed(&read));
+        assert_ne!(changed(&read), changed(&Arc::new(parse(RULES))));
+        assert_ne!(changed(&read), DriftSignal::ChangesLost { table: docs });
     }
 }

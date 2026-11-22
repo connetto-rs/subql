@@ -432,6 +432,10 @@ fn every_rule_change_changes_the_live_rules_of_the_table() {
         "CREATE OR REPLACE FUNCTION is_member(d INT) RETURNS BOOLEAN LANGUAGE sql STABLE
              AS $$ SELECT EXISTS (SELECT 1 FROM members WHERE doc_id = d AND user_id IS NOT NULL) $$",
         "ALTER FUNCTION can_read(INT) SECURITY DEFINER",
+        "CREATE OR REPLACE FUNCTION can_read(d INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+             RETURN is_member(d)",
+        "CREATE OR REPLACE FUNCTION can_read(d INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+             RETURN is_member(d) AND d > 0",
         "ALTER FUNCTION is_member(INT) SET search_path = public",
         "CREATE POLICY docs_write ON docs FOR INSERT WITH CHECK (id > 0)",
         "GRANT INSERT ON docs TO PUBLIC",

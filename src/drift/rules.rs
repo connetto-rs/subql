@@ -22,7 +22,6 @@ use sql_traits::prelude::{
     ColumnGrantLike, ColumnLike, DatabaseLike, FunctionBody, FunctionLike, GrantLike, PolicyLike,
     TableLike,
 };
-use sql_traits::structs::PolicyExpression;
 
 /// The canonical rules of one table, compared between two live reads.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -33,57 +32,46 @@ pub struct TableRules {
 
 impl TableRules {
     /// The rules of `table` in `database`.
-    ///
-    /// # Errors
-    ///
-    /// [`LookupError`] when `database` does not hold `table`.
-    pub fn of<DB: DatabaseLike>(table: &DB::Table, database: &DB) -> Result<Self, LookupError> {
+    #[must_use]
+    pub fn of<DB: DatabaseLike>(table: &DB::Table, database: &DB) -> Self {
         let mut facts = Vec::new();
-        facts.push(table_fact(table, database)?);
+        table_fact(table, database, &mut facts);
         let mut reached = BTreeSet::new();
-        for policy in table.policies(database)? {
-            facts.push(policy_fact(policy, database));
-            match policy.using_functions(database) {
-                Ok(functions) => reached.extend(functions),
-                Err(error) => {
-                    facts.push(format!("policy {:?} using calls: {error}", policy.name()));
-                }
-            }
-            match policy.check_functions(database) {
-                Ok(functions) => reached.extend(functions),
-                Err(error) => {
-                    facts.push(format!("policy {:?} check calls: {error}", policy.name()));
-                }
-            }
+        for policy in answer(table.policies(database), &mut facts)
+            .into_iter()
+            .flatten()
+        {
+            policy_fact(policy, database, &mut facts);
+            let using = answer(policy.using_functions(database), &mut facts);
+            reached.extend(using.into_iter().flatten());
+            let check = answer(policy.check_functions(database), &mut facts);
+            reached.extend(check.into_iter().flatten());
         }
         let mut unvisited: Vec<&DB::Function> = reached.iter().copied().collect();
         while let Some(function) = unvisited.pop() {
-            match function.referenced_functions(database) {
-                Ok(called) => {
-                    for callee in called {
-                        if reached.insert(callee) {
-                            unvisited.push(callee);
-                        }
-                    }
+            let called = answer(function.referenced_functions(database), &mut facts);
+            for callee in called.into_iter().flatten() {
+                if reached.insert(callee) {
+                    unvisited.push(callee);
                 }
-                Err(error) => facts.push(format!(
-                    "function {} calls: {error}",
-                    function.target_name()
-                )),
             }
         }
         for function in reached {
-            facts.push(function_fact(function, database));
+            function_fact(function, database, &mut facts);
         }
-        for grant in table.grants(database)? {
+        for grant in answer(table.grants(database), &mut facts)
+            .into_iter()
+            .flatten()
+        {
             facts.push(format!("table grant {}", grant_fact(grant, database)));
         }
         for grant in database
             .column_grants()
             .filter(|grant| grant.table(database) == Some(table))
         {
-            let mut columns: Vec<&str> = grant
-                .columns(table, database)?
+            let mut columns: Vec<&str> = answer(grant.columns(table, database), &mut facts)
+                .into_iter()
+                .flatten()
                 .map(ColumnLike::column_name)
                 .collect();
             columns.sort_unstable();
@@ -95,7 +83,7 @@ impl TableRules {
         }
         facts.sort_unstable();
         facts.dedup();
-        Ok(Self { facts })
+        Self { facts }
     }
 
     /// The canonical facts, in their sorted order.
@@ -104,43 +92,49 @@ impl TableRules {
     }
 }
 
+/// `read`'s answer, or `None` with its error kept among `facts`.
+fn answer<T>(read: Result<T, LookupError>, facts: &mut Vec<String>) -> Option<T> {
+    match read {
+        Ok(answer) => Some(answer),
+        Err(error) => {
+            facts.push(format!("unread: {error}"));
+            None
+        }
+    }
+}
+
 /// `table`'s owner and row-security flags.
-fn table_fact<T: TableLike>(table: &T, database: &T::DB) -> Result<String, LookupError> {
-    Ok(format!(
-        "table owner {:?} row security {} forced {}",
-        table.owner(database)?,
-        table.has_row_level_security(database)?,
-        table.has_forced_row_level_security(database)?,
-    ))
+fn table_fact<T: TableLike>(table: &T, database: &T::DB, facts: &mut Vec<String>) {
+    let owner = answer(table.owner(database), facts);
+    let enabled = answer(table.has_row_level_security(database), facts);
+    let forced = answer(table.has_forced_row_level_security(database), facts);
+    facts.push(format!(
+        "table owner {owner:?} row security {enabled:?} forced {forced:?}"
+    ));
 }
 
 /// Everything `policy` declares.
-fn policy_fact<P: PolicyLike>(policy: &P, database: &P::DB) -> String {
+fn policy_fact<P: PolicyLike>(policy: &P, database: &P::DB, facts: &mut Vec<String>) {
     let mut roles: Vec<String> = policy.roles(database).map(ToString::to_string).collect();
     roles.sort_unstable();
-    format!(
-        "policy {:?} {} {} to ({}) using {} check {}",
+    let using = answer(policy.using_clause(database), facts)
+        .flatten()
+        .map(|clause| clause.expression().to_string());
+    let check = answer(policy.check_clause(database), facts)
+        .flatten()
+        .map(|clause| clause.expression().to_string());
+    facts.push(format!(
+        "policy {:?} {} {} to ({}) using {using:?} check {check:?}",
         policy.name(),
         policy.command(),
         policy.policy_type(),
         roles.join(", "),
-        clause(policy.using_clause(database)),
-        clause(policy.check_clause(database)),
-    )
-}
-
-/// A policy clause, stored or as written, whichever the database holds.
-fn clause(read: Result<Option<PolicyExpression<'_>>, LookupError>) -> String {
-    match read {
-        Ok(Some(clause)) => format!("({})", clause.expression()),
-        Ok(None) => String::from("none"),
-        Err(error) => format!("unread: {error}"),
-    }
+    ));
 }
 
 /// Everything `function` declares that decides what a call of it answers
 /// and as whom it runs.
-fn function_fact<F: FunctionLike>(function: &F, database: &F::DB) -> String {
+fn function_fact<F: FunctionLike>(function: &F, database: &F::DB, facts: &mut Vec<String>) {
     let modes: Vec<String> = function
         .argument_modes()
         .map(|mode| mode.to_string())
@@ -151,13 +145,10 @@ fn function_fact<F: FunctionLike>(function: &F, database: &F::DB) -> String {
         .iter()
         .map(ToString::to_string)
         .collect();
-    let owner = match function.owner(database) {
-        Ok(owner) => format!("{owner:?}"),
-        Err(error) => format!("unread: {error}"),
-    };
-    format!(
+    let owner = answer(function.owner(database), facts);
+    facts.push(format!(
         "function {} ({}) modes ({}) returns {:?} set of rows {} language {:?} {} {} {} \
-         leakproof {} settings ({}) owner {owner} body {}",
+         leakproof {} settings ({}) owner {owner:?} body {}",
         function.target_name(),
         arguments.join(", "),
         modes.join(", "),
@@ -170,7 +161,7 @@ fn function_fact<F: FunctionLike>(function: &F, database: &F::DB) -> String {
         function.is_leakproof(),
         settings.join(", "),
         body(function.written_body()),
-    )
+    ));
 }
 
 /// A function body as the database hands it over.
@@ -223,7 +214,7 @@ fn grant_fact<G: GrantLike>(grant: &G, database: &G::DB) -> String {
 mod tests {
     use super::*;
     use sql_traits::structs::{IdentifierCase, ParserDB, TargetName};
-    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::dialect::{BigQueryDialect, Dialect, MsSqlDialect, PostgreSqlDialect};
 
     /// Two tables under row security, one policy reaching a helper through
     /// another, and an unrelated function.
@@ -244,14 +235,19 @@ mod tests {
         GRANT SELECT ON docs TO app_user;
     ";
 
-    /// The rules of `table` in the database `ddl` declares.
-    fn rules(ddl: &str, table: &str) -> TableRules {
-        let database = ParserDB::parse::<PostgreSqlDialect>(ddl).unwrap();
+    /// The rules of `table` in the database `ddl` declares in `D`.
+    fn rules_in<D: Dialect + Default>(ddl: &str, table: &str) -> TableRules {
+        let database = ParserDB::parse::<D>(ddl).unwrap();
         let found = database
             .table_by_target(TargetName::new(table, false), IdentifierCase::AsWritten)
             .unwrap()
             .unwrap();
-        TableRules::of(found, &database).unwrap()
+        TableRules::of(found, &database)
+    }
+
+    /// The rules of `table` in the PostgreSQL database `ddl` declares.
+    fn rules(ddl: &str, table: &str) -> TableRules {
+        rules_in::<PostgreSqlDialect>(ddl, table)
     }
 
     /// `BASE` with `from` replaced by `to`, asserting the text held `from`.
@@ -313,5 +309,74 @@ mod tests {
     fn disabling_row_security_changes_the_rules() {
         let changed = changed("ALTER TABLE docs ENABLE ROW LEVEL SECURITY;", "");
         assert_ne!(rules(BASE, "docs"), rules(&changed, "docs"));
+    }
+
+    #[test]
+    fn a_helper_whose_calls_cannot_be_read_still_answers_the_rest() {
+        let unreadable = changed(
+            "AS $$ SELECT is_member(d) $$",
+            "AS $$ SELEC is_member(d) $$",
+        );
+        let role_changed =
+            unreadable.replace("TO app_user USING (can_read", "TO PUBLIC USING (can_read");
+        assert_ne!(rules(&unreadable, "docs"), rules(&role_changed, "docs"));
+    }
+
+    #[test]
+    fn a_helper_calling_itself_is_read_once() {
+        let recursive = changed(
+            "AS $$ SELECT is_member(d) $$",
+            "AS $$ SELECT d < 0 OR can_read(d - 1) $$",
+        );
+        let deeper = recursive.replace("can_read(d - 1)", "can_read(d - 2)");
+        assert_ne!(rules(&recursive, "docs"), rules(&deeper, "docs"));
+    }
+
+    #[test]
+    fn a_changed_helper_body_changes_the_rules_in_every_written_form() {
+        const POLICY: &str = "
+            CREATE TABLE docs (id INT PRIMARY KEY);
+            CREATE POLICY docs_read ON docs FOR SELECT USING (can_read(id));
+        ";
+        type Read = fn(&str, &str) -> TableRules;
+        let forms: [(Read, &str, &str); 6] = [
+            (
+                rules_in::<PostgreSqlDialect>,
+                "CREATE FUNCTION can_read(d INT) RETURNS BOOLEAN LANGUAGE sql;",
+                "CREATE FUNCTION can_read(d INT) RETURNS BOOLEAN LANGUAGE sql AS $$ SELECT d > 0 $$;",
+            ),
+            (
+                rules_in::<PostgreSqlDialect>,
+                "CREATE FUNCTION can_read(d INT) RETURNS BOOLEAN LANGUAGE sql RETURN d > 0;",
+                "CREATE FUNCTION can_read(d INT) RETURNS BOOLEAN LANGUAGE sql RETURN d > 1;",
+            ),
+            (
+                rules_in::<PostgreSqlDialect>,
+                "CREATE FUNCTION can_read(d INT) RETURNS BOOLEAN LANGUAGE sql BEGIN ATOMIC SELECT d > 0; END;",
+                "CREATE FUNCTION can_read(d INT) RETURNS BOOLEAN LANGUAGE sql BEGIN ATOMIC SELECT d > 1; END;",
+            ),
+            (
+                rules_in::<BigQueryDialect>,
+                "CREATE FUNCTION can_read(d INT64) RETURNS BOOL AS (d > 0);",
+                "CREATE FUNCTION can_read(d INT64) RETURNS BOOL AS (d > 1);",
+            ),
+            (
+                rules_in::<MsSqlDialect>,
+                "CREATE FUNCTION can_read(@d INT) RETURNS TABLE AS RETURN SELECT 1 AS x;",
+                "CREATE FUNCTION can_read(@d INT) RETURNS TABLE AS RETURN SELECT 2 AS x;",
+            ),
+            (
+                rules_in::<MsSqlDialect>,
+                "CREATE FUNCTION can_read(@d INT) RETURNS BIT AS BEGIN RETURN 1; END;",
+                "CREATE FUNCTION can_read(@d INT) RETURNS BIT AS BEGIN RETURN 0; END;",
+            ),
+        ];
+        for (read, before, after) in forms {
+            assert_ne!(
+                read(&format!("{before} {POLICY}"), "docs"),
+                read(&format!("{after} {POLICY}"), "docs"),
+                "{before}"
+            );
+        }
     }
 }

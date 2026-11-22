@@ -88,12 +88,13 @@ fn read_shape_and_rules<C: LiveCatalog>(
     table: TargetName<'_>,
 ) -> Result<Option<(TableShape, TableRules)>, C::Error> {
     let database = connection.load_tables(core::slice::from_ref(&table))?;
-    let Some(found) = C::find_table(&database, table)? else {
-        return Ok(None);
-    };
-    let rules = TableRules::of(found, &database)?;
-    let shape = connection.table_shape(&database, found)?;
-    Ok(Some((shape, rules)))
+    let read = C::find_table(&database, table)?
+        .map(|found| {
+            let shape = connection.table_shape(&database, found);
+            shape.map(|shape| (shape, TableRules::of(found, &database)))
+        })
+        .transpose();
+    read
 }
 
 /// One load of `tables`, with the rules of each in order, `None` for a
@@ -106,9 +107,8 @@ fn read_rules<C: LiveCatalog>(
     let rules = tables
         .iter()
         .map(|table| {
-            C::find_table(&database, table.clone())?
-                .map(|found| TableRules::of(found, &database).map_err(C::Error::from))
-                .transpose()
+            let found = C::find_table(&database, table.clone());
+            found.map(|found| found.map(|found| TableRules::of(found, &database)))
         })
         .collect::<Result<Vec<_>, C::Error>>()?;
     Ok((database, rules))
@@ -367,6 +367,43 @@ mod tests {
     }
 
     #[test]
+    fn a_rules_read_answers_each_named_table_from_one_load() {
+        let mut reader = InlineLiveReader::new(FakeCatalog::new(DDL, []));
+        let (shape, rules) = block_on(reader.shape_and_rules(named("orders")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(column_names(&shape), ["id", "amount"]);
+        assert_eq!(
+            block_on(reader.shape_and_rules(named("ledger"))).unwrap(),
+            None
+        );
+        let (_, loaded) = block_on(reader.rules(vec![named("orders"), named("ledger")])).unwrap();
+        assert_eq!(loaded, [Some(rules), None]);
+        assert_eq!(
+            reader.connection().loads,
+            [vec!["orders"], vec!["ledger"], vec!["orders", "ledger"]]
+        );
+    }
+
+    #[test]
+    fn a_rules_read_answers_the_load_error() {
+        let mut reader = InlineLiveReader::new(FakeCatalog::new(DDL, [Next::Fail, Next::Fail]));
+        let refused = FakeError::Refused.to_string();
+        assert_eq!(
+            block_on(reader.shape_and_rules(named("orders")))
+                .unwrap_err()
+                .to_string(),
+            refused
+        );
+        assert_eq!(
+            block_on(reader.rules(vec![named("orders")]))
+                .unwrap_err()
+                .to_string(),
+            refused
+        );
+    }
+
+    #[test]
     fn a_read_names_its_table_by_schema_and_name() {
         let mut reader = InlineLiveReader::new(FakeCatalog::new(
             "CREATE SCHEMA sales;
@@ -416,6 +453,19 @@ mod tests {
             ),
             "{answer:?}"
         );
+        let lookup = answer.unwrap_err().to_string();
+        assert_eq!(
+            block_on(reader.shape_and_rules(named("orders")))
+                .unwrap_err()
+                .to_string(),
+            lookup
+        );
+        assert_eq!(
+            block_on(reader.rules(vec![named("orders")]))
+                .unwrap_err()
+                .to_string(),
+            lookup
+        );
     }
 
     #[cfg(feature = "pg-streaming")]
@@ -433,7 +483,7 @@ mod tests {
         }
 
         #[test]
-        fn a_blocking_read_answers_the_shape_absence_and_load_error() {
+        fn a_blocking_read_answers_the_shape_rules_absence_and_load_error() {
             let runtime = runtime();
             let mut reader = BlockingLiveReader::new(FakeCatalog::new(DDL, [Next::Fail]));
             assert!(matches!(
@@ -451,6 +501,15 @@ mod tests {
                     .unwrap(),
                 None
             );
+            let (read_shape, rules) = runtime
+                .block_on(reader.shape_and_rules(named("orders")))
+                .unwrap()
+                .unwrap();
+            assert_eq!(read_shape, shape);
+            let (_, loaded) = runtime
+                .block_on(reader.rules(vec![named("orders"), named("ledger")]))
+                .unwrap();
+            assert_eq!(loaded, [Some(rules), None]);
         }
 
         #[test]
