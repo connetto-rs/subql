@@ -511,6 +511,10 @@ mod tests {
             "[1:2]{a,b}",
             "[2:1]={}",
             "{{{{{{{a}}}}}}}",
+            "{{a}{b}}",
+            "[x:2]={a,b}",
+            "[1:99999999999]={a}",
+            r#"{"a\"#,
         ] {
             assert_eq!(
                 elements(malformed),
@@ -604,6 +608,8 @@ mod tests {
             bad_flags[4..8].copy_from_slice(&2_i32.to_be_bytes());
             let mut too_deep = array(&[], &[]);
             too_deep[0..4].copy_from_slice(&7_i32.to_be_bytes());
+            let mut cut_length = array(&[(1, 1)], &[]);
+            cut_length.extend_from_slice(&[0, 0]);
             for malformed in [
                 &whole[..whole.len() - 1],
                 &whole[..10],
@@ -611,6 +617,7 @@ mod tests {
                 negative_extent.as_slice(),
                 bad_flags.as_slice(),
                 too_deep.as_slice(),
+                cut_length.as_slice(),
             ] {
                 assert_eq!(read(malformed), Err(ValueError::Array { column: 3 }));
             }

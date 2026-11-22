@@ -191,16 +191,6 @@ macro_rules! wire_cdc_event {
                 let table_id = $crate::wal::wire_event::WireEvent::wire_table_id(self, db);
                 $crate::wal::wire_event::WireEvent::wire_list_at(self, db, table_id, row, col)
             }
-
-            fn list_at_resolved<DB: sql_traits::prelude::DatabaseLike>(
-                &self,
-                db: &DB,
-                table_id: $crate::types::TableId,
-                row: $crate::backend::RowKind,
-                col: $crate::types::ColumnId,
-            ) -> Result<$crate::backend::ArrayCell<Self::Backend>, $crate::ValueError> {
-                $crate::wal::wire_event::WireEvent::wire_list_at(self, db, table_id, row, col)
-            }
         }
     };
     ($wire:ty, $backend:ty, $checkpoint:ty) => {

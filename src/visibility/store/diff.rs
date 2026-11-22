@@ -926,9 +926,9 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
 
     // Refusing rather than emitting a partial difference
 
-    /// A cell the row carried but could not decode makes the whole
-    /// difference unknowable. Emitting the part that decoded would write a
-    /// store update that is wrong in an invisible way.
+    /// A scalar or array cell the row carried but could not decode makes the
+    /// whole difference unknowable. Emitting the part that decoded would write
+    /// a store update that is wrong in an invisible way.
     #[test]
     fn an_undecodable_cell_refuses_the_whole_difference() {
         struct Corrupt(TableId);
@@ -976,20 +976,22 @@ CREATE TABLE readings(tenant_id INTEGER, reading_id INTEGER, starts_at TIMESTAMP
             }
         }
 
-        let store = shapes(OWNERSHIP);
-        let event = Corrupt(table(&store, "docs"));
+        for schema in [OWNERSHIP, ARRAY] {
+            let store = shapes(schema);
+            let event = Corrupt(table(&store, "docs"));
 
-        let got = store.diff(&event);
+            let got = store.diff(&event);
 
-        assert!(
-            matches!(
-                got,
-                Err(StoreDiffError::Row(RowRecordError::Refused(
-                    RecordError::ColumnUndecodable(_)
-                )))
-            ),
-            "{got:?}"
-        );
+            assert!(
+                matches!(
+                    got,
+                    Err(StoreDiffError::Row(RowRecordError::Refused(
+                        RecordError::ColumnUndecodable(_)
+                    )))
+                ),
+                "{got:?}"
+            );
+        }
     }
 
     /// The same refusal on the key a bound query needs. A table reached only
