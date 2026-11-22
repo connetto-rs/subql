@@ -16,7 +16,7 @@ use sqlparser::dialect::PostgreSqlDialect;
 use subql::backend::Postgres;
 use subql::drift::{
     judge, Incompatibility, InlineLiveReader, LiveCatalog, LiveShapeReader, PgLiveCatalog,
-    PgShapeError, PublishedChange, ReplicaIdentity, TableShape, Verdict,
+    PgShapeError, PublishedChange, ReplicaIdentity, TableRules, TableShape, Verdict,
 };
 use subql::testing::block_on;
 
@@ -378,4 +378,76 @@ fn a_read_over_an_ended_session_reports_the_database_error() {
     terminate_other_sessions(&database);
     let error = catalog.table_shape(&loaded, table).unwrap_err();
     assert!(matches!(error, PgShapeError::Diesel(_)), "{error:?}");
+}
+
+/// A table under row security whose policy reaches `members` through two
+/// helpers, with table and column grants, and a function no policy reaches.
+const RULES: &str = "
+    CREATE TABLE members (doc_id INT, user_id TEXT);
+    CREATE TABLE docs (id INT PRIMARY KEY, title TEXT);
+    CREATE FUNCTION is_member(d INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+        AS $$ SELECT EXISTS (SELECT 1 FROM members WHERE doc_id = d) $$;
+    CREATE FUNCTION can_read(d INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+        AS $$ SELECT is_member(d) $$;
+    CREATE FUNCTION unrelated() RETURNS INT LANGUAGE sql AS $$ SELECT 1 $$;
+    ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY docs_read ON docs FOR SELECT USING (can_read(id));
+    GRANT SELECT ON docs TO PUBLIC;
+    GRANT UPDATE (title) ON docs TO PUBLIC;
+";
+
+/// The live rules of `docs`, asserting a load of `docs` alone and a load
+/// of every table answer the same rules.
+fn docs_rules(reader: &mut InlineLiveReader<PgLiveCatalog>) -> TableRules {
+    let docs = TargetName::parse("docs").unwrap();
+    let (_, alone) = block_on(reader.shape_and_rules(docs.clone()))
+        .unwrap()
+        .unwrap();
+    let tables = vec![
+        docs.into_owned(),
+        TargetName::parse("members").unwrap().into_owned(),
+    ];
+    let (_, every) = block_on(reader.rules(tables)).unwrap();
+    assert_eq!(every[0].as_ref(), Some(&alone));
+    alone
+}
+
+#[test]
+fn every_rule_change_changes_the_live_rules_of_the_table() {
+    assert_docker_available();
+    let database = stock_pg_database(18);
+    let mut reader = reader(&database, RULES);
+    let mut rules = docs_rules(&mut reader);
+    run(
+        &database,
+        "CREATE OR REPLACE FUNCTION unrelated() RETURNS INT LANGUAGE sql AS $$ SELECT 2 $$",
+    );
+    assert_eq!(
+        docs_rules(&mut reader),
+        rules,
+        "no policy reaches unrelated"
+    );
+    for change in [
+        "ALTER POLICY docs_read ON docs USING (can_read(id) AND id > 0)",
+        "CREATE OR REPLACE FUNCTION is_member(d INT) RETURNS BOOLEAN LANGUAGE sql STABLE
+             AS $$ SELECT EXISTS (SELECT 1 FROM members WHERE doc_id = d AND user_id IS NOT NULL) $$",
+        "ALTER FUNCTION can_read(INT) SECURITY DEFINER",
+        "ALTER FUNCTION is_member(INT) SET search_path = public",
+        "CREATE POLICY docs_write ON docs FOR INSERT WITH CHECK (id > 0)",
+        "GRANT INSERT ON docs TO PUBLIC",
+        "GRANT SELECT (title) ON docs TO PUBLIC",
+        "REVOKE UPDATE (title) ON docs FROM PUBLIC",
+        "ALTER TABLE docs FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE docs DISABLE ROW LEVEL SECURITY",
+        // Roles are cluster-wide, so the owner is named after this database.
+        "DO $$ BEGIN
+             EXECUTE format('CREATE ROLE %I', current_database() || '_owner');
+             EXECUTE format('ALTER TABLE docs OWNER TO %I', current_database() || '_owner');
+         END $$",
+    ] {
+        run(&database, change);
+        let changed = docs_rules(&mut reader);
+        assert_ne!(changed, rules, "{change}");
+        rules = changed;
+    }
 }

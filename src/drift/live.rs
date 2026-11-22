@@ -1,11 +1,14 @@
 //! The live re-read: a database connection that loads its own catalog,
 //! and the readers that turn it into the guard's [`LiveShapeReader`].
 
+use alloc::vec::Vec;
+
 use sql_traits::errors::LookupError;
 use sql_traits::prelude::DatabaseLike;
 use sql_traits::structs::TargetName;
 
-use super::guard::LiveShapeReader;
+use super::guard::{LiveShapeReader, RulesLoad};
+use super::rules::TableRules;
 use super::shape::TableShape;
 use crate::backend::Backend;
 
@@ -78,6 +81,39 @@ fn read_shape<C: LiveCatalog>(
     shape
 }
 
+/// The live shape and rules of `table` from one load, or `None` when the
+/// database lacks it.
+fn read_shape_and_rules<C: LiveCatalog>(
+    connection: &mut C,
+    table: TargetName<'_>,
+) -> Result<Option<(TableShape, TableRules)>, C::Error> {
+    let database = connection.load_tables(core::slice::from_ref(&table))?;
+    let Some(found) = C::find_table(&database, table)? else {
+        return Ok(None);
+    };
+    let rules = TableRules::of(found, &database)?;
+    let shape = connection.table_shape(&database, found)?;
+    Ok(Some((shape, rules)))
+}
+
+/// One load of `tables`, with the rules of each in order, `None` for a
+/// table the database lacks.
+fn read_rules<C: LiveCatalog>(
+    connection: &mut C,
+    tables: &[TargetName<'_>],
+) -> Result<RulesLoad<C::Database>, C::Error> {
+    let database = connection.load_tables(tables)?;
+    let rules = tables
+        .iter()
+        .map(|table| {
+            C::find_table(&database, table.clone())?
+                .map(|found| TableRules::of(found, &database).map_err(C::Error::from))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, C::Error>>()?;
+    Ok((database, rules))
+}
+
 /// A [`LiveShapeReader`] that loads on the task awaiting the read.
 ///
 /// It needs no runtime, and every read completes in its first poll.
@@ -100,6 +136,7 @@ impl<C> InlineLiveReader<C> {
 
 impl<C: LiveCatalog + Send> LiveShapeReader for InlineLiveReader<C> {
     type Error = C::Error;
+    type Database = C::Database;
 
     fn shape<'r>(
         &'r mut self,
@@ -107,6 +144,23 @@ impl<C: LiveCatalog + Send> LiveShapeReader for InlineLiveReader<C> {
     ) -> impl core::future::Future<Output = Result<Option<TableShape>, Self::Error>> + Send + 'r
     {
         core::future::ready(read_shape(&mut self.connection, table))
+    }
+
+    fn shape_and_rules<'r>(
+        &'r mut self,
+        table: TargetName<'r>,
+    ) -> impl core::future::Future<Output = Result<Option<(TableShape, TableRules)>, Self::Error>>
+           + Send
+           + 'r {
+        core::future::ready(read_shape_and_rules(&mut self.connection, table))
+    }
+
+    fn rules(
+        &mut self,
+        tables: Vec<TargetName<'static>>,
+    ) -> impl core::future::Future<Output = Result<RulesLoad<Self::Database>, Self::Error>> + Send + '_
+    {
+        core::future::ready(read_rules(&mut self.connection, &tables))
     }
 }
 
@@ -144,35 +198,70 @@ impl<C> BlockingLiveReader<C> {
 }
 
 #[cfg(feature = "pg-streaming")]
-impl<C> LiveShapeReader for BlockingLiveReader<C>
+impl<C> BlockingLiveReader<C>
 where
     C: LiveCatalog + Send + 'static,
 {
-    type Error = BlockingReadError<C::Error>;
-
-    fn shape<'r>(
-        &'r mut self,
-        table: TargetName<'r>,
-    ) -> impl core::future::Future<Output = Result<Option<TableShape>, Self::Error>> + Send + 'r
+    /// Run `load` on the connection on tokio's blocking pool.
+    fn on_blocking_pool<T: Send + 'static>(
+        &self,
+        load: impl FnOnce(&mut C) -> Result<T, C::Error> + Send + 'static,
+    ) -> impl core::future::Future<Output = Result<T, BlockingReadError<C::Error>>> + Send + 'static
     {
         let connection = std::sync::Arc::clone(&self.connection);
-        let table = table.into_owned();
         async move {
             let load = tokio::task::spawn_blocking(move || {
                 // A panicked load only read, so its poisoned lock still guards a usable connection.
                 let mut connection = connection
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                read_shape(&mut *connection, table)
+                load(&mut *connection)
             });
             match load.await {
-                Ok(shape) => shape.map_err(BlockingReadError::Read),
+                Ok(read) => read.map_err(BlockingReadError::Read),
                 Err(error) => error.try_into_panic().map_or_else(
                     |_| Err(BlockingReadError::Cancelled),
                     |payload| std::panic::resume_unwind(payload),
                 ),
             }
         }
+    }
+}
+
+#[cfg(feature = "pg-streaming")]
+impl<C> LiveShapeReader for BlockingLiveReader<C>
+where
+    C: LiveCatalog + Send + 'static,
+    C::Database: Send + 'static,
+{
+    type Error = BlockingReadError<C::Error>;
+    type Database = C::Database;
+
+    fn shape<'r>(
+        &'r mut self,
+        table: TargetName<'r>,
+    ) -> impl core::future::Future<Output = Result<Option<TableShape>, Self::Error>> + Send + 'r
+    {
+        let table = table.into_owned();
+        self.on_blocking_pool(move |connection| read_shape(connection, table))
+    }
+
+    fn shape_and_rules<'r>(
+        &'r mut self,
+        table: TargetName<'r>,
+    ) -> impl core::future::Future<Output = Result<Option<(TableShape, TableRules)>, Self::Error>>
+           + Send
+           + 'r {
+        let table = table.into_owned();
+        self.on_blocking_pool(move |connection| read_shape_and_rules(connection, table))
+    }
+
+    fn rules(
+        &mut self,
+        tables: Vec<TargetName<'static>>,
+    ) -> impl core::future::Future<Output = Result<RulesLoad<Self::Database>, Self::Error>> + Send + '_
+    {
+        self.on_blocking_pool(move |connection| read_rules(connection, &tables))
     }
 }
 

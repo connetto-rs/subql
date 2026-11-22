@@ -35,6 +35,7 @@ pub mod live;
 ))]
 pub mod postgres;
 pub mod refusal;
+pub mod rules;
 pub mod shape;
 #[cfg(feature = "sqlite-cdc")]
 pub mod sqlite;
@@ -44,7 +45,8 @@ pub mod verdict;
 
 #[cfg(feature = "std")]
 pub use guard::{
-    DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, LiveShapeReader, RefusedTables,
+    read_live_rules, DriftGuard, DriftGuardError, DriftSignal, DriftTableSignal, LiveRules,
+    LiveShapeReader, RefusedTables, RulesFollowing, RulesLoad,
 };
 #[cfg(feature = "pg-streaming")]
 pub use live::{BlockingLiveReader, BlockingReadError};
@@ -59,6 +61,7 @@ pub use live::{InlineLiveReader, LiveCatalog};
 ))]
 pub use postgres::{PgLiveCatalog, PgShapeError};
 pub use refusal::{NoRefusals, RefusalView};
+pub use rules::TableRules;
 pub use shape::{ColumnShape, Publication, PublishedChange, ReplicaIdentity, TableShape};
 #[cfg(feature = "sqlite-cdc")]
 pub use sqlite::SqliteShapeError;

@@ -29,7 +29,8 @@ type Guard = DriftGuard<
     InlineLiveReader<SqliteConnection>,
     ManualClock,
 >;
-type Item = SourceItem<SqliteChangesetEvent, core::convert::Infallible, DriftSignal>;
+type Signal = DriftSignal<ParserDB>;
+type Item = SourceItem<SqliteChangesetEvent, core::convert::Infallible, Signal>;
 
 diesel::table! {
     orders (id) {
@@ -79,6 +80,7 @@ fn live_db_with_source_catalog(
         InlineLiveReader::new(reader_connection),
         INTERVAL,
         ManualClock::new(0),
+        None,
     ))
     .unwrap();
     (dir, guard)
@@ -110,7 +112,7 @@ fn events_of(items: Vec<Item>) -> Vec<SqliteChangesetEvent> {
 }
 
 /// The signals among `items`, read beside the events that follow them.
-pub fn signals_of(items: &[Item]) -> Vec<DriftSignal> {
+pub fn signals_of(items: &[Item]) -> Vec<Signal> {
     items
         .iter()
         .filter_map(|item| match item {
@@ -428,7 +430,7 @@ fn startup_refusals_are_enumerated_before_any_event() {
             .collect::<Vec<_>>()
     );
     let items = drain(&mut guard);
-    assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+    assert_eq!(signals_of(&items), [] as [Signal; 0]);
     let events = events_of(items);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].table_id(guard.catalog()), ledger);
@@ -476,7 +478,7 @@ fn startup_refusal_survives_restoration_and_further_schema_changes() {
             .execute(guard.inner().connection())
             .unwrap();
         let items = drain(&mut guard);
-        assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+        assert_eq!(signals_of(&items), [] as [Signal; 0]);
         let events = events_of(items);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].table_id(guard.catalog()), ledger);
@@ -521,7 +523,7 @@ fn unknown_schema_signals_and_events_do_not_hide_known_events() {
         .unwrap();
 
     let items = drain(&mut guard);
-    assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+    assert_eq!(signals_of(&items), [] as [Signal; 0]);
     let events = events_of(items);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].table_id(guard.catalog()), orders);
@@ -572,7 +574,7 @@ fn losing_changes_to_a_live_only_column_requests_resync_without_refusal() {
         .execute(guard.inner().connection())
         .unwrap();
     let items = drain(&mut guard);
-    assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+    assert_eq!(signals_of(&items), [] as [Signal; 0]);
     let events = events_of(items);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].table_id(guard.catalog()), orders);
@@ -604,6 +606,7 @@ fn locked_live_shape_reads_surface_errors_without_refusing_tables() {
         InlineLiveReader::new(reader_connection),
         INTERVAL,
         ManualClock::new(0),
+        None,
     ));
     assert!(matches!(
         startup,
@@ -695,7 +698,7 @@ fn a_failed_shape_read_cannot_release_rows_from_committed_incompatible_ddl() {
     );
     assert!(guard.is_refused(orders_id));
     let items = drain(&mut guard);
-    assert_eq!(signals_of(&items), Vec::<DriftSignal>::new());
+    assert_eq!(signals_of(&items), Vec::<Signal>::new());
     let events = events_of(items);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].table_id(guard.catalog()), ledger_id);
@@ -726,7 +729,7 @@ fn a_locked_source_preserves_pending_changes_for_retry() {
     sql_query("ROLLBACK").execute(&mut locker).unwrap();
 
     let items = drain(&mut guard);
-    assert_eq!(signals_of(&items), [] as [DriftSignal; 0]);
+    assert_eq!(signals_of(&items), [] as [Signal; 0]);
     let events = events_of(items);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].table_id(guard.catalog()), orders);

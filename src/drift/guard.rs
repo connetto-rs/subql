@@ -15,6 +15,13 @@
 //! per table whose undrained changes the source lost, so the consumer
 //! can resync it. Commits and acks pass through, so acks advance across
 //! dropped events.
+//!
+//! A consumer that follows the live access rules hands the guard the
+//! [`TableRules`] it runs ([`RulesFollowing`]). Every live read then
+//! compares the table's rules too, and a difference, or an event of the
+//! consumer's marker table, makes the guard read every table it has not
+//! refused at once and yield one [`DriftSignal::RulesChanged`] naming each
+//! table whose rules changed, with the database read.
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::sync::Arc;
@@ -31,6 +38,7 @@ use sql_traits::prelude::{DatabaseLike, TableLike};
 use sql_traits::structs::TargetName;
 
 use super::refusal::RefusalView;
+use super::rules::TableRules;
 use super::shape::TableShape;
 use super::verdict::{refusal_reasons, Incompatibility};
 use crate::backend::{Backend, CdcEvent};
@@ -67,10 +75,10 @@ impl DriftTableSignal for crate::wal::PgRelation {
 }
 
 /// The item a [`DriftGuard`] surfaces in place of the inner source's
-/// schema message.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// schema message, where `D` is the database a live read loads.
+#[derive(Clone, Debug)]
 #[non_exhaustive]
-pub enum DriftSignal {
+pub enum DriftSignal<D> {
     /// A table is now refused. Its events are dropped until the guard
     /// is dropped, and a restart re-judges it.
     Refused {
@@ -85,9 +93,49 @@ pub enum DriftSignal {
         /// The catalog identity of the table.
         table: TableId,
     },
+    /// The live rules of some tables differ from the rules the guard read
+    /// last. The consumer translates its authorization again from
+    /// `database`.
+    RulesChanged {
+        /// The catalog identities of the tables whose rules changed, in id
+        /// order.
+        tables: Vec<TableId>,
+        /// The live database the rules were read from, holding every
+        /// catalog table the guard has not refused.
+        database: Arc<D>,
+    },
 }
 
-/// Reads the live shape of a table from the live database.
+/// Two [`DriftSignal::RulesChanged`] are equal when they name the same
+/// tables from the same read.
+impl<D> PartialEq for DriftSignal<D> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Refused { table, reasons },
+                Self::Refused {
+                    table: other_table,
+                    reasons: other_reasons,
+                },
+            ) => table == other_table && reasons == other_reasons,
+            (Self::ChangesLost { table }, Self::ChangesLost { table: other_table }) => {
+                table == other_table
+            }
+            (
+                Self::RulesChanged { tables, database },
+                Self::RulesChanged {
+                    tables: other_tables,
+                    database: other_database,
+                },
+            ) => tables == other_tables && Arc::ptr_eq(database, other_database),
+            _ => false,
+        }
+    }
+}
+
+impl<D> Eq for DriftSignal<D> {}
+
+/// Reads the live shape and access rules of tables from the live database.
 ///
 /// The stream carries only names and ordinals, so the facts a judgment
 /// needs that the stream does not carry come from here, one read per
@@ -95,6 +143,8 @@ pub enum DriftSignal {
 pub trait LiveShapeReader: Send {
     /// The error a live read can surface.
     type Error: core::error::Error + Send + Sync + 'static;
+    /// The database one load answers.
+    type Database: DatabaseLike;
 
     /// The live shape of the table `table` names, or `None` when the
     /// database has no such table. The guard names a table as its catalog
@@ -103,6 +153,88 @@ pub trait LiveShapeReader: Send {
         &'r mut self,
         table: TargetName<'r>,
     ) -> impl core::future::Future<Output = Result<Option<TableShape>, Self::Error>> + Send + 'r;
+
+    /// The live shape and rules of the table `table` names, from one load,
+    /// or `None` when the database has no such table.
+    fn shape_and_rules<'r>(
+        &'r mut self,
+        table: TargetName<'r>,
+    ) -> impl core::future::Future<Output = Result<Option<(TableShape, TableRules)>, Self::Error>>
+           + Send
+           + 'r;
+
+    /// One load of the tables `tables` names.
+    fn rules(
+        &mut self,
+        tables: Vec<TargetName<'static>>,
+    ) -> impl core::future::Future<Output = Result<RulesLoad<Self::Database>, Self::Error>> + Send + '_;
+}
+
+/// One load of several tables, the database it answered with the rules of
+/// each table named, in the order named, `None` for a table the database
+/// lacks.
+pub type RulesLoad<D> = (D, Vec<Option<TableRules>>);
+
+/// The rules one live load answered for catalog tables, and the database
+/// it loaded.
+#[derive(Clone, Debug)]
+pub struct LiveRules<D> {
+    database: Arc<D>,
+    rules: BTreeMap<TableId, TableRules>,
+}
+
+impl<D> LiveRules<D> {
+    /// The database the load answered.
+    #[must_use]
+    pub const fn database(&self) -> &Arc<D> {
+        &self.database
+    }
+
+    /// The rules of each table the database holds, by catalog identity.
+    #[must_use]
+    pub const fn rules(&self) -> &BTreeMap<TableId, TableRules> {
+        &self.rules
+    }
+}
+
+/// Read the live rules of every `catalog` table in one load, as a consumer
+/// does at startup to translate its authorization and to build the
+/// [`RulesFollowing`] it hands the guard.
+///
+/// # Errors
+///
+/// The reader's error when the load fails.
+pub async fn read_live_rules<C, R>(
+    catalog: &C,
+    reader: &mut R,
+) -> Result<LiveRules<R::Database>, R::Error>
+where
+    C: DatabaseLike,
+    R: LiveShapeReader,
+{
+    read_rules_of(catalog, reader, catalog_tables(catalog)).await
+}
+
+/// The rules a consumer runs, which a [`DriftGuard`] follows the live
+/// database from.
+#[derive(Clone, Debug)]
+pub struct RulesFollowing {
+    baseline: BTreeMap<TableId, TableRules>,
+    marker: Option<TableId>,
+}
+
+impl RulesFollowing {
+    /// Follow the live rules from `baseline`, the read the consumer
+    /// translated its authorization from. Every event of the catalog
+    /// table `marker` makes the guard read the rules of every table, and
+    /// the guard drops the event.
+    #[must_use]
+    pub fn new<D>(baseline: LiveRules<D>, marker: Option<TableId>) -> Self {
+        Self {
+            baseline: baseline.rules,
+            marker,
+        }
+    }
 }
 
 /// Errors surfaced by a [`DriftGuard`].
@@ -211,7 +343,7 @@ impl RefusalView for RefusedTables {
 /// are dropped. The refused set is shared with the apply path through the [`RefusedTables`] handle [`DriftGuard::refusals`] hands out, so an upload naming a refused table is refused before any op applies.
 ///
 /// A failed or cancelled live read is retried by `next_item` before any further output or source items.
-/// A source item that arrives during a reconciliation run is held until the run ends, so an event of a table the run refuses is dropped.
+/// A source item that arrives during a reconciliation run or a read of every table's rules is held until it ends, so an event of a table the run refuses is dropped.
 pub struct DriftGuard<S, C, R, T>
 where
     S: CdcSource,
@@ -239,7 +371,7 @@ where
 ///
 /// Kept apart from the inner source, so a run judges while the source's
 /// pending read stays polled.
-struct Judge<C, R, B> {
+struct Judge<C, R: LiveShapeReader, B> {
     catalog: C,
     reader: R,
     /// The refused tables, shared with the apply path through
@@ -252,9 +384,24 @@ struct Judge<C, R, B> {
     /// is dropped rather than folded.
     known: BTreeSet<TableId>,
     /// Signals the guard produced but the consumer has not taken yet.
-    signals: VecDeque<DriftSignal>,
+    signals: VecDeque<DriftSignal<R::Database>>,
+    /// The live rules the guard follows, `None` for a consumer that does
+    /// not follow them.
+    following: Option<Following>,
     /// The backend whose rules name the catalog shape's columns.
     backend: PhantomData<fn() -> B>,
+}
+
+/// The live rules a [`Judge`] follows.
+struct Following {
+    /// The rules each table had when every table was last read, which a
+    /// read of one table compares against.
+    last: BTreeMap<TableId, TableRules>,
+    /// The table whose events announce a change of rules.
+    marker: Option<TableId>,
+    /// Whether a read found rules that differ from `last`, or the marker
+    /// table changed, so every table is read before the next item.
+    stale: bool,
 }
 
 impl<S, C, R, T> DriftGuard<S, C, R, T>
@@ -273,6 +420,11 @@ where
     /// the first event, like every later refusal. Each later run starts
     /// `interval` after the previous one ended, by `timer`'s reading.
     ///
+    /// With `rules`, every live read compares the table's rules too,
+    /// starting from the baseline, and a
+    /// [`DriftSignal::RulesChanged`] found at startup precedes the first
+    /// event.
+    ///
     /// # Errors
     ///
     /// [`DriftGuardError::Shape`] when a live read during the startup
@@ -283,18 +435,20 @@ where
         reader: R,
         interval: Duration,
         timer: T,
+        rules: Option<RulesFollowing>,
     ) -> Result<Self, DriftGuardError<S::Error, R::Error>> {
-        let known = catalog
-            .tables()
-            .filter_map(|table| table.table_id(&catalog))
-            .map(|index| u32::try_from(index).unwrap_or(u32::MAX))
-            .collect();
+        let known = catalog_tables(&catalog).collect();
         let mut judge = Judge {
             catalog,
             reader,
             refusals: RefusedTables::default(),
             known,
             signals: VecDeque::new(),
+            following: rules.map(|rules| Following {
+                last: rules.baseline,
+                marker: rules.marker,
+                stale: false,
+            }),
             backend: PhantomData,
         };
         let mut next = judge.first_table();
@@ -382,7 +536,7 @@ where
 {
     type Event = S::Event;
     type Commit = S::Commit;
-    type Relation = DriftSignal;
+    type Relation = DriftSignal<R::Database>;
     type Error = DriftGuardError<S::Error, R::Error>;
 
     fn next_item(
@@ -408,6 +562,10 @@ where
                         .map_err(DriftGuardError::Shape)?;
                     this.next_run_micros = next_run(&this.timer, this.interval_micros);
                 }
+                this.judge
+                    .settle_rules()
+                    .await
+                    .map_err(DriftGuardError::Shape)?;
                 if let Some(signal) = this.judge.signals.pop_front() {
                     return Ok(Some(SourceItem::Relation(signal)));
                 }
@@ -421,15 +579,17 @@ where
                             break pulled;
                         }
                         this.run = this.judge.first_table();
-                        judge_beside(
+                        beside(
                             pending.as_mut(),
-                            &mut this.judge,
-                            &mut this.run,
                             &mut this.held,
+                            this.judge.judge_from(&mut this.run),
                         )
                         .await
                         .map_err(DriftGuardError::Shape)?;
                         this.next_run_micros = next_run(&this.timer, this.interval_micros);
+                        beside(pending.as_mut(), &mut this.held, this.judge.settle_rules())
+                            .await
+                            .map_err(DriftGuardError::Shape)?;
                         if let Some(signal) = this.judge.signals.pop_front() {
                             return Ok(Some(SourceItem::Relation(signal)));
                         }
@@ -445,12 +605,22 @@ where
                     SourceItem::Relation(signal) => this.on_signal(&signal),
                     SourceItem::Event(event) => {
                         let table = event.table_id(&this.judge.catalog);
-                        // A refused table's events are dropped as they
-                        // arrive, and so are the events of a table the
-                        // catalog does not know.
-                        if this.judge.known.contains(&table)
+                        if let Some(following) = this
+                            .judge
+                            .following
+                            .as_mut()
+                            .filter(|following| following.marker == Some(table))
+                        {
+                            // The marker table's events only announce a
+                            // change of rules, which the next iteration
+                            // reads.
+                            following.stale = true;
+                        } else if this.judge.known.contains(&table)
                             && !this.judge.refusals.is_refused(table)
                         {
+                            // A refused table's events are dropped as they
+                            // arrive, and so are the events of a table the
+                            // catalog does not know.
                             return Ok(Some(SourceItem::Event(event)));
                         }
                     }
@@ -499,15 +669,16 @@ where
         Ok(())
     }
 
-    /// Re-read the table's live shape and judge it.
+    /// Re-read the table's live shape, with its rules when the judge
+    /// follows them, and judge it.
     ///
-    /// A refusal records the table and queues its [`DriftSignal::Refused`] item.
+    /// A refusal records the table and queues its [`DriftSignal::Refused`]
+    /// item, and rules that differ from the last read of every table mark
+    /// the rules stale.
     async fn judge_table(&mut self, table: TableId) -> Result<(), R::Error> {
         // Every judged id comes from the catalog, so neither lookup fails.
-        let Some((catalog_table, catalog_shape)) = usize::try_from(table)
-            .ok()
-            .and_then(|index| self.catalog.table_by_id(index))
-            .and_then(|catalog_table| {
+        let Some((catalog_table, catalog_shape)) =
+            catalog_table(&self.catalog, table).and_then(|catalog_table| {
                 TableShape::from_table::<B, C>(catalog_table, &self.catalog)
                     .ok()
                     .map(|shape| (catalog_table, shape))
@@ -515,21 +686,118 @@ where
         else {
             return Ok(());
         };
-        let name = catalog_table.table_name();
-        let mut target = TargetName::new(name, catalog_table.table_name_is_quoted());
-        if let Some(schema) = catalog_table.table_schema() {
-            target = target.with_schema(schema, catalog_table.table_schema_is_quoted());
-        }
-        let live = self.reader.shape(target).await?;
+        let target = target_of(catalog_table);
+        let live = match &mut self.following {
+            None => self.reader.shape(target).await?,
+            Some(following) => self
+                .reader
+                .shape_and_rules(target)
+                .await?
+                .map(|(shape, rules)| {
+                    following.stale |= following.last.get(&table) != Some(&rules);
+                    shape
+                }),
+        };
         if let Some(reasons) = refusal_reasons(&catalog_shape, live.as_ref()) {
             self.signals.push_back(DriftSignal::Refused {
                 table,
                 reasons: reasons.clone(),
             });
-            self.refusals.insert(table, name, reasons);
+            self.refusals
+                .insert(table, catalog_table.table_name(), reasons);
         }
         Ok(())
     }
+
+    /// When the rules are stale, read the rules of every table not refused
+    /// in one load, adopt them as the last read, and queue one
+    /// [`DriftSignal::RulesChanged`] naming each table whose rules changed.
+    ///
+    /// A failed or cancelled read leaves the rules stale, so the next call
+    /// reads again.
+    async fn settle_rules(&mut self) -> Result<(), R::Error> {
+        if !self
+            .following
+            .as_ref()
+            .is_some_and(|following| following.stale)
+        {
+            return Ok(());
+        }
+        let tables = self
+            .known
+            .iter()
+            .copied()
+            .filter(|table| !self.refusals.is_refused(*table));
+        let LiveRules { database, rules } =
+            read_rules_of(&self.catalog, &mut self.reader, tables).await?;
+        let Some(following) = &mut self.following else {
+            return Ok(());
+        };
+        let changed: Vec<TableId> = rules
+            .iter()
+            .filter(|(table, read)| following.last.get(table) != Some(read))
+            .map(|(table, _)| *table)
+            .collect();
+        following.last.extend(rules);
+        following.stale = false;
+        if !changed.is_empty() {
+            self.signals.push_back(DriftSignal::RulesChanged {
+                tables: changed,
+                database,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The identity of every `catalog` table.
+fn catalog_tables<C: DatabaseLike>(catalog: &C) -> impl Iterator<Item = TableId> + '_ {
+    catalog
+        .tables()
+        .filter_map(|table| table.table_id(catalog))
+        .map(|index| u32::try_from(index).unwrap_or(u32::MAX))
+}
+
+/// The `catalog` table `table` identifies.
+fn catalog_table<C: DatabaseLike>(catalog: &C, table: TableId) -> Option<&C::Table> {
+    usize::try_from(table)
+        .ok()
+        .and_then(|index| catalog.table_by_id(index))
+}
+
+/// The name a live read looks `table` up by, as the catalog writes it.
+fn target_of<T: TableLike>(table: &T) -> TargetName<'_> {
+    let target = TargetName::new(table.table_name(), table.table_name_is_quoted());
+    match table.table_schema() {
+        Some(schema) => target.with_schema(schema, table.table_schema_is_quoted()),
+        None => target,
+    }
+}
+
+/// Read the rules of the `catalog` tables `tables` in one load.
+async fn read_rules_of<C, R>(
+    catalog: &C,
+    reader: &mut R,
+    tables: impl Iterator<Item = TableId>,
+) -> Result<LiveRules<R::Database>, R::Error>
+where
+    C: DatabaseLike,
+    R: LiveShapeReader,
+{
+    let (ids, names): (Vec<TableId>, Vec<TargetName<'static>>) = tables
+        .filter_map(|table| {
+            catalog_table(catalog, table).map(|found| (table, target_of(found).into_owned()))
+        })
+        .unzip();
+    let (database, rules) = reader.rules(names).await?;
+    Ok(LiveRules {
+        database: Arc::new(database),
+        rules: ids
+            .into_iter()
+            .zip(rules)
+            .filter_map(|(table, rules)| rules.map(|rules| (table, rules)))
+            .collect(),
+    })
 }
 
 /// The timer reading one interval from now, when the next run is due.
@@ -552,27 +820,21 @@ async fn race<O>(
     .await
 }
 
-/// Run a reconciliation from `run` while still polling the source's
-/// pending read, holding its result in `held` until the run ends.
-async fn judge_beside<O, C, R, B>(
+/// Drive `work` while still polling the source's pending read, holding its
+/// result in `held` until `work` ends.
+async fn beside<O, W: Future>(
     mut pending: Pin<&mut impl Future<Output = O>>,
-    judge: &mut Judge<C, R, B>,
-    run: &mut Option<TableId>,
     held: &mut Option<O>,
-) -> Result<(), R::Error>
-where
-    C: DatabaseLike,
-    R: LiveShapeReader,
-    B: Backend,
-{
-    let mut judging = pin!(judge.judge_from(run));
+    work: W,
+) -> W::Output {
+    let mut work = pin!(work);
     poll_fn(|context| {
         if held.is_none() {
             if let Poll::Ready(pulled) = pending.as_mut().poll(context) {
                 *held = Some(pulled);
             }
         }
-        judging.as_mut().poll(context)
+        work.as_mut().poll(context)
     })
     .await
 }
@@ -671,44 +933,90 @@ mod tests {
     /// Reads the probe's live catalog once its gate opens.
     struct LiveReader(LiveProbe);
 
+    impl LiveReader {
+        /// Wait for the gate to open, then record the read `name`, failing
+        /// it when the probe fails that name.
+        async fn pass_gate(&self, name: String) -> Result<(), std::io::Error> {
+            let probe = &self.0;
+            poll_fn(|context| {
+                let mut gate = probe.gate.lock();
+                if gate.held {
+                    gate.waiter = Some(context.waker().clone());
+                    drop(gate);
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            })
+            .await;
+            let failed = probe
+                .failing
+                .lock()
+                .take_if(|failing| *failing == name)
+                .is_some();
+            probe.reads.lock().push(name);
+            if failed {
+                return Err(std::io::Error::other("live read failed"));
+            }
+            Ok(())
+        }
+    }
+
     impl LiveShapeReader for LiveReader {
         type Error = std::io::Error;
+        type Database = ParserDB;
 
-        fn shape<'r>(
+        async fn shape<'r>(
             &'r mut self,
             table: TargetName<'r>,
-        ) -> impl Future<Output = Result<Option<TableShape>, Self::Error>> + Send + 'r {
-            let probe = &self.0;
-            async move {
-                poll_fn(|context| {
-                    let mut gate = probe.gate.lock();
-                    if gate.held {
-                        gate.waiter = Some(context.waker().clone());
-                        drop(gate);
-                        Poll::Pending
-                    } else {
-                        Poll::Ready(())
-                    }
+        ) -> Result<Option<TableShape>, Self::Error> {
+            self.pass_gate(table.to_string()).await?;
+            let catalog = self.0.live.lock();
+            let shape = catalog
+                .table_by_target(table, IdentifierCase::AsWritten)
+                .unwrap()
+                .map(|table| TableShape::from_table::<Postgres, _>(table, &*catalog).unwrap());
+            drop(catalog);
+            Ok(shape)
+        }
+
+        async fn shape_and_rules<'r>(
+            &'r mut self,
+            table: TargetName<'r>,
+        ) -> Result<Option<(TableShape, TableRules)>, Self::Error> {
+            self.pass_gate(table.to_string()).await?;
+            let catalog = self.0.live.lock();
+            let read = catalog
+                .table_by_target(table, IdentifierCase::AsWritten)
+                .unwrap()
+                .map(|table| {
+                    (
+                        TableShape::from_table::<Postgres, _>(table, &*catalog).unwrap(),
+                        TableRules::of(table, &*catalog).unwrap(),
+                    )
+                });
+            drop(catalog);
+            Ok(read)
+        }
+
+        async fn rules(
+            &mut self,
+            tables: Vec<TargetName<'static>>,
+        ) -> Result<RulesLoad<ParserDB>, Self::Error> {
+            let names: Vec<String> = tables.iter().map(ToString::to_string).collect();
+            self.pass_gate(format!("rules({})", names.join(", ")))
+                .await?;
+            let catalog = self.0.live.lock().clone();
+            let rules = tables
+                .into_iter()
+                .map(|table| {
+                    catalog
+                        .table_by_target(table, IdentifierCase::AsWritten)
+                        .unwrap()
+                        .map(|found| TableRules::of(found, &catalog).unwrap())
                 })
-                .await;
-                let name = table.to_string();
-                let failed = probe
-                    .failing
-                    .lock()
-                    .take_if(|failing| *failing == name)
-                    .is_some();
-                probe.reads.lock().push(name);
-                if failed {
-                    return Err(std::io::Error::other("live read failed"));
-                }
-                let catalog = probe.live.lock();
-                let shape = catalog
-                    .table_by_target(table, IdentifierCase::AsWritten)
-                    .unwrap()
-                    .map(|table| TableShape::from_table::<Postgres, _>(table, &*catalog).unwrap());
-                drop(catalog);
-                Ok(shape)
-            }
+                .collect();
+            Ok((catalog, rules))
         }
     }
 
@@ -809,8 +1117,105 @@ mod tests {
             LiveReader(probe.clone()),
             INTERVAL,
             Arc::clone(clock),
+            None,
         ))
         .unwrap()
+    }
+
+    /// Tables under row security, a policy reaching one helper through
+    /// another, a grant, and the `policy_changes` marker table.
+    const RULES: &str = "
+        CREATE ROLE app_user;
+        CREATE TABLE policy_changes (id INTEGER PRIMARY KEY);
+        CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT);
+        CREATE TABLE notes (id INTEGER PRIMARY KEY);
+        CREATE FUNCTION is_member(d INTEGER) RETURNS BOOLEAN LANGUAGE sql
+            AS $$ SELECT d > 0 $$;
+        CREATE FUNCTION can_read(d INTEGER) RETURNS BOOLEAN LANGUAGE sql
+            AS $$ SELECT is_member(d) $$;
+        ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY docs_read ON docs FOR SELECT TO app_user USING (can_read(id));
+        GRANT SELECT ON docs TO app_user;
+    ";
+
+    /// The one read of every table's rules a guard over `RULES` makes.
+    const EVERY_TABLE: &str = "rules(docs, notes, policy_changes)";
+
+    /// `RULES` with `from` replaced by `to`.
+    fn rules_changed(from: &str, to: &str) -> String {
+        assert!(RULES.contains(from), "the fixture lacks {from}");
+        RULES.replace(from, to)
+    }
+
+    /// A guard over `RULES` following the rules the live database has
+    /// when it is built, with `policy_changes` as the marker table.
+    fn following_guard<S>(source: S, probe: &LiveProbe, clock: &Arc<ManualClock>) -> Guard<S>
+    where
+        S: CdcSource<Event = TestEvent<Postgres, PgCommitPosition>, Relation = TableSignal>,
+    {
+        let catalog = parse(RULES);
+        let mut reader = LiveReader(probe.clone());
+        let baseline = block_on(read_live_rules(&catalog, &mut reader)).unwrap();
+        let marker = Some(table(&catalog, "policy_changes"));
+        block_on(DriftGuard::new(
+            source,
+            catalog,
+            reader,
+            INTERVAL,
+            Arc::clone(clock),
+            Some(RulesFollowing::new(baseline, marker)),
+        ))
+        .unwrap()
+    }
+
+    /// The rules of the table `name` in `database`.
+    fn rules_in(database: &ParserDB, name: &str) -> TableRules {
+        let found = database
+            .table_by_target(TargetName::parse(name).unwrap(), IdentifierCase::AsWritten)
+            .unwrap()
+            .unwrap();
+        TableRules::of(found, database).unwrap()
+    }
+
+    /// The tables a `RulesChanged` item names, asserting the database it
+    /// carries holds the rules `live` declares for each.
+    fn rules_changed_tables(
+        item: Option<SourceItemOf<Guard<TransactionSource>>>,
+        live: &str,
+    ) -> Vec<TableId> {
+        let Some(SourceItem::Relation(DriftSignal::RulesChanged { tables, database })) = item
+        else {
+            panic!("the item must be the changed rules");
+        };
+        let expected = parse(live);
+        for name in ["policy_changes", "docs", "notes"] {
+            assert_eq!(rules_in(&database, name), rules_in(&expected, name));
+        }
+        tables
+    }
+
+    fn transaction(items: Vec<SourceItemOf<TransactionSource>>) -> TransactionSource {
+        TransactionSource {
+            items: VecDeque::from(items),
+            awaiting_ack: None,
+        }
+    }
+
+    fn commit_at(lsn: u64) -> PgCommit {
+        PgCommit::new(
+            PgCommitPosition::at_commit(PgLsn(lsn), PgXid(1)),
+            PgLsn(lsn + 10),
+        )
+    }
+
+    fn insert_at(table: TableId, lsn: u64) -> SourceItemOf<TransactionSource> {
+        SourceItem::Event(
+            TestEvent::insert(table, vec![Value::Int(1)]).with_checkpoint(PgCommitPosition::new(
+                PgLsn(lsn),
+                PgXid(1),
+                1,
+            )),
+        )
     }
 
     fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
@@ -1272,5 +1677,193 @@ mod tests {
             );
             assert!(!signal.changes_lost());
         }
+    }
+
+    #[test]
+    fn a_schema_message_finding_changed_rules_signals_them_ahead_of_the_tables_events() {
+        let docs = table(&parse(RULES), "docs");
+        let commit = commit_at(500);
+        let probe = LiveProbe::new(parse(RULES));
+        let source = transaction(vec![
+            SourceItem::Relation(TableSignal::SchemaChanged("docs")),
+            insert_at(docs, 500),
+            SourceItem::Commit(commit),
+        ]);
+        let mut guard = following_guard(source, &probe, &Arc::new(ManualClock::new(0)));
+        let live = rules_changed("USING (can_read(id))", "USING (can_read(id) AND id > 0)");
+        probe.set_live(&live);
+
+        let tables = rules_changed_tables(block_on(guard.next_item()).unwrap(), &live);
+        assert_eq!(tables, [docs]);
+        let Some(SourceItem::Event(event)) = block_on(guard.next_item()).unwrap() else {
+            panic!("the table's event must follow the changed rules");
+        };
+        assert_eq!(event.table_id(guard.catalog()), docs);
+        assert_eq!(
+            block_on(guard.next_item())
+                .unwrap()
+                .and_then(SourceItem::into_commit),
+            Some(commit)
+        );
+        assert_eq!(
+            probe.reads()[1..],
+            ["docs", "notes", "policy_changes", "docs", EVERY_TABLE],
+            "the startup judgment reads each table, then the schema message one table and every table's rules once"
+        );
+    }
+
+    #[test]
+    fn a_marker_event_reads_every_tables_rules_and_never_reaches_the_consumer() {
+        let catalog = parse(RULES);
+        let marker = table(&catalog, "policy_changes");
+        let notes = table(&catalog, "notes");
+        let commit = commit_at(600);
+        let probe = LiveProbe::new(catalog);
+        let source = transaction(vec![insert_at(marker, 600), SourceItem::Commit(commit)]);
+        let mut guard = following_guard(source, &probe, &Arc::new(ManualClock::new(0)));
+        let live = format!("{RULES} GRANT SELECT ON notes TO app_user;");
+        probe.set_live(&live);
+
+        let tables = rules_changed_tables(block_on(guard.next_item()).unwrap(), &live);
+        assert_eq!(tables, [notes]);
+        assert_eq!(
+            block_on(guard.next_item())
+                .unwrap()
+                .and_then(SourceItem::into_commit),
+            Some(commit),
+            "the marker table's event is dropped"
+        );
+    }
+
+    #[test]
+    fn a_marker_event_over_unchanged_rules_yields_only_the_commit() {
+        let catalog = parse(RULES);
+        let marker = table(&catalog, "policy_changes");
+        let commit = commit_at(700);
+        let probe = LiveProbe::new(catalog);
+        let source = transaction(vec![insert_at(marker, 700), SourceItem::Commit(commit)]);
+        let mut guard = following_guard(source, &probe, &Arc::new(ManualClock::new(0)));
+
+        assert_eq!(
+            block_on(guard.next_item())
+                .unwrap()
+                .and_then(SourceItem::into_commit),
+            Some(commit)
+        );
+        assert_eq!(probe.reads().last().map(String::as_str), Some(EVERY_TABLE));
+    }
+
+    #[test]
+    fn an_idle_run_finds_a_changed_helper_a_policy_reaches_through_another() {
+        let docs = table(&parse(RULES), "docs");
+        let probe = LiveProbe::new(parse(RULES));
+        let clock = Arc::new(ManualClock::new(0));
+        let mut guard = following_guard(IdleSource(Arc::default()), &probe, &clock);
+        let live = rules_changed("AS $$ SELECT d > 0 $$", "AS $$ SELECT d > 1 $$");
+        probe.set_live(&live);
+        let mut next = pin!(guard.next_item());
+        assert!(poll_once(next.as_mut()).is_pending());
+        clock.advance(INTERVAL);
+
+        let Poll::Ready(Ok(Some(SourceItem::Relation(DriftSignal::RulesChanged {
+            tables, ..
+        })))) = poll_once(next.as_mut())
+        else {
+            panic!("the run must find the changed helper");
+        };
+        assert_eq!(tables, [docs]);
+    }
+
+    #[test]
+    fn rules_changed_before_the_guard_starts_precede_the_first_event() {
+        let catalog = parse(RULES);
+        let docs = table(&catalog, "docs");
+        let probe = LiveProbe::new(parse(RULES));
+        let mut reader = LiveReader(probe.clone());
+        let baseline = block_on(read_live_rules(&catalog, &mut reader)).unwrap();
+        let live = rules_changed("GRANT SELECT ON docs", "GRANT SELECT, UPDATE ON docs");
+        probe.set_live(&live);
+        let source = transaction(vec![
+            insert_at(docs, 800),
+            SourceItem::Commit(commit_at(800)),
+        ]);
+        let mut guard = block_on(DriftGuard::new(
+            source,
+            catalog,
+            reader,
+            INTERVAL,
+            Arc::new(ManualClock::new(0)),
+            Some(RulesFollowing::new(baseline, None)),
+        ))
+        .unwrap();
+
+        let tables = rules_changed_tables(block_on(guard.next_item()).unwrap(), &live);
+        assert_eq!(tables, [docs]);
+        assert!(block_on(guard.next_item())
+            .unwrap()
+            .and_then(SourceItem::into_event)
+            .is_some());
+    }
+
+    #[test]
+    fn a_failed_rules_read_is_read_again_before_any_item() {
+        let catalog = parse(RULES);
+        let marker = table(&catalog, "policy_changes");
+        let notes = table(&catalog, "notes");
+        let commit = commit_at(900);
+        let probe = LiveProbe::new(catalog);
+        let source = transaction(vec![insert_at(marker, 900), SourceItem::Commit(commit)]);
+        let mut guard = following_guard(source, &probe, &Arc::new(ManualClock::new(0)));
+        let live = format!("{RULES} GRANT SELECT ON notes TO app_user;");
+        probe.set_live(&live);
+        *probe.failing.lock() = Some(EVERY_TABLE);
+
+        assert!(matches!(
+            block_on(guard.next_item()),
+            Err(DriftGuardError::Shape(_))
+        ));
+        let tables = rules_changed_tables(block_on(guard.next_item()).unwrap(), &live);
+        assert_eq!(tables, [notes]);
+        assert_eq!(
+            block_on(guard.next_item())
+                .unwrap()
+                .and_then(SourceItem::into_commit),
+            Some(commit)
+        );
+    }
+
+    #[test]
+    fn a_refused_table_is_left_out_of_the_rules_read_and_the_signal() {
+        let catalog = parse(RULES);
+        let docs = table(&catalog, "docs");
+        let notes = table(&catalog, "notes");
+        let probe = LiveProbe::new(catalog);
+        let source = transaction(vec![SourceItem::Relation(TableSignal::SchemaChanged(
+            "docs",
+        ))]);
+        let mut guard = following_guard(source, &probe, &Arc::new(ManualClock::new(0)));
+        let live = format!(
+            "{} GRANT SELECT ON notes TO app_user;",
+            rules_changed("title TEXT", "title INTEGER")
+                .replace("USING (can_read(id))", "USING (true)")
+        );
+        probe.set_live(&live);
+
+        let Some(SourceItem::Relation(DriftSignal::Refused { table: refused, .. })) =
+            block_on(guard.next_item()).unwrap()
+        else {
+            panic!("the changed shape must refuse the table first");
+        };
+        assert_eq!(refused, docs);
+        let Some(SourceItem::Relation(DriftSignal::RulesChanged { tables, .. })) =
+            block_on(guard.next_item()).unwrap()
+        else {
+            panic!("the changed grant must follow");
+        };
+        assert_eq!(tables, [notes]);
+        assert_eq!(
+            probe.reads().last().map(String::as_str),
+            Some("rules(notes, policy_changes)")
+        );
     }
 }
