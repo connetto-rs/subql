@@ -20,6 +20,7 @@ use crate::{
     IdTypes, RegisterError, Registered, SubscriptionId, SubscriptionScope, Tier, UnregisterReport,
 };
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 use hashbrown::HashMap;
@@ -820,6 +821,12 @@ where
         spec: &crate::SubscriptionRequest<I, E::Backend>,
     ) -> Result<Vec<crate::term::TermDescription>, RegisterError> {
         self.inner.describe_terms(spec)
+    }
+
+    /// Judge reads by the access rules `rules` declares from now on, through
+    /// [`SubscriptionEngine::follow_access_rules`](crate::SubscriptionEngine::follow_access_rules).
+    pub fn follow_access_rules<R: DatabaseLike + 'static>(&mut self, rules: Arc<R>) {
+        self.inner.follow_access_rules(rules);
     }
 
     /// Drop every queued read whose subscription no longer holds a resolve

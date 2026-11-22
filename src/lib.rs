@@ -80,6 +80,7 @@ pub use sql_traits::{
 };
 
 // Internal modules
+mod access_rules;
 mod errors;
 mod table_resolution;
 mod types;

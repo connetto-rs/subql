@@ -93,6 +93,16 @@ fn table_id_for_parts<DB: DatabaseLike>(
     u32::try_from(id).ok()
 }
 
+/// The name a table is looked up by in another catalog of the same
+/// database, as `table`'s own catalog writes it.
+pub(crate) fn written_target<T: TableLike>(table: &T) -> TargetName<'_> {
+    let target = TargetName::new(table.table_name(), table.table_name_is_quoted());
+    match table.table_schema() {
+        Some(schema) => target.with_schema(schema, table.table_schema_is_quoted()),
+        None => target,
+    }
+}
+
 /// Resolve the table a SQLite session diffset names, comparing the name as
 /// SQLite compares names, without ASCII case.
 ///

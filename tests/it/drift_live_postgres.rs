@@ -455,3 +455,72 @@ fn every_rule_change_changes_the_live_rules_of_the_table() {
         rules = changed;
     }
 }
+
+const SERVED_SECURED: &str = "
+    CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT);
+    ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+    CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);
+";
+
+#[test]
+fn an_engine_following_a_live_database_reads_its_row_security_and_tables() {
+    use std::sync::Arc;
+
+    use subql::backend::Value;
+    use subql::testing::TestEvent;
+    use subql::{
+        catalog_helpers, CatalogError, DefaultIds, RegisterError, SubscriptionEngine,
+        SubscriptionRequest,
+    };
+
+    assert_docker_available();
+    let database = stock_pg_database(18);
+    run(
+        &database,
+        &format!("{SERVED_SECURED} ALTER TABLE docs DISABLE ROW LEVEL SECURITY;"),
+    );
+    let live = PgLiveCatalog::new(database.connect(), PUBLICATION)
+        .load_tables(&[TargetName::parse("docs").unwrap()])
+        .unwrap();
+
+    let served = ParserDB::parse::<PostgreSqlDialect>(SERVED_SECURED).unwrap();
+    let docs = catalog_helpers::table_id::<Postgres, _>(&served, "docs").unwrap();
+    let notes = catalog_helpers::table_id::<Postgres, _>(&served, "notes").unwrap();
+    let mut engine: SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB> =
+        SubscriptionEngine::new(served, PostgreSqlDialect {});
+    let count = || SubscriptionRequest::new(1u64, "SELECT COUNT(*) FROM docs");
+    assert!(
+        matches!(
+            engine.register(count()),
+            Err(RegisterError::AggregatorOnRlsTable { .. })
+        ),
+        "the served catalog secures docs"
+    );
+
+    engine.follow_access_rules(Arc::new(live));
+
+    engine
+        .register(count())
+        .expect("the live database no longer secures docs");
+    engine
+        .register(SubscriptionRequest::new(
+            2u64,
+            "SELECT * FROM docs WHERE id > 0",
+        ))
+        .unwrap();
+    let inserted = engine
+        .consumers(&TestEvent::insert(
+            docs,
+            vec![Value::Int(1), Value::String("title".into())],
+        ))
+        .unwrap();
+    assert_eq!(inserted.inserted(), &[2], "the row subscription answers");
+    let refused = engine.register(SubscriptionRequest::new(3u64, "SELECT * FROM notes"));
+    assert!(
+        matches!(
+            refused,
+            Err(RegisterError::Catalog(CatalogError::UnknownTable(table))) if table == notes
+        ),
+        "the live database read holds no notes, got {refused:?}"
+    );
+}

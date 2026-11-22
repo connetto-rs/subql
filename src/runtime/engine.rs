@@ -47,6 +47,7 @@ use crate::{
     DropReason, DroppedRead, DurabilityMode, DurableShardMerge, DurableShardStore, MergeDrainError,
     MergeError, MergeJobId, MergeReport, RestoredRead, RestoredReads, StorageError,
 };
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use hashbrown::{HashMap, HashSet};
@@ -119,7 +120,8 @@ struct CompiledSpec<I: IdTypes, B: Backend> {
     prefilter_plan: PrefilterPlan,
     projection: QueryProjection,
     hash: u128,
-    read_rule_folded: bool,
+    /// The read rule folded into the predicate, `None` for query-only matching.
+    folded_rule: Option<Arc<sqlparser::ast::Expr>>,
     /// Runnable component-seed bundle (SQL plus per-column decode kinds)
     /// for an aggregate registration, `None` for row subscriptions.
     /// Rendered once at compile time.
@@ -368,8 +370,12 @@ where
     /// an ordinary inert subscription. Stored as `Vec<Value<E::Backend>>`
     /// so the values round-trip through the parser's bind resolver.
     pk_follows: HashMap<SubscriptionId, (TableId, Vec<crate::backend::Value<E::Backend>>)>,
+    /// The access rules a consumer handed the engine to follow in place of
+    /// the served catalog's, `None` until one does.
+    followed_rules: Option<Box<dyn crate::access_rules::FollowedRules>>,
     /// The caller's own translation settings, which registration needs to ask
-    /// whether a membership subquery can be served at all.
+    /// whether a membership subquery can be served at all, with the read rules
+    /// and registry they derive from the followed rules.
     ///
     /// The whole [`Translator`](rls2fga::translator::Translator) rather than the
     /// two values read off it, so the filter and the caller's real read rules are
@@ -378,9 +384,11 @@ where
     /// missing configuration: the session setting that identifies the caller is
     /// deployment-specific, and defaulting it fails silently when wrong.
     #[cfg(feature = "membership-term")]
-    translator: Option<rls2fga::translator::Translator>,
-    #[cfg(feature = "membership-term")]
-    read_rules: HashMap<TableId, sqlparser::ast::Expr>,
+    translation: Option<crate::access_rules::Translation>,
+    /// The read rule each folded subscription was registered with, which
+    /// [`Self::unregister_query`] folds the caller's SQL with again.
+    #[cfg(all(feature = "membership-term", not(feature = "std")))]
+    folded_rules: HashMap<SubscriptionId, Arc<sqlparser::ast::Expr>>,
     /// MySQL's `div_precision_increment` as this deployment declared it.
     /// Only an engine whose `/` answers a decimal needs it, and that
     /// engine refuses the operator until it is given.
@@ -625,7 +633,14 @@ where
         &self,
         spec: &SubscriptionRequest<I, E::Backend>,
         database_reads_per_consumer: bool,
-    ) -> Result<(CompiledQuery<E::Backend>, Vec<TermPlan>, bool), RegisterError> {
+    ) -> Result<
+        (
+            CompiledQuery<E::Backend>,
+            Vec<TermPlan>,
+            Option<Arc<sqlparser::ast::Expr>>,
+        ),
+        RegisterError,
+    > {
         let compiled = parse_compile_normalize_and_prefilter_with_binds::<E::Backend, DB>(
             &spec.sql,
             &self.dialect,
@@ -643,10 +658,12 @@ where
         // stay accepted. MIN/MAX never reach this branch: they fail the
         // compile step above with UnsupportedSql and are captured by the
         // reexec wrapper, which applies its own RLS guard.
+        // Read for every projection, so a table the followed rules lack is refused.
+        let row_security = self.access_rules().table_has_rls(compiled.table_id)?;
         if matches!(
             compiled.projection,
             QueryProjection::Aggregate(_) | QueryProjection::GroupedAggregate { .. }
-        ) && catalog_helpers::table_has_rls(&self.database, compiled.table_id)?
+        ) && row_security
         {
             if database_reads_per_consumer {
                 return Err(RegisterError::NotServedInProcess(
@@ -674,7 +691,11 @@ where
                 QueryProjection::Rows | QueryProjection::Columns { .. }
             )
         {
-            if let Some(rule) = self.read_rules.get(&compiled.table_id) {
+            if let Some(rule) = self
+                .translation
+                .as_ref()
+                .and_then(|translation| translation.read_rules.get(&compiled.table_id))
+            {
                 if let Ok(folded) =
                     crate::compiler::parser::parse_compile_normalize_and_prefilter_with_read_rule::<
                         E::Backend,
@@ -697,13 +718,13 @@ where
                         if plans.iter().all(|plan| {
                             plan.caller != TermCaller::Identity || spec.subscriber.is_some()
                         }) {
-                            return Ok((folded, plans, true));
+                            return Ok((folded, plans, Some(Arc::clone(rule))));
                         }
                     }
                 }
             }
         }
-        Ok((compiled, plans, false))
+        Ok((compiled, plans, None))
     }
 
     /// What each term in `spec`'s filter needs stated, without registering
@@ -755,7 +776,7 @@ where
         spec: SubscriptionRequest<I, E::Backend>,
         database_reads_per_consumer: bool,
     ) -> Result<CompiledSpec<I, E::Backend>, RegisterError> {
-        let (compiled, term_plans, read_rule_folded) =
+        let (compiled, term_plans, folded_rule) =
             self.compile_and_plan_terms(&spec, database_reads_per_consumer)?;
         let CompiledQuery {
             table_id,
@@ -804,7 +825,7 @@ where
             prefilter_plan,
             projection,
             hash,
-            read_rule_folded,
+            folded_rule,
             bootstrap,
             term_plans,
             term_seeds,
@@ -1111,7 +1132,7 @@ where
         table_id: TableId,
         acting_role: Option<&str>,
     ) -> Result<Vec<TermPlan>, RegisterError> {
-        let translator = self.translator.as_ref().ok_or_else(|| {
+        let translation = self.translation.as_ref().ok_or_else(|| {
             RegisterError::MembershipTermRefused(
                 "this engine was built without translation settings, so SubQL cannot tell \
                  whether the relationship a membership subquery names can be served. Pass the \
@@ -1134,7 +1155,8 @@ where
                     table_id,
                     &guarded_table,
                     &self.database,
-                    translator,
+                    self.access_rules(),
+                    translation,
                     acting_role,
                 )
             })
@@ -1364,10 +1386,11 @@ where
             resume_cursors: HashMap::new(),
             pk_follows: HashMap::new(),
             aggregate_registrations: HashMap::new(),
+            followed_rules: None,
             #[cfg(feature = "membership-term")]
-            translator: None,
-            #[cfg(feature = "membership-term")]
-            read_rules: HashMap::new(),
+            translation: None,
+            #[cfg(all(feature = "membership-term", not(feature = "std")))]
+            folded_rules: HashMap::new(),
             division_increment: None,
             term_watch: HashMap::new(),
             aggregates: HashMap::new(),
@@ -1421,9 +1444,68 @@ where
     #[cfg(feature = "membership-term")]
     #[must_use]
     pub fn with_translator(mut self, translator: rls2fga::translator::Translator) -> Self {
-        self.read_rules = crate::read_rule::read_rules(&self.database, &translator);
-        self.translator = Some(translator);
+        self.translation = Some(crate::access_rules::Translation::new(
+            translator,
+            self.access_rules(),
+        ));
         self
+    }
+
+    /// Judge reads by the access rules `rules` declares from now on, in place
+    /// of the ones the engine judged by so far.
+    ///
+    /// `rules` is typically the live database a
+    /// [`DriftSignal::RulesChanged`](crate::drift::guard::DriftSignal::RulesChanged)
+    /// carries, of any [`DatabaseLike`] type. Each of its tables answers for
+    /// the served table its schema and name resolve to, and a served table it
+    /// lacks is refused as the served catalog refuses a table it lacks. Row
+    /// security, read rules and membership terms all follow `rules`.
+    ///
+    /// A registration made earlier keeps the rule it was folded with until the
+    /// caller replaces it, and [`Self::unregister_query`] still finds it.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use sql_traits::structs::ParserDB;
+    /// use sqlparser::dialect::PostgreSqlDialect;
+    /// use subql::backend::Postgres;
+    /// use subql::testing::TestEvent;
+    /// use subql::{DefaultIds, RegisterError, SubscriptionEngine, SubscriptionRequest};
+    ///
+    /// let ddl = "CREATE TABLE orders (id INT PRIMARY KEY, amount INT);";
+    /// let served = ParserDB::parse::<PostgreSqlDialect>(ddl).expect("the DDL parses");
+    /// let mut engine: SubscriptionEngine<TestEvent<Postgres>, DefaultIds, ParserDB> =
+    ///     SubscriptionEngine::new(served, PostgreSqlDialect {});
+    ///
+    /// let live = ParserDB::parse::<PostgreSqlDialect>(&format!(
+    ///     "{ddl} ALTER TABLE orders ENABLE ROW LEVEL SECURITY;"
+    /// ))
+    /// .expect("the DDL parses");
+    /// engine.follow_access_rules(Arc::new(live));
+    ///
+    /// let refused = engine.register(SubscriptionRequest::new(1, "SELECT SUM(amount) FROM orders"));
+    /// assert!(matches!(refused, Err(RegisterError::AggregatorOnRlsTable { .. })));
+    /// ```
+    pub fn follow_access_rules<R: DatabaseLike + 'static>(&mut self, rules: Arc<R>) {
+        self.followed_rules = Some(Box::new(
+            crate::access_rules::Followed::new::<E::Backend, DB>(&self.database, rules),
+        ));
+        #[cfg(feature = "membership-term")]
+        if let Some(translation) = self.translation.take() {
+            self.translation = Some(crate::access_rules::Translation::new(
+                translation.translator,
+                self.access_rules(),
+            ));
+        }
+    }
+
+    /// The access rules the engine judges reads by.
+    fn access_rules(&self) -> crate::access_rules::AccessRules<'_, DB> {
+        self.followed_rules.as_deref().map_or(
+            crate::access_rules::AccessRules::Served(&self.database),
+            crate::access_rules::AccessRules::Followed,
+        )
     }
 
     /// Supply MySQL's `div_precision_increment`, which its `/` needs.
@@ -1697,7 +1779,7 @@ where
                     created_new_predicate: false,
                     projection: compiled.projection,
                     aggregate_bootstrap: compiled.bootstrap,
-                    read_rule_folded: compiled.read_rule_folded,
+                    read_rule_folded: compiled.folded_rule.is_some(),
                 }),
                 evicted: Vec::new(),
                 not_served_because: None,
@@ -1759,6 +1841,10 @@ where
         // 8. Index subscription for O(1) unregister/upsert lookups.
         self.subscription_to_table.insert(subscription_id, table_id);
         self.binding_dedup.insert(natural_key, subscription_id);
+        #[cfg(all(feature = "membership-term", not(feature = "std")))]
+        if let Some(rule) = &compiled.folded_rule {
+            self.folded_rules.insert(subscription_id, Arc::clone(rule));
+        }
         self.open_aggregate_total(
             subscription_id,
             &compiled.spec,
@@ -1799,7 +1885,7 @@ where
                 created_new_predicate: created_new,
                 projection: compiled.projection,
                 aggregate_bootstrap: compiled.bootstrap,
-                read_rule_folded: compiled.read_rule_folded,
+                read_rule_folded: compiled.folded_rule.is_some(),
             }),
             evicted,
             not_served_because: None,
@@ -1998,7 +2084,7 @@ where
             crate::reexec::plan::QueryPlan::Total(plan) => plan.tables.as_slice(),
         };
         for &table in tables {
-            if crate::catalog_helpers::table_has_rls(&self.database, table)? {
+            if self.access_rules().table_has_rls(table)? {
                 return Ok(Some(table));
             }
         }
@@ -3506,7 +3592,7 @@ where
                                 created_new_predicate: false,
                                 projection: compiled_spec.projection,
                                 aggregate_bootstrap: compiled_spec.bootstrap,
-                                read_rule_folded: compiled_spec.read_rule_folded,
+                                read_rule_folded: compiled_spec.folded_rule.is_some(),
                             }),
                             evicted: Vec::new(),
                             not_served_because: None,
@@ -3530,7 +3616,7 @@ where
                                 created_new_predicate: false,
                                 projection: compiled_spec.projection,
                                 aggregate_bootstrap: compiled_spec.bootstrap,
-                                read_rule_folded: compiled_spec.read_rule_folded,
+                                read_rule_folded: compiled_spec.folded_rule.is_some(),
                             }),
                             evicted: Vec::new(),
                             not_served_because: None,
@@ -3553,7 +3639,7 @@ where
                             created_new_predicate: false, // filled in phase 2
                             projection: compiled_spec.projection.clone(),
                             aggregate_bootstrap: None, // filled in phase 2
-                            read_rule_folded: compiled_spec.read_rule_folded,
+                            read_rule_folded: compiled_spec.folded_rule.is_some(),
                         }),
                         evicted: Vec::new(),
                         not_served_because: None,
@@ -3712,6 +3798,10 @@ where
             }
 
             self.binding_dedup.insert(natural_key, subscription_id);
+            #[cfg(all(feature = "membership-term", not(feature = "std")))]
+            if let Some(rule) = &c.folded_rule {
+                self.folded_rules.insert(subscription_id, Arc::clone(rule));
+            }
             // Batch registration takes plain `SubscriptionRequest`, which
             // states shared database reads.
             self.open_aggregate_total(subscription_id, &c.spec, c.table_id, &c.projection, false);
@@ -4178,6 +4268,8 @@ where
         self.pk_follows.remove(&subscription_id);
         #[cfg(feature = "std")]
         self.in_process_sources.remove(&subscription_id);
+        #[cfg(all(feature = "membership-term", not(feature = "std")))]
+        self.folded_rules.remove(&subscription_id);
         self.aggregates.remove(&subscription_id);
         self.grouped_aggregates.remove(&subscription_id);
         self.aggregate_registrations.remove(&subscription_id);
@@ -4891,6 +4983,48 @@ where
         }
     }
 
+    /// The predicates `sql` folds to under each rule `consumer_id`'s
+    /// registrations on `table_id` were folded with, each rule folded once.
+    #[cfg(all(feature = "membership-term", not(feature = "std")))]
+    fn folded_predicates(
+        &self,
+        table_id: TableId,
+        consumer_id: I::ConsumerId,
+        sql: &str,
+    ) -> Vec<PredicateId> {
+        let Some(partition) = self.partitions.get(&table_id) else {
+            return Vec::new();
+        };
+        let snapshot = partition.load_snapshot();
+        let mut rules: Vec<&Arc<sqlparser::ast::Expr>> = Vec::new();
+        for binding in snapshot
+            .predicates
+            .bindings
+            .values()
+            .filter(|binding| binding.consumer_id == consumer_id)
+        {
+            if let Some(rule) = self.folded_rules.get(&binding.subscription_id) {
+                if !rules.iter().any(|seen| Arc::ptr_eq(seen, rule)) {
+                    rules.push(rule);
+                }
+            }
+        }
+        rules
+            .into_iter()
+            .filter_map(|rule| {
+                crate::compiler::parser::parse_and_resolve_hash_with_read_rule::<E::Backend, DB>(
+                    sql,
+                    &self.dialect,
+                    &self.database,
+                    &[],
+                    rule,
+                )
+                .ok()
+                .and_then(|(_, folded_hash)| snapshot.predicates.find_by_hash(folded_hash))
+            })
+            .collect()
+    }
+
     /// Remove a consumer's in-process subscriptions matching the query's source interest.
     pub fn unregister_query(
         &mut self,
@@ -4914,17 +5048,7 @@ where
         let snapshot = partition.load_snapshot();
         let pred_id = snapshot.predicates.find_by_hash(hash);
         #[cfg(all(feature = "membership-term", not(feature = "std")))]
-        let folded_id = self.read_rules.get(&table_id).and_then(|rule| {
-            crate::compiler::parser::parse_and_resolve_hash_with_read_rule::<E::Backend, DB>(
-                sql,
-                &self.dialect,
-                &self.database,
-                &[],
-                rule,
-            )
-            .ok()
-            .and_then(|(_, folded_hash)| snapshot.predicates.find_by_hash(folded_hash))
-        });
+        let folded_ids = self.folded_predicates(table_id, consumer_id, sql);
         let to_remove: Vec<SubscriptionId> = snapshot
             .predicates
             .bindings
@@ -4935,7 +5059,7 @@ where
                 }
                 let matches_compiled = Some(binding.predicate_id) == pred_id;
                 #[cfg(all(feature = "membership-term", not(feature = "std")))]
-                let matches_folded = Some(binding.predicate_id) == folded_id;
+                let matches_folded = folded_ids.contains(&binding.predicate_id);
                 #[cfg(not(all(feature = "membership-term", not(feature = "std"))))]
                 let matches_folded = false;
                 #[cfg(feature = "std")]

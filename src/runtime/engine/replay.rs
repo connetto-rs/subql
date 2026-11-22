@@ -1097,9 +1097,11 @@ where
         compiled: super::CompiledSpec<I, E::Backend>,
     ) -> Result<ResolvedPlan<E::Backend>, ReplayError> {
         let table = compiled.table_id;
-        if catalog_helpers::table_has_rls(&self.database, table)
+        if self
+            .access_rules()
+            .table_has_rls(table)
             .map_err(|error| ReplayError::InvalidState(error.to_string()))?
-            && !compiled.read_rule_folded
+            && compiled.folded_rule.is_none()
         {
             return Err(ReplayError::Unsupported(
                 "the read rule is not folded into the predicate".into(),
@@ -1208,7 +1210,9 @@ where
         match plan {
             QueryPlan::Partial(plan) if plan.where_program.term_columns.is_empty() => {
                 let table = plan.table_id;
-                let rls = catalog_helpers::table_has_rls(&self.database, table)
+                let rls = self
+                    .access_rules()
+                    .table_has_rls(table)
                     .map_err(|error| ReplayError::InvalidState(error.to_string()))?;
                 if rls {
                     return Err(ReplayError::Unsupported(
@@ -1236,7 +1240,9 @@ where
             }
             QueryPlan::GroupedPartial(plan) if plan.where_program.term_columns.is_empty() => {
                 let table = plan.table_id;
-                let rls = catalog_helpers::table_has_rls(&self.database, table)
+                let rls = self
+                    .access_rules()
+                    .table_has_rls(table)
                     .map_err(|error| ReplayError::InvalidState(error.to_string()))?;
                 if rls {
                     return Err(ReplayError::Unsupported(

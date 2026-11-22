@@ -686,7 +686,7 @@ where
         else {
             return Ok(());
         };
-        let target = target_of(catalog_table);
+        let target = crate::catalog_helpers::written_target(catalog_table);
         let live = match &mut self.following {
             None => self.reader.shape(target).await?,
             Some(following) => self
@@ -758,15 +758,6 @@ fn catalog_table<C: DatabaseLike>(catalog: &C, table: TableId) -> Option<&C::Tab
         .and_then(|index| catalog.table_by_id(index))
 }
 
-/// The name a live read looks `table` up by, as the catalog writes it.
-fn target_of<T: TableLike>(table: &T) -> TargetName<'_> {
-    let target = TargetName::new(table.table_name(), table.table_name_is_quoted());
-    match table.table_schema() {
-        Some(schema) => target.with_schema(schema, table.table_schema_is_quoted()),
-        None => target,
-    }
-}
-
 /// Read the rules of the `catalog` tables `tables` in one load.
 async fn read_rules_of<C, R>(
     catalog: &C,
@@ -779,7 +770,12 @@ where
 {
     let (ids, names): (Vec<TableId>, Vec<TargetName<'static>>) = tables
         .filter_map(|table| {
-            catalog_table(catalog, table).map(|found| (table, target_of(found).into_owned()))
+            catalog_table(catalog, table).map(|found| {
+                (
+                    table,
+                    crate::catalog_helpers::written_target(found).into_owned(),
+                )
+            })
         })
         .unzip();
     let (database, rules) = reader.rules(names).await?;
