@@ -13,13 +13,13 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use rls2fga::term::{describe_membership_term, TermChain, TermShapes};
-use rls2fga::translator::Translator;
+use rls2fga::term::{TermChain, TermShapes};
 use rls2fga::types::RelationShapes;
 use rls2fga::types::{Guard, RecordDerivation, ValueSource};
 use sql_traits::prelude::DatabaseLike;
 use sqlparser::ast::Expr;
 
+use crate::access_rules::{AccessRules, Translation};
 use crate::term::{CompiledTerm, TermCaller, TermMovement, TermPlan};
 use crate::{catalog_helpers, RegisterError, TableId};
 
@@ -28,7 +28,8 @@ use crate::{catalog_helpers, RegisterError, TableId};
 ///
 /// The role settles the read rules of the membership table the term reads
 /// through. Without one, any row-level security on that table refuses the term.
-/// `guarded_table` names `table` as SQL text, which `rls2fga` reads back.
+/// `guarded_table` names `table` as SQL text, which `rls2fga` reads back from
+/// `rules`, while columns resolve in the served `database`.
 ///
 /// # Errors
 ///
@@ -40,32 +41,29 @@ pub fn plan_term<B: crate::backend::Backend, DB: DatabaseLike>(
     table: TableId,
     guarded_table: &str,
     database: &DB,
-    translator: &Translator,
+    rules: AccessRules<'_, DB>,
+    translation: &Translation,
     acting_role: Option<&str>,
 ) -> Result<TermPlan, RegisterError> {
-    // The effective registry, not the base one: a filter naming a function
-    // defined in the schema is accepted inside a real read rule and would be
-    // refused here on the base registry alone.
-    let (_, registry) = translator.classify_with_effective_registry(database);
-    let shapes = describe_membership_term(
-        &term.expr,
-        database,
-        &registry,
-        guarded_table,
-        translator.min_confidence(),
-        acting_role,
-    )
-    .map_err(|refusal| RegisterError::MembershipTermRefused(refusal.reason))?;
+    let shapes = rules
+        .describe_membership_term(
+            &term.expr,
+            &translation.registry,
+            guarded_table,
+            translation.translator.min_confidence(),
+            acting_role,
+        )
+        .map_err(|refusal| RegisterError::MembershipTermRefused(refusal.reason))?;
     let caller = match &shapes.caller {
         rls2fga::term::TermCaller::Identity => TermCaller::Identity,
         rls2fga::term::TermCaller::Subjects { .. } => TermCaller::Subjects,
     };
 
     if term.compares_the_caller() {
-        return caller_plan::<B, DB>(term, table, database, &shapes, caller);
+        return caller_plan::<B, DB>(term, table, database, rules, &shapes, caller);
     }
 
-    let movement = member_columns::<B, DB>(term, table, &shapes, database)?;
+    let movement = member_columns::<B, DB>(term, table, &shapes, database, rules)?;
 
     // Each value the term compares has to be the value the membership row keys
     // its object on at the same position, or the lookup stores under one key
@@ -107,6 +105,7 @@ fn caller_plan<B: crate::backend::Backend, DB: DatabaseLike>(
     term: &CompiledTerm,
     table: TableId,
     database: &DB,
+    rules: AccessRules<'_, DB>,
     shapes: &TermShapes,
     caller: TermCaller,
 ) -> Result<TermPlan, RegisterError> {
@@ -167,7 +166,7 @@ fn caller_plan<B: crate::backend::Backend, DB: DatabaseLike>(
             "are guarded on more than the compared value being present",
         ));
     }
-    if catalog_helpers::contract_table_id(database, row_table) != Some(table) {
+    if rules.served_table(row_table) != Some(table) {
         return Err(refuse("read a table other than the subscribed one"));
     }
     if column_of::<B, _>(template.subject_key.part(), database, table) != Some(term.columns[0]) {
@@ -201,6 +200,7 @@ fn member_columns<B: crate::backend::Backend, DB: DatabaseLike>(
     table: TableId,
     shapes: &TermShapes,
     database: &DB,
+    rules: AccessRules<'_, DB>,
 ) -> Result<TermMovement, RegisterError> {
     let relation =
         match &shapes.chain {
@@ -228,7 +228,7 @@ fn member_columns<B: crate::backend::Backend, DB: DatabaseLike>(
             ))
         })?;
 
-    let movement = read_from_one_row::<B, _>(entry, database)?;
+    let movement = read_from_one_row::<B, _>(entry, database, rules)?;
     align_with_the_filter::<B, DB>(term, table, movement, database)
 }
 
@@ -289,6 +289,7 @@ fn align_with_the_filter<B: crate::backend::Backend, DB: DatabaseLike>(
 fn read_from_one_row<B: crate::backend::Backend, DB: DatabaseLike>(
     entry: &RelationShapes,
     database: &DB,
+    rules: AccessRules<'_, DB>,
 ) -> Result<TermMovement, RegisterError> {
     let refuse = |what: &str| {
         RegisterError::MembershipTermRefused(format!(
@@ -308,7 +309,8 @@ fn read_from_one_row<B: crate::backend::Backend, DB: DatabaseLike>(
         return Err(refuse("need more than one row"));
     };
 
-    let table_id = catalog_helpers::contract_table_id(database, table)
+    let table_id = rules
+        .served_table(table)
         .ok_or_else(|| refuse("read a table the catalog does not know"))?;
     let member_keys = template
         .object_key

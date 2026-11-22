@@ -4,6 +4,7 @@ use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use sql_traits::structs::ParserDB;
 use sqlparser::dialect::PostgreSqlDialect;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use subql::backend::{Postgres, ScalarFamily, Value};
 use subql::term::{TermCaller, TermDescription};
@@ -101,6 +102,19 @@ const MEMBERSHIP_DDL: &str =
 const NO_READ_POLICY_DDL: &str =
     "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
      ALTER TABLE items ENABLE ROW LEVEL SECURITY;";
+
+const OPEN_MEMBERSHIP_DDL: &str =
+    "CREATE TABLE team_members(team_id INTEGER, user_id TEXT, PRIMARY KEY(team_id, user_id));
+     CREATE TABLE docs(id INTEGER PRIMARY KEY, team_id INTEGER, title TEXT);
+     ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY docs_p ON docs FOR ALL USING (true);";
+
+const TITLE_DDL: &str =
+    "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
+     ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY items_p ON items FOR ALL USING (
+       title = current_setting('app.user_id', true)
+       OR title = ANY(string_to_array(current_setting('app.subjects', true), ',')));";
 
 const WRITE_ONLY_DDL: &str =
     "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
@@ -1102,6 +1116,93 @@ fn a_membership_rule_describes_its_seed_and_moves_its_admissions() {
         notifs.inserted().is_empty(),
         "the withdrawn admission admits nobody"
     );
+}
+
+#[test]
+fn followed_rules_judge_a_replacement_while_the_earlier_registration_keeps_its_fold() {
+    let db = parse(MEMBERSHIP_DDL);
+    let docs = table_id(&db, "docs");
+    let mut engine: Engine =
+        SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator());
+    engine
+        .register(
+            SubscriptionRequest::new(1u64, MEMBERS_QUERY)
+                .subscriber(Value::String("alice".into()))
+                .term_values(vec!["team_id"], rows_of("alice", vec![Value::Int(7)])),
+        )
+        .expect("alice registers under the membership rule");
+
+    engine.follow_access_rules(Arc::new(parse(OPEN_MEMBERSHIP_DDL)));
+
+    let bob = SubscriptionRequest::new(2u64, MEMBERS_QUERY).subscriber(Value::String("bob".into()));
+    assert!(
+        engine
+            .describe_terms(&bob)
+            .expect("the open rule describes")
+            .is_empty(),
+        "the followed rule names no membership"
+    );
+    engine
+        .register(bob)
+        .expect("bob registers under the followed rule");
+
+    let notifs = engine
+        .consumers(&TestEvent::insert(
+            docs,
+            vec![Value::Int(1), Value::Int(9), Value::String("title".into())],
+        ))
+        .expect("dispatch runs");
+    assert_eq!(
+        notifs.inserted(),
+        &[2],
+        "the followed rule admits team 9 to bob, and alice keeps the rule she was folded with"
+    );
+
+    let report = engine
+        .unregister_query(1, MEMBERS_QUERY)
+        .expect("the original SQL reaches the earlier fold");
+    assert_eq!(
+        report.removed_bindings, 1,
+        "alice's registration is removed"
+    );
+    assert_eq!(engine.subscription_count(), 1, "bob's registration remains");
+}
+
+#[test]
+fn a_followed_rule_on_another_column_hides_what_the_served_rule_admitted() {
+    let (mut engine, items) = engine_with(DDL);
+    engine.follow_access_rules(Arc::new(parse(TITLE_DDL)));
+    let registered = engine
+        .register(for_user(1, "alice", &[]))
+        .expect("the followed rule folds into the registration");
+    assert!(
+        registered
+            .served()
+            .expect("an in-process answer")
+            .read_rule_folded,
+        "the followed rule is in the registered predicate"
+    );
+
+    let notifs = engine
+        .consumers(&TestEvent::insert(items, item(1, "alice", 7)))
+        .expect("dispatch runs");
+    assert!(
+        notifs.inserted().is_empty(),
+        "the followed rule reads the title, which does not name alice"
+    );
+
+    let notifs = engine
+        .consumers(&TestEvent::insert(
+            items,
+            vec![
+                Value::Int(2),
+                Value::String("bob".into()),
+                Value::Int(7),
+                Value::String("alice".into()),
+            ],
+        ))
+        .expect("dispatch runs");
+    assert_eq!(notifs.inserted(), &[1], "the title names alice");
 }
 
 #[test]

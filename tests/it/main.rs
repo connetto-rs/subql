@@ -147,6 +147,8 @@ mod eviction_e2e;
 #[cfg(all(feature = "executor-diesel", feature = "diesel-typed-sqlite"))]
 mod execute_scalar_row_sqlite;
 
+mod follow_access_rules;
+
 #[cfg(feature = "diesel-typed-mysql")]
 mod follow_insert_mysql;
 

@@ -1,9 +1,11 @@
 //! Complete public read rules for caller-bound registration.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 use hashbrown::{HashMap, HashSet};
+use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::{
     ClassifiedExpr, ClassifiedPolicy, Composite, PatternClass, PolicyMode,
 };
@@ -16,14 +18,32 @@ use sqlparser::ast::{BinaryOperator, Expr, Value as SqlValue};
 use crate::catalog_helpers::{contract_table_id, table_has_rls};
 use crate::TableId;
 
-/// Compose each RLS-enabled table's complete public read rule.
+/// Compose each RLS-enabled table's complete public read rule, keyed by the
+/// id `served` gives the table, beside the translator's registry enriched
+/// with the functions `database` defines.
+///
+/// A table `served` gives no id is left out.
 pub fn read_rules<DB: DatabaseLike>(
     database: &DB,
     translator: &Translator,
-) -> HashMap<TableId, Expr> {
+    served: impl Fn(TableId) -> Option<TableId>,
+) -> (HashMap<TableId, Arc<Expr>>, FunctionRegistry) {
     let min_confidence = translator.min_confidence();
-    let classified = translator.classify(database);
+    let (classified, registry) = translator.classify_with_effective_registry(database);
+    let rules = rules_by_table(database, &classified, min_confidence)
+        .into_iter()
+        .filter_map(|(table, rule)| Some((served(table)?, Arc::new(rule))))
+        .collect();
+    (rules, registry)
+}
 
+/// Each RLS-enabled table's complete public read rule, keyed by its id in
+/// `database`.
+fn rules_by_table<DB: DatabaseLike>(
+    database: &DB,
+    classified: &[ClassifiedPolicy],
+    min_confidence: ConfidenceLevel,
+) -> HashMap<TableId, Expr> {
     let mut refused = HashSet::new();
     for policy in database.policies() {
         if policy.applies_to_public()
@@ -47,7 +67,7 @@ pub fn read_rules<DB: DatabaseLike>(
     }
 
     let mut by_table: HashMap<&rls2fga_types::TableId, Vec<&ClassifiedPolicy>> = HashMap::new();
-    for policy in &classified {
+    for policy in classified {
         let Some(target) = policy.resolved_table() else {
             continue;
         };
