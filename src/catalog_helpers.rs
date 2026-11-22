@@ -357,7 +357,7 @@ pub fn column_id_for_name<B: crate::backend::Backend, DB: DatabaseLike>(
 
 /// The catalog table for `table_id`, or the typed refusal every metadata
 /// helper shares.
-fn lookup_table<DB: DatabaseLike>(
+pub(crate) fn lookup_table<DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
 ) -> Result<&DB::Table, crate::CatalogError> {

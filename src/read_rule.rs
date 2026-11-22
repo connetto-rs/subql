@@ -14,11 +14,11 @@ use rls2fga::translator::Translator;
 use rls2fga_types::{ConfidenceLevel, PolicyCommand};
 use sql_traits::prelude::{DatabaseLike, ExpressionScope, PolicyLike, SemanticProofs, TableLike};
 use sql_traits::structs::IdentifierCase;
-use sqlparser::ast::{BinaryOperator, CastKind, Expr, InTarget, UnaryOperator, Value as SqlValue};
+use sqlparser::ast::{BinaryOperator, CastKind, Expr, InTarget, Value as SqlValue};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser_canonicalize::Canonicalizer;
 
-use crate::catalog_helpers::{contract_table_id, table_has_rls};
+use crate::catalog_helpers::{contract_table_id, lookup_table, rls_of, table_has_rls};
 use crate::TableId;
 
 /// Compose each RLS-enabled table's complete public read rule, keyed by the
@@ -88,14 +88,10 @@ fn rules_by_table<DB: DatabaseLike>(
         if refused.contains(&table) {
             continue;
         }
-        let Ok(true) = table_has_rls(database, table) else {
-            continue;
-        };
-        let Some(scope) = usize::try_from(table)
+        let Some(scope) = lookup_table(database, table)
             .ok()
-            .and_then(|index| database.table_by_id(index))
+            .filter(|scope| matches!(rls_of(database, scope, table), Ok(true)))
         else {
-            refused.insert(table);
             continue;
         };
         match public_read_rule(&reads, min_confidence, scope, database) {
@@ -206,13 +202,6 @@ fn written_spelling<DB: DatabaseLike>(clause: &Expr, table: &DB::Table, database
             op: op.clone(),
             right: Box::new(written_spelling(right, table, database)),
         },
-        Expr::UnaryOp {
-            op: UnaryOperator::Not,
-            expr,
-        } => Expr::UnaryOp {
-            op: UnaryOperator::Not,
-            expr: Box::new(written_spelling(expr, table, database)),
-        },
         Expr::Nested(inner) => Expr::Nested(Box::new(written_spelling(inner, table, database))),
         comparison => match without_conversions(comparison) {
             Some(respelled) if canonically_alike(&respelled, comparison, table, database) => {
@@ -227,45 +216,21 @@ fn written_spelling<DB: DatabaseLike>(clause: &Expr, table: &DB::Table, database
 /// spells none.
 fn without_conversions(comparison: &Expr) -> Option<Expr> {
     let respelled = match comparison {
-        Expr::BinaryOp { left, op, right } => {
-            let operands = || (Box::new(bare(left)), Box::new(bare(right)));
-            match op {
-                BinaryOperator::Eq
+        Expr::BinaryOp {
+            left,
+            op:
+                op @ (BinaryOperator::Eq
                 | BinaryOperator::NotEq
                 | BinaryOperator::Lt
                 | BinaryOperator::LtEq
                 | BinaryOperator::Gt
-                | BinaryOperator::GtEq => {
-                    let (left, right) = operands();
-                    Expr::BinaryOp {
-                        left,
-                        op: op.clone(),
-                        right,
-                    }
-                }
-                BinaryOperator::PGLikeMatch | BinaryOperator::PGNotLikeMatch => {
-                    let (expr, pattern) = operands();
-                    Expr::Like {
-                        negated: matches!(op, BinaryOperator::PGNotLikeMatch),
-                        any: false,
-                        expr,
-                        pattern,
-                        escape_char: None,
-                    }
-                }
-                BinaryOperator::PGILikeMatch | BinaryOperator::PGNotILikeMatch => {
-                    let (expr, pattern) = operands();
-                    Expr::ILike {
-                        negated: matches!(op, BinaryOperator::PGNotILikeMatch),
-                        any: false,
-                        expr,
-                        pattern,
-                        escape_char: None,
-                    }
-                }
-                _ => return None,
-            }
-        }
+                | BinaryOperator::GtEq),
+            right,
+        } => Expr::BinaryOp {
+            left: Box::new(bare(left)),
+            op: op.clone(),
+            right: Box::new(bare(right)),
+        },
         Expr::AnyOp {
             left,
             compare_op: BinaryOperator::Eq,
@@ -278,24 +243,19 @@ fn without_conversions(comparison: &Expr) -> Option<Expr> {
                 right: right.clone(),
                 is_some: *is_some,
             },
-            |elements| in_list(left, elements, false),
+            |elements| in_list(left, elements),
         ),
-        Expr::AllOp {
-            left,
-            compare_op: BinaryOperator::NotEq,
-            right,
-        } => in_list(left, array_elements(right)?, true),
         _ => return None,
     };
     (respelled != *comparison).then_some(respelled)
 }
 
-/// `tested [NOT] IN (elements)`, each operand without its conversion.
-fn in_list(tested: &Expr, elements: &[Expr], negated: bool) -> Expr {
+/// `tested IN (elements)`, each operand without its conversion.
+fn in_list(tested: &Expr, elements: &[Expr]) -> Expr {
     Expr::In {
         expr: Box::new(bare(tested)),
         target: InTarget::List(elements.iter().map(bare).collect()),
-        negated,
+        negated: false,
         global: false,
     }
 }
@@ -315,29 +275,21 @@ fn array_elements(expr: &Expr) -> Option<&[Expr]> {
     }
 }
 
-/// `operand` without the cast and the parentheses around a constant or a column.
+/// `operand` without the casts and the parentheses around a constant or a column.
 fn bare(operand: &Expr) -> Expr {
-    let is_constant_or_column = |expr: &Expr| {
-        matches!(
-            expr,
-            Expr::Value(_) | Expr::Identifier(_) | Expr::CompoundIdentifier(_)
-        )
-    };
-    match operand {
-        Expr::Cast {
-            kind: CastKind::Cast | CastKind::DoubleColon,
-            expr,
-            format: None,
-            ..
-        } => {
-            let inner = bare(expr);
-            if is_constant_or_column(&inner) {
-                inner
-            } else {
-                operand.clone()
-            }
-        }
-        Expr::Nested(inner) if is_constant_or_column(inner) => (**inner).clone(),
+    let mut inner = operand;
+    while let Expr::Nested(expr)
+    | Expr::Cast {
+        kind: CastKind::Cast | CastKind::DoubleColon,
+        expr,
+        format: None,
+        ..
+    } = inner
+    {
+        inner = expr;
+    }
+    match inner {
+        Expr::Value(_) | Expr::Identifier(_) | Expr::CompoundIdentifier(_) => inner.clone(),
         _ => operand.clone(),
     }
 }
