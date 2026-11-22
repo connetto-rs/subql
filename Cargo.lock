@@ -2611,7 +2611,7 @@ dependencies = [
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#bcaa2738cee23b07ea1e02c041066c26c9b0a03b"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#fad72eb9f8feac0474036c4be1fe635bf0c4e0fb"
 dependencies = [
  "diesel",
  "sql-traits",
@@ -2702,7 +2702,7 @@ dependencies = [
 [[package]]
 name = "pg_walstream"
 version = "0.10.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#f842c1836590843210226ea384c7dc576fb645b1"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#aca9e32d23e12951b03b3ff0ce68f795df6a7c38"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -3315,7 +3315,7 @@ dependencies = [
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#d61a59e35a89fb54fae4a6127ccaeffe59be97b5"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#9b380af915319587db553a62b6ecb51b050e51a1"
 dependencies = [
  "openfga-client",
  "prost",
@@ -3331,7 +3331,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#d61a59e35a89fb54fae4a6127ccaeffe59be97b5"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#9b380af915319587db553a62b6ecb51b050e51a1"
 dependencies = [
  "serde",
  "sql-values 0.6.0",
@@ -3797,7 +3797,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#296195cb20685cbcfc17180b4a5d5638e7013a56"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#eab98f8a726c11fcdd6050652e36c0bb38a2242d"
 dependencies = [
  "geometric-traits",
  "once_cell",
