@@ -414,11 +414,20 @@ mod tests {
         assert_eq!(v1[0].list_at(&db, RowKind::New, 1), Ok(editors()));
         assert_eq!(v2.list_at(&db, RowKind::New, 2), Ok(ArrayCell::Null));
         assert_eq!(v1[0].list_at(&db, RowKind::New, 2), Ok(ArrayCell::Null));
-        assert_eq!(
-            v2.list_at(&db, RowKind::Old, 1),
-            Ok(ArrayCell::Missing),
-            "an insert carries no old image"
-        );
+        // An insert's old image, the key read of a non-key column, and a
+        // column that is no array.
+        for (row, column) in [(RowKind::Old, 1), (RowKind::Pk, 1), (RowKind::New, 0)] {
+            assert_eq!(
+                v2.list_at(&db, row, column),
+                Ok(ArrayCell::Missing),
+                "v2 {row:?} {column}"
+            );
+            assert_eq!(
+                v1[0].list_at(&db, row, column),
+                Ok(ArrayCell::Missing),
+                "v1 {row:?} {column}"
+            );
+        }
     }
 
     #[test]

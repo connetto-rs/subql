@@ -556,3 +556,153 @@ fn a_scalar_column_has_no_elements() {
     );
     assert_eq!(event.list_at(&db, RowKind::New, 0), Ok(ArrayCell::Missing));
 }
+
+/// A text-stream `kinds` delete whose old image is `old` under `identity`.
+fn delete(old: RowData, identity: ReplicaIdentity) -> PgChangeEvent {
+    PgChangeEvent::new(
+        ChangeEvent {
+            event_type: pg_walstream::EventType::Delete {
+                schema: "public".into(),
+                table: "kinds".into(),
+                relation_oid: RELATION,
+                old_data: old,
+                replica_identity: identity,
+                key_columns: vec!["id".into()],
+            },
+            lsn: Lsn::new(1000),
+            metadata: None,
+            xid: None,
+        },
+        crate::PgCommitPosition::new(crate::PgLsn(1000), crate::PgXid(3), 1),
+    )
+}
+
+#[test]
+fn an_array_cell_the_image_does_not_carry_is_missing() {
+    let db = lists();
+    let insert = deliver(
+        PgOutputOrder::new(),
+        relation(&[("id", 23), ("editors", 1009)]),
+        RowData::from_pairs(vec![
+            ("id", ColumnValue::text("7")),
+            ("editors", ColumnValue::text("{a}")),
+        ]),
+    );
+    // The key read of a non-key column, an insert's old image, a column the
+    // catalog does not have, and `scores`, which the image left out.
+    for (row, column) in [
+        (RowKind::Pk, 1),
+        (RowKind::Old, 1),
+        (RowKind::New, 3),
+        (RowKind::New, 2),
+    ] {
+        assert_eq!(
+            insert.list_at(&db, row, column),
+            Ok(ArrayCell::Missing),
+            "{row:?} {column}"
+        );
+    }
+}
+
+/// A key-only old image pads every other column with `NULL`, which says
+/// nothing about the array, while a `FULL` image's `NULL` is the value.
+#[test]
+fn padding_is_missing_and_a_full_image_null_is_null() {
+    let db = lists();
+    let old = || {
+        RowData::from_pairs(vec![
+            ("id", ColumnValue::text("7")),
+            ("editors", ColumnValue::Null),
+            ("scores", ColumnValue::Null),
+        ])
+    };
+    let padded = delete(old(), ReplicaIdentity::Default);
+    assert_eq!(padded.list_at(&db, RowKind::Old, 1), Ok(ArrayCell::Missing));
+    let full = delete(old(), ReplicaIdentity::Full);
+    assert_eq!(full.list_at(&db, RowKind::Old, 1), Ok(ArrayCell::Null));
+}
+
+#[test]
+fn an_array_cell_in_the_other_format_is_an_error() {
+    let db = lists();
+    let text_on_binary = deliver(
+        binary_order(),
+        relation(&[("editors", 1009)]),
+        RowData::from_pairs(vec![("editors", ColumnValue::text("{a}"))]),
+    );
+    assert_eq!(
+        text_on_binary.list_at(&db, RowKind::New, 1),
+        Err(ValueError::CellFormat {
+            column: 1,
+            expected: PgCellFormat::Binary
+        })
+    );
+    let binary_on_text = deliver(
+        PgOutputOrder::new(),
+        relation(&[("editors", 1009)]),
+        RowData::from_pairs(vec![(
+            "editors",
+            ColumnValue::binary_bytes(Bytes::from(vector_send(25, &[Some(b"a")]))),
+        )]),
+    );
+    assert_eq!(
+        binary_on_text.list_at(&db, RowKind::New, 1),
+        Err(ValueError::CellFormat {
+            column: 1,
+            expected: PgCellFormat::Text
+        })
+    );
+}
+
+#[test]
+fn array_text_that_is_not_utf8_is_refused() {
+    let db = lists();
+    let event = deliver(
+        PgOutputOrder::new(),
+        relation(&[("editors", 1009)]),
+        RowData::from_pairs(vec![(
+            "editors",
+            ColumnValue::Text(Bytes::from_static(b"{\xff}")),
+        )]),
+    );
+    assert_eq!(
+        event.list_at(&db, RowKind::New, 1),
+        Err(ValueError::Array { column: 1 })
+    );
+}
+
+/// A binary array names its element type in its header, and one the stream
+/// cannot read binary, a short body, or an unknown type refuses the cell.
+#[test]
+fn a_binary_array_header_the_stream_cannot_read_is_refused() {
+    const ACLITEM: u32 = 1033;
+    const UNKNOWN: u32 = 4_000_000;
+    let db = lists();
+    let read = |bytes: Vec<u8>| {
+        deliver(
+            binary_order(),
+            relation(&[("editors", 1009)]),
+            RowData::from_pairs(vec![(
+                "editors",
+                ColumnValue::binary_bytes(Bytes::from(bytes)),
+            )]),
+        )
+        .list_at(&db, RowKind::New, 1)
+    };
+    let array = crate::wal::pg_array::array_send;
+    assert_eq!(
+        read(array(ACLITEM, &[(1, 1)], &[Some(b"a")])),
+        Err(ValueError::Array { column: 1 })
+    );
+    assert_eq!(
+        read(array(25, &[(2, 1)], &[Some(b"a")])),
+        Err(ValueError::Array { column: 1 })
+    );
+    assert_eq!(
+        read(array(UNKNOWN, &[(1, 1)], &[Some(b"a")])),
+        Err(ValueError::UnresolvedFormat {
+            column: 1,
+            type_oid: Some(UNKNOWN)
+        })
+    );
+}

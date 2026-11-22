@@ -279,18 +279,6 @@ pub trait CdcEvent {
         row: RowKind,
         col: ColumnId,
     ) -> Result<ArrayCell<Self::Backend>, crate::ValueError>;
-
-    #[doc(hidden)]
-    fn list_at_resolved<DB: DatabaseLike>(
-        &self,
-        db: &DB,
-        table_id: TableId,
-        row: RowKind,
-        col: ColumnId,
-    ) -> Result<ArrayCell<Self::Backend>, crate::ValueError> {
-        let _ = table_id;
-        self.list_at(db, row, col)
-    }
 }
 
 type DecodedCell<B> = OnceCell<Result<Value<B>, crate::ValueError>>;
@@ -466,26 +454,13 @@ impl<E: CdcEvent> CdcEvent for ResolvedEvent<'_, E> {
             .value_at_known_pk_resolved(db, self.table_id, col)
     }
 
-    /// An update's old array the event does not carry, for a column the event
-    /// lists as unchanged, is its new array, as [`cell_at`](Self::cell_at)
-    /// reads a scalar.
     fn list_at<DB: DatabaseLike>(
         &self,
         db: &DB,
         row: RowKind,
         col: ColumnId,
     ) -> Result<ArrayCell<Self::Backend>, crate::ValueError> {
-        let cell = self.event.list_at_resolved(db, self.table_id, row, col)?;
-        if row == RowKind::Old
-            && matches!(cell, ArrayCell::Missing)
-            && self.event.kind() == EventKind::Update
-            && self.unchanged(db, col)
-        {
-            return self
-                .event
-                .list_at_resolved(db, self.table_id, RowKind::New, col);
-        }
-        Ok(cell)
+        self.event.list_at(db, row, col)
     }
 }
 
@@ -667,6 +642,24 @@ mod cell_presence_tests {
             Corrupt(table).presence_at(&db, RowKind::New, 0),
             CellPresence::Undecodable
         );
+    }
+
+    /// An absent array, SQL `NULL` and an empty array are three answers, so a
+    /// cell that was not carried never compares as one that grants nobody.
+    #[test]
+    fn array_cells_of_different_variants_differ() {
+        use crate::backend::ArrayCell;
+
+        let cells = [
+            ArrayCell::<Postgres>::Missing,
+            ArrayCell::Null,
+            ArrayCell::Elements(alloc::vec::Vec::new()),
+        ];
+        for (left_index, left) in cells.iter().enumerate() {
+            for (right_index, right) in cells.iter().enumerate() {
+                assert_eq!(left == right, left_index == right_index);
+            }
+        }
     }
 }
 
