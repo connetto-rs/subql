@@ -12,8 +12,11 @@ use rls2fga::classifier::patterns::{
 use rls2fga::parser::names::role_keyword;
 use rls2fga::translator::Translator;
 use rls2fga_types::{ConfidenceLevel, PolicyCommand};
-use sql_traits::prelude::{DatabaseLike, PolicyLike, TableLike};
-use sqlparser::ast::{BinaryOperator, Expr, Value as SqlValue};
+use sql_traits::prelude::{DatabaseLike, ExpressionScope, PolicyLike, SemanticProofs, TableLike};
+use sql_traits::structs::IdentifierCase;
+use sqlparser::ast::{BinaryOperator, CastKind, Expr, InTarget, UnaryOperator, Value as SqlValue};
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser_canonicalize::Canonicalizer;
 
 use crate::catalog_helpers::{contract_table_id, table_has_rls};
 use crate::TableId;
@@ -88,7 +91,14 @@ fn rules_by_table<DB: DatabaseLike>(
         let Ok(true) = table_has_rls(database, table) else {
             continue;
         };
-        match public_read_rule(&reads, min_confidence) {
+        let Some(scope) = usize::try_from(table)
+            .ok()
+            .and_then(|index| database.table_by_id(index))
+        else {
+            refused.insert(table);
+            continue;
+        };
+        match public_read_rule(&reads, min_confidence, scope, database) {
             Some(rule) => {
                 rules.insert(table, rule);
             }
@@ -119,7 +129,12 @@ fn rules_by_table<DB: DatabaseLike>(
 }
 
 /// Compose public permissive grants and restrictive barriers, or decline the fold.
-fn public_read_rule(reads: &[&ClassifiedPolicy], min_confidence: ConfidenceLevel) -> Option<Expr> {
+fn public_read_rule<DB: DatabaseLike>(
+    reads: &[&ClassifiedPolicy],
+    min_confidence: ConfidenceLevel,
+    table: &DB::Table,
+    database: &DB,
+) -> Option<Expr> {
     let mut permissive: Vec<Expr> = Vec::new();
     let mut restrictive: Vec<Expr> = Vec::new();
     for policy in reads {
@@ -135,9 +150,10 @@ fn public_read_rule(reads: &[&ClassifiedPolicy], min_confidence: ConfidenceLevel
         if !complete(classification, min_confidence) {
             return None;
         }
+        let clause = written_spelling(clause, table, database);
         match policy.mode() {
-            PolicyMode::Permissive => permissive.push(clause.clone()),
-            PolicyMode::Restrictive => restrictive.push(clause.clone()),
+            PolicyMode::Permissive => permissive.push(clause),
+            PolicyMode::Restrictive => restrictive.push(clause),
         }
     }
     Some(compose(permissive, restrictive))
@@ -174,6 +190,176 @@ fn role_keyworded(clause: &Expr) -> bool {
         _ => ControlFlow::Continue(()),
     })
     .is_break()
+}
+
+/// `clause` with each comparison PostgreSQL's deparse spells respelled as
+/// written, only where the semantic proofs give both spellings one canonical
+/// text, so a converting cast such as `(ch)::text` on a `char` column stays.
+fn written_spelling<DB: DatabaseLike>(clause: &Expr, table: &DB::Table, database: &DB) -> Expr {
+    match clause {
+        Expr::BinaryOp {
+            left,
+            op: op @ (BinaryOperator::And | BinaryOperator::Or),
+            right,
+        } => Expr::BinaryOp {
+            left: Box::new(written_spelling(left, table, database)),
+            op: op.clone(),
+            right: Box::new(written_spelling(right, table, database)),
+        },
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr,
+        } => Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr: Box::new(written_spelling(expr, table, database)),
+        },
+        Expr::Nested(inner) => Expr::Nested(Box::new(written_spelling(inner, table, database))),
+        comparison => match without_conversions(comparison) {
+            Some(respelled) if canonically_alike(&respelled, comparison, table, database) => {
+                respelled
+            }
+            _ => comparison.clone(),
+        },
+    }
+}
+
+/// `comparison` without the conversions the deparse spells, or `None` when it
+/// spells none.
+fn without_conversions(comparison: &Expr) -> Option<Expr> {
+    let respelled = match comparison {
+        Expr::BinaryOp { left, op, right } => {
+            let operands = || (Box::new(bare(left)), Box::new(bare(right)));
+            match op {
+                BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq => {
+                    let (left, right) = operands();
+                    Expr::BinaryOp {
+                        left,
+                        op: op.clone(),
+                        right,
+                    }
+                }
+                BinaryOperator::PGLikeMatch | BinaryOperator::PGNotLikeMatch => {
+                    let (expr, pattern) = operands();
+                    Expr::Like {
+                        negated: matches!(op, BinaryOperator::PGNotLikeMatch),
+                        any: false,
+                        expr,
+                        pattern,
+                        escape_char: None,
+                    }
+                }
+                BinaryOperator::PGILikeMatch | BinaryOperator::PGNotILikeMatch => {
+                    let (expr, pattern) = operands();
+                    Expr::ILike {
+                        negated: matches!(op, BinaryOperator::PGNotILikeMatch),
+                        any: false,
+                        expr,
+                        pattern,
+                        escape_char: None,
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Expr::AnyOp {
+            left,
+            compare_op: BinaryOperator::Eq,
+            right,
+            is_some,
+        } => array_elements(right).map_or_else(
+            || Expr::AnyOp {
+                left: Box::new(bare(left)),
+                compare_op: BinaryOperator::Eq,
+                right: right.clone(),
+                is_some: *is_some,
+            },
+            |elements| in_list(left, elements, false),
+        ),
+        Expr::AllOp {
+            left,
+            compare_op: BinaryOperator::NotEq,
+            right,
+        } => in_list(left, array_elements(right)?, true),
+        _ => return None,
+    };
+    (respelled != *comparison).then_some(respelled)
+}
+
+/// `tested [NOT] IN (elements)`, each operand without its conversion.
+fn in_list(tested: &Expr, elements: &[Expr], negated: bool) -> Expr {
+    Expr::In {
+        expr: Box::new(bare(tested)),
+        target: InTarget::List(elements.iter().map(bare).collect()),
+        negated,
+        global: false,
+    }
+}
+
+/// The elements of an `ARRAY[...]` constructor, under any cast and parentheses.
+fn array_elements(expr: &Expr) -> Option<&[Expr]> {
+    match expr {
+        Expr::Array(array) => Some(&array.elem),
+        Expr::Nested(inner)
+        | Expr::Cast {
+            kind: CastKind::Cast | CastKind::DoubleColon,
+            expr: inner,
+            format: None,
+            ..
+        } => array_elements(inner),
+        _ => None,
+    }
+}
+
+/// `operand` without the cast and the parentheses around a constant or a column.
+fn bare(operand: &Expr) -> Expr {
+    let is_constant_or_column = |expr: &Expr| {
+        matches!(
+            expr,
+            Expr::Value(_) | Expr::Identifier(_) | Expr::CompoundIdentifier(_)
+        )
+    };
+    match operand {
+        Expr::Cast {
+            kind: CastKind::Cast | CastKind::DoubleColon,
+            expr,
+            format: None,
+            ..
+        } => {
+            let inner = bare(expr);
+            if is_constant_or_column(&inner) {
+                inner
+            } else {
+                operand.clone()
+            }
+        }
+        Expr::Nested(inner) if is_constant_or_column(inner) => (**inner).clone(),
+        _ => operand.clone(),
+    }
+}
+
+/// Whether `respelled` and `deparsed` canonicalize alike over `table`.
+fn canonically_alike<DB: DatabaseLike>(
+    respelled: &Expr,
+    deparsed: &Expr,
+    table: &DB::Table,
+    database: &DB,
+) -> bool {
+    let canonical = |expr: &Expr| {
+        let scope = ExpressionScope::Table(table);
+        SemanticProofs::for_expression(expr, &scope, database, IdentifierCase::Folded)
+            .ok()
+            .and_then(|proofs| {
+                Canonicalizer::new(&PostgreSqlDialect {})
+                    .normalize_with_context(&proofs.view())
+                    .ok()
+            })
+    };
+    canonical(respelled).is_some_and(|text| canonical(deparsed).is_some_and(|other| text == other))
 }
 
 /// Intersect restrictive clauses with the permissive union.

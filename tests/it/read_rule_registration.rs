@@ -172,6 +172,27 @@ const FLOAT_RULE_DDL: &str = "CREATE TABLE items(id INTEGER PRIMARY KEY, score R
      CREATE POLICY items_p ON items FOR ALL USING (
        score = current_setting('app.score', true)::float8);";
 
+const DEPARSED_DDL: &str =
+    "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, project_id INTEGER, title TEXT);
+     ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY items_p ON items FOR ALL USING (
+       ((owner = current_setting('app.user_id'::text, true))
+       OR (owner = ANY (string_to_array(current_setting('app.subjects'::text, true), ','::text)))));";
+
+const DEPARSED_MEMBERSHIP_DDL: &str =
+    "CREATE TABLE team_members(team_id INTEGER, user_id TEXT, PRIMARY KEY(team_id, user_id));
+     CREATE TABLE docs(id INTEGER PRIMARY KEY, team_id INTEGER, title TEXT);
+     ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY docs_p ON docs FOR ALL USING (
+       (EXISTS ( SELECT 1
+          FROM team_members
+         WHERE ((team_members.team_id = docs.team_id)
+           AND (team_members.user_id = current_setting('app.user_id'::text, true))))));";
+
+const WIDE_TABLE: &str = "CREATE TABLE items(id INTEGER PRIMARY KEY, owner TEXT, vc VARCHAR(20),
+       ch CHAR(5), nu NUMERIC, d DATE, b BOOLEAN, tx TEXT);
+     ALTER TABLE items ENABLE ROW LEVEL SECURITY;";
+
 const QUERY: &str = "SELECT * FROM items";
 
 const SUBJECT_ONLY: &str = "SELECT * FROM items \
@@ -2097,4 +2118,145 @@ fn a_batch_reregistration_of_a_live_caller_keeps_its_binding() {
         notifs.inserted().is_empty(),
         "the row admits nobody registered"
     );
+}
+
+#[test]
+fn a_deparsed_rule_admits_the_callers_its_written_form_admits() {
+    for ddl in [DDL, DEPARSED_DDL] {
+        let (mut engine, items) = engine_with(ddl);
+        let registered = engine
+            .register(for_user(1, "alice", &["team:a"]))
+            .expect("the rule folds into the registration");
+        assert!(
+            registered
+                .served()
+                .expect("an in-process answer")
+                .read_rule_folded,
+            "the rule is in the registered predicate: {ddl}"
+        );
+        engine
+            .register(for_user(2, "bob", &[]))
+            .expect("the second caller registers");
+
+        for (id, owner, admitted) in [
+            (1, "alice", &[1u64][..]),
+            (2, "team:a", &[1]),
+            (3, "bob", &[2]),
+            (4, "carol", &[]),
+        ] {
+            let notifs = engine
+                .consumers(&TestEvent::insert(items, item(id, owner, 7)))
+                .expect("dispatch runs");
+            assert_eq!(notifs.inserted(), admitted, "{owner} under {ddl}");
+        }
+    }
+}
+
+#[test]
+fn a_deparsed_membership_rule_moves_the_admissions_its_written_form_moves() {
+    for ddl in [MEMBERSHIP_DDL, DEPARSED_MEMBERSHIP_DDL] {
+        let db = parse(ddl);
+        let docs = table_id(&db, "docs");
+        let mut engine: Engine =
+            SubscriptionEngine::new(db, PostgreSqlDialect {}).with_translator(translator());
+        let registered = engine
+            .register(
+                SubscriptionRequest::new(1u64, MEMBERS_QUERY)
+                    .subscriber(Value::String("alice".into()))
+                    .term_values(vec!["team_id"], rows_of("alice", vec![Value::Int(7)])),
+            )
+            .expect("the seeded registration");
+        assert!(
+            registered
+                .served()
+                .expect("an in-process answer")
+                .read_rule_folded,
+            "the membership rule is in the registered predicate: {ddl}"
+        );
+
+        for (id, team, admitted) in [(1, 7, &[1u64][..]), (2, 9, &[])] {
+            let row = vec![
+                Value::Int(id),
+                Value::Int(team),
+                Value::String("title".into()),
+            ];
+            let notifs = engine
+                .consumers(&TestEvent::insert(docs, row))
+                .expect("dispatch runs");
+            assert_eq!(notifs.inserted(), admitted, "team {team} under {ddl}");
+        }
+    }
+}
+
+#[test]
+fn a_deparsed_rule_folds_wherever_its_written_form_folds() {
+    let written_caller = "owner = current_setting('app.user_id', true)";
+    let deparsed_caller = "(owner = current_setting('app.user_id'::text, true))";
+    let guards = [
+        ("tx = 'public'", "(tx = 'public'::text)", true),
+        ("tx <> 'public'", "(tx <> 'public'::text)", true),
+        ("'public' = tx", "('public'::text = tx)", true),
+        ("vc = 'public'", "((vc)::text = 'public'::text)", true),
+        ("ch = 'pub'", "(ch = 'pub'::bpchar)", true),
+        ("id > 0", "(id > 0)", true),
+        ("nu = 3", "(nu = (3)::numeric)", true),
+        ("nu = 1.5", "(nu = 1.5)", true),
+        ("d = '2020-01-01'", "(d = '2020-01-01'::date)", true),
+        ("b = true", "(b = true)", true),
+        ("tx IS NULL", "(tx IS NULL)", true),
+        (
+            "tx IN ('a', 'b')",
+            "(tx = ANY (ARRAY['a'::text, 'b'::text]))",
+            true,
+        ),
+        ("id IN (1, 2)", "(id = ANY (ARRAY[1, 2]))", true),
+        (
+            "vc IN ('a', 'b')",
+            "((vc)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[]))",
+            true,
+        ),
+        ("ch::text = 'pub'", "((ch)::text = 'pub'::text)", false),
+    ];
+    for (written, deparsed, folds) in guards {
+        for (caller, guard) in [(written_caller, written), (deparsed_caller, deparsed)] {
+            let (mut engine, _) = engine_with(&format!(
+                "{WIDE_TABLE}
+                 CREATE POLICY items_p ON items FOR ALL USING ({caller});
+                 CREATE POLICY items_guard ON items AS RESTRICTIVE FOR ALL USING ({guard});"
+            ));
+            let registered = engine
+                .register(for_user(1, "alice", &[]))
+                .expect("the registration is served");
+            assert_eq!(
+                registered
+                    .served()
+                    .expect("an in-process answer")
+                    .read_rule_folded,
+                folds,
+                "{guard}"
+            );
+        }
+    }
+
+    for rule in [
+        "vc = current_setting('app.user_id', true)",
+        "((vc)::text = current_setting('app.user_id'::text, true))",
+        "ch = current_setting('app.user_id', true)",
+        "((ch)::text = current_setting('app.user_id'::text, true))",
+    ] {
+        let (mut engine, _) = engine_with(&format!(
+            "{WIDE_TABLE}
+                 CREATE POLICY items_p ON items FOR ALL USING ({rule});"
+        ));
+        let registered = engine
+            .register(for_user(1, "alice", &["team:a"]))
+            .expect("the registration is served");
+        assert!(
+            registered
+                .served()
+                .expect("an in-process answer")
+                .read_rule_folded,
+            "{rule}"
+        );
+    }
 }

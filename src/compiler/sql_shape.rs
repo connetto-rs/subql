@@ -6,9 +6,9 @@ use sql_traits::{
     prelude::DatabaseLike, structs::TargetName, utils::identifier_resolution::identifiers_match,
 };
 use sqlparser::ast::{
-    BinaryOperator, Distinct, DuplicateTreatment, Expr, Fetch, ForClause, FormatClause, Function,
-    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident,
-    InTarget, LimitClause, LockClause, ObjectName, OrderBy, PipeOperator, Query, Select,
+    BinaryOperator, CastKind, Distinct, DuplicateTreatment, Expr, Fetch, ForClause, FormatClause,
+    Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr,
+    Ident, InTarget, LimitClause, LockClause, ObjectName, OrderBy, PipeOperator, Query, Select,
     SelectItem, SelectItemQualifiedWildcardKind, SelectModifiers, SetExpr, Setting, Statement,
     TableFactor, Visit, Visitor, With,
 };
@@ -2375,8 +2375,10 @@ pub(super) fn contains_membership_subquery(expr: &Expr) -> bool {
 ///
 /// The shape a session accessor takes (`current_setting('app.user_id', true)`,
 /// `current_user`, `string_to_array(current_setting('app.subjects', true), ',')`),
-/// recognised structurally. Which calls actually name the caller is
-/// registration's question, answered by `rls2fga`'s registry.
+/// recognised structurally. A literal argument may carry a cast, since
+/// PostgreSQL's deparse writes `current_setting('app.user_id'::text, true)`.
+/// Which calls actually name the caller is registration's question, answered
+/// by `rls2fga`'s registry.
 fn is_columnless_call(expr: &Expr) -> bool {
     let Expr::Function(function) = expr else {
         return false;
@@ -2397,11 +2399,26 @@ fn is_columnless_call(expr: &Expr) -> bool {
             list.duplicate_treatment.is_none()
                 && list.clauses.is_empty()
                 && list.args.iter().all(|arg| match arg {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(_))) => true,
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(inner)) => is_columnless_call(inner),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(inner)) => {
+                        is_literal_argument(inner) || is_columnless_call(inner)
+                    }
                     _ => false,
                 })
         }
+    }
+}
+
+/// Whether `expr` is a literal, bare or under a cast.
+fn is_literal_argument(expr: &Expr) -> bool {
+    match expr {
+        Expr::Value(_) => true,
+        Expr::Cast {
+            kind: CastKind::Cast | CastKind::DoubleColon,
+            expr,
+            format: None,
+            ..
+        } => matches!(**expr, Expr::Value(_)),
+        _ => false,
     }
 }
 
