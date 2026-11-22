@@ -1373,8 +1373,7 @@ mod tests {
         )
     }
 
-    /// Whether `statement` on `table` judges the row a write produces, which
-    /// the model types on its own and only the service holds.
+    /// Whether `statement` on `table` judges the row a write produces.
     fn judges_a_resulting_row(
         shapes: &Shapes<ParserDB>,
         table: TableId,
@@ -1389,9 +1388,9 @@ mod tests {
         )
     }
 
-    /// The gate reads only the request, which every question carries, so it
-    /// leaves a row its own columns decide answered without a round trip,
-    /// short of the row a write produces.
+    /// The gate reads only the request, which every question carries, so a
+    /// row its own columns decide, the row a write produces included, is
+    /// answered without a round trip.
     #[test]
     fn a_bot_gate_on_an_owned_table_is_answered_locally() {
         let shapes = gated("notes", "owner = current_setting('app.user_id', true)");
@@ -1402,9 +1401,8 @@ mod tests {
             ActionStatement::Insert
         ));
         for statement in EVERY_STATEMENT {
-            assert_eq!(
+            assert!(
                 shapes.answers_locally(notes, statement),
-                !judges_a_resulting_row(&shapes, notes, statement),
                 "the owner is in the row and the bot list is in the request, \
                  so {statement:?} needs nobody else: {:?}",
                 shapes.answer(notes, statement)
@@ -1413,15 +1411,14 @@ mod tests {
     }
 
     /// A table every caller may use, capped by the gate alone, which the
-    /// request settles for every stored row.
+    /// request settles for every row.
     #[test]
     fn a_bot_gate_on_an_open_table_is_answered_locally() {
         let shapes = gated("orders", "true");
         let orders = table(&shapes, "orders");
         for statement in EVERY_STATEMENT {
-            assert_eq!(
+            assert!(
                 shapes.answers_locally(orders, statement),
-                !judges_a_resulting_row(&shapes, orders, statement),
                 "the policy admits every caller and the bot list is in the \
                  request, so {statement:?} needs nobody else: {:?}",
                 shapes.answer(orders, statement)

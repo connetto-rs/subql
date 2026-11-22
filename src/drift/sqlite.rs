@@ -58,8 +58,9 @@ impl LiveCatalog for SqliteConnection {
 
     /// Parse the stored `CREATE` text of each named table, by name alone,
     /// since `sqlite_schema` lists the tables of one database. A table whose
-    /// row stores no text reads as absent, and one whose text declares no
-    /// table sql-traits models, such as an FTS5 virtual table, fails.
+    /// row stores no text reads as absent, one whose text sql-traits does not
+    /// parse, such as an `fts5vocab` virtual table, fails, and so does one
+    /// whose parsed text declares no table under its stored name.
     fn load_tables(&mut self, tables: &[TargetName<'_>]) -> Result<ParserDB, SqliteShapeError> {
         let names: Vec<&str> = tables.iter().map(TargetName::name).collect();
         let stored: Vec<(String, String)> = sqlite_schema::table
@@ -115,7 +116,7 @@ mod tests {
     use super::*;
     use diesel::{sql_query as raw, Connection};
 
-    use crate::drift::{InlineLiveReader, LiveShapeReader};
+    use crate::drift::{ColumnShape, InlineLiveReader, LiveShapeReader};
 
     /// An unqualified, unquoted name.
     fn named(table: &str) -> TargetName<'_> {
@@ -301,22 +302,23 @@ mod tests {
         assert_eq!(shape.primary_key(), &["id".to_string()]);
     }
 
+    /// An FTS5 table is read with the hidden columns SQLite gives it, its own
+    /// name and `rank`, after the declared ones.
     #[tokio::test]
-    async fn a_virtual_table_without_a_catalog_shape_reports_a_lookup_error() {
+    async fn an_fts5_virtual_table_is_read_with_its_hidden_columns() {
         let (_dir, connection) = live_db(&["CREATE VIRTUAL TABLE t1 USING fts5(body)"]);
         let mut reader = InlineLiveReader::new(connection);
-        assert!(matches!(
-            reader.shape(named("t1")).await,
-            Err(SqliteShapeError::Lookup(
-                sql_traits::errors::LookupError::TableNotFound { object_name }
-            )) if object_name == "t1"
-        ));
+        let shape = reader.shape(named("t1")).await.expect("read").expect("t1");
+        let columns: Vec<&str> = shape.columns().iter().map(ColumnShape::name).collect();
+        assert_eq!(columns, ["body", "t1", "rank"]);
     }
 
     #[tokio::test]
-    async fn unsupported_virtual_table_arguments_report_a_parse_error() {
-        let (_dir, connection) =
-            live_db(&["CREATE VIRTUAL TABLE t1 USING fts5(body, tokenize = 'porter')"]);
+    async fn an_unmodelled_virtual_table_module_reports_a_parse_error() {
+        let (_dir, connection) = live_db(&[
+            "CREATE VIRTUAL TABLE t2 USING fts5(body)",
+            "CREATE VIRTUAL TABLE t1 USING fts5vocab(t2, 'row')",
+        ]);
         let mut reader = InlineLiveReader::new(connection);
         assert!(matches!(
             reader.shape(named("t1")).await,

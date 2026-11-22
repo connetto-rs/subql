@@ -801,16 +801,17 @@ mod tests {
     fn a_changed_primary_key_is_incompatible() {
         let live = "CREATE TABLE t1 (id INTEGER, v INTEGER, note TEXT, PRIMARY KEY (id, v))";
         let (catalog, live) = sqlite(BASE, live);
-        // A key column the catalog left nullable is a nullability change
-        // beside the key change, and both reasons are reported.
+        // SQLite admits NULL in a key column of a rowid table unless it is the
+        // rowid alias, so `id`, the catalog's alias, turns nullable beside the
+        // key change, and both reasons are reported.
         assert_eq!(
             judge(&catalog, live.as_ref()),
             Verdict::Incompatible {
                 reasons: vec![
                     Incompatibility::ColumnNullabilityChanged {
-                        column: "v".into(),
-                        catalog_nullable: true,
-                        live_nullable: false,
+                        column: "id".into(),
+                        catalog_nullable: false,
+                        live_nullable: true,
                     },
                     Incompatibility::PrimaryKeyChanged {
                         catalog: vec!["id".into()],
