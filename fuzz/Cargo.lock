@@ -1199,7 +1199,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#35308c06fe6dcd10e088df81bb1863636c4f6261"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#d61a59e35a89fb54fae4a6127ccaeffe59be97b5"
 dependencies = [
  "rls2fga-types",
  "serde",
@@ -1213,7 +1213,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#35308c06fe6dcd10e088df81bb1863636c4f6261"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#d61a59e35a89fb54fae4a6127ccaeffe59be97b5"
 dependencies = [
  "serde",
  "sql-values 0.6.0",
@@ -1389,7 +1389,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#cba6f1062569612cac2c2f730fb62d1230c9800f"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#296195cb20685cbcfc17180b4a5d5638e7013a56"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -1475,7 +1475,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-expr-eval"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#197fafd3d76a149fe7a4bd105db940d882f80c8a"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#46deb4392399a9658ac504ad39fd32556d4f9475"
 dependencies = [
  "rpds",
  "sql-values 0.6.0",

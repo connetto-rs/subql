@@ -141,7 +141,12 @@ fn unsupported_description<B: crate::backend::Backend, DB: DatabaseLike>(
         .parts()
         .iter()
         .find_map(|part| unsupported_value::<B, DB>(part, db, table))
-        .or_else(|| unsupported_value::<B, DB>(template.subject_key.part(), db, table))
+        .or_else(|| {
+            template
+                .subject_key
+                .parts()
+                .find_map(|part| unsupported_value::<B, DB>(part, db, table))
+        })
         .or_else(|| {
             guards
                 .iter()
