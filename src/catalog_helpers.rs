@@ -846,7 +846,16 @@ pub fn table_has_rls<DB: DatabaseLike>(
     database: &DB,
     table_id: TableId,
 ) -> Result<bool, crate::CatalogError> {
-    let table = lookup_table(database, table_id)?;
+    rls_of(database, lookup_table(database, table_id)?, table_id)
+}
+
+/// Whether `table` of `database` has row-level security, a failed lookup
+/// reported under `table_id`.
+pub(crate) fn rls_of<DB: DatabaseLike>(
+    database: &DB,
+    table: &DB::Table,
+    table_id: TableId,
+) -> Result<bool, crate::CatalogError> {
     table
         .has_row_level_security(database)
         .map_err(|error| crate::CatalogError::Lookup { table_id, error })

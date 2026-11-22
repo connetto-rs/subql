@@ -8,7 +8,7 @@
 
 use alloc::sync::Arc;
 use hashbrown::HashMap;
-use sql_traits::prelude::{DatabaseLike, TableLike};
+use sql_traits::prelude::DatabaseLike;
 
 use crate::{catalog_helpers, CatalogError, TableId};
 
@@ -104,15 +104,12 @@ impl<R: DatabaseLike> Followed<R> {
 
 impl<R: DatabaseLike> FollowedRules for Followed<R> {
     fn table_has_rls(&self, table: TableId) -> Result<bool, CatalogError> {
-        self.rules_ids
+        let rules_table = self
+            .rules_ids
             .get(&table)
             .and_then(|&rules_id| self.database.table_by_id(usize::try_from(rules_id).ok()?))
-            .ok_or(CatalogError::UnknownTable(table))?
-            .has_row_level_security(&*self.database)
-            .map_err(|error| CatalogError::Lookup {
-                table_id: table,
-                error,
-            })
+            .ok_or(CatalogError::UnknownTable(table))?;
+        catalog_helpers::rls_of(&*self.database, rules_table, table)
     }
 
     #[cfg(feature = "membership-term")]
@@ -159,14 +156,6 @@ pub enum AccessRules<'a, DB> {
     Followed(&'a dyn FollowedRules),
 }
 
-impl<DB> Clone for AccessRules<'_, DB> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<DB> Copy for AccessRules<'_, DB> {}
-
 impl<DB: DatabaseLike> AccessRules<'_, DB> {
     /// Whether `table` has row-level security.
     ///
@@ -174,8 +163,8 @@ impl<DB: DatabaseLike> AccessRules<'_, DB> {
     ///
     /// [`CatalogError::UnknownTable`] for a table the rules do not hold,
     /// [`CatalogError::Lookup`] when the rules cannot answer.
-    pub fn table_has_rls(self, table: TableId) -> Result<bool, CatalogError> {
-        match self {
+    pub fn table_has_rls(&self, table: TableId) -> Result<bool, CatalogError> {
+        match *self {
             Self::Served(database) => catalog_helpers::table_has_rls(database, table),
             Self::Followed(rules) => rules.table_has_rls(table),
         }
@@ -185,10 +174,10 @@ impl<DB: DatabaseLike> AccessRules<'_, DB> {
     /// and the registry the rules' functions enrich.
     #[cfg(feature = "membership-term")]
     pub fn read_rules(
-        self,
+        &self,
         translator: &Translator,
     ) -> (HashMap<TableId, Arc<Expr>>, FunctionRegistry) {
-        match self {
+        match *self {
             Self::Served(database) => crate::read_rule::read_rules(database, translator, Some),
             Self::Followed(rules) => rules.read_rules(translator),
         }
@@ -197,14 +186,14 @@ impl<DB: DatabaseLike> AccessRules<'_, DB> {
     /// [`rls2fga::term::describe_membership_term`] over these rules.
     #[cfg(feature = "membership-term")]
     pub fn describe_membership_term(
-        self,
+        &self,
         expr: &Expr,
         registry: &FunctionRegistry,
         guarded_table: &str,
         min_confidence: ConfidenceLevel,
         acting_role: Option<&str>,
     ) -> Result<TermShapes, TermRefusal> {
-        match self {
+        match *self {
             Self::Served(database) => rls2fga::term::describe_membership_term(
                 expr,
                 database,
@@ -225,8 +214,8 @@ impl<DB: DatabaseLike> AccessRules<'_, DB> {
 
     /// The served id of the table a visibility contract names.
     #[cfg(feature = "membership-term")]
-    pub fn served_table(self, table: &rls2fga_types::TableId) -> Option<TableId> {
-        match self {
+    pub fn served_table(&self, table: &rls2fga_types::TableId) -> Option<TableId> {
+        match *self {
             Self::Served(database) => catalog_helpers::contract_table_id(database, table),
             Self::Followed(rules) => rules.served_table(table),
         }
@@ -247,7 +236,7 @@ pub struct Translation {
 #[cfg(feature = "membership-term")]
 impl Translation {
     /// Derive `translator`'s read rules and registry from `rules`.
-    pub fn new<DB: DatabaseLike>(translator: Translator, rules: AccessRules<'_, DB>) -> Self {
+    pub fn new<DB: DatabaseLike>(translator: Translator, rules: &AccessRules<'_, DB>) -> Self {
         let (read_rules, registry) = rules.read_rules(&translator);
         Self {
             translator,

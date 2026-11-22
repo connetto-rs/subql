@@ -1155,7 +1155,7 @@ where
                     table_id,
                     &guarded_table,
                     &self.database,
-                    self.access_rules(),
+                    &self.access_rules(),
                     translation,
                     acting_role,
                 )
@@ -1446,7 +1446,7 @@ where
     pub fn with_translator(mut self, translator: rls2fga::translator::Translator) -> Self {
         self.translation = Some(crate::access_rules::Translation::new(
             translator,
-            self.access_rules(),
+            &self.access_rules(),
         ));
         self
     }
@@ -1495,7 +1495,7 @@ where
         if let Some(translation) = self.translation.take() {
             self.translation = Some(crate::access_rules::Translation::new(
                 translation.translator,
-                self.access_rules(),
+                &self.access_rules(),
             ));
         }
     }
