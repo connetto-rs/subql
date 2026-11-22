@@ -412,7 +412,7 @@ fn the_update_fallback_preserves_storage_classes() {
     let mut source = PgSqliteEmuSource::open_in_memory(BLOB_PG_DDL).expect("build source");
 
     source
-        .execute_sql("INSERT INTO blobs (id, raw, maybe, note) VALUES (1, X'0102', NULL, 'keep')")
+        .execute_sql("INSERT INTO blobs (id, raw, maybe, note) VALUES (1, '\\x0102', NULL, 'keep')")
         .unwrap();
     let insert = next_event(&mut source);
     assert_eq!(insert.kind(), EventKind::Insert);
