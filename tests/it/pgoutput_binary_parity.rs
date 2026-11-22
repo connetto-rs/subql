@@ -16,7 +16,6 @@ use subql::{
     SubscriptionEngine, SubscriptionRequest,
 };
 
-// The emulator's SQLite stores `NUMERIC(10, 2)` as minor units, so `amount` is written as 1250.
 const PG_DDL: &str = "CREATE TABLE kinds (
     id INT PRIMARY KEY, flag BOOL, big BIGINT, single REAL, double DOUBLE PRECISION,
     amount NUMERIC(10, 2), body TEXT, code VARCHAR(8), blob BYTEA, day DATE,
@@ -41,10 +40,10 @@ const FILTERS: &[&str] = &[
 ];
 
 const STATEMENTS: &[&str] = &[
-    "INSERT INTO kinds VALUES (7, 1, 9000000000, 0.1, 2.5, 1250, 'héllo', 'ab', X'DEAD', \
+    "INSERT INTO kinds VALUES (7, TRUE, 9000000000, 0.1, 2.5, 12.50, 'héllo', 'ab', '\\xDEAD', \
      '2024-03-15', '2024-03-15 12:34:56.789', '{\"a\": 1}', '{\"a\": 1}')",
     "INSERT INTO kinds (id, body) VALUES (8, NULL)",
-    "UPDATE kinds SET amount = 9999, body = 'bye', single = 1.5 WHERE id = 7",
+    "UPDATE kinds SET amount = 99.99, body = 'bye', single = 1.5 WHERE id = 7",
     "DELETE FROM kinds WHERE id = 8",
 ];
 

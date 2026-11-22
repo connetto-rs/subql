@@ -13,7 +13,9 @@ use pg_walstream::error::ReplicationError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PgSqliteEmuError {
-    /// `pg2sqlite` refused to translate the PG DDL.
+    /// `pg2sqlite` refused to translate the PG DDL or a statement
+    /// [`PgSqliteEmuSource::execute_sql`](super::PgSqliteEmuSource::execute_sql)
+    /// runs.
     #[error("pg2sqlite translate: {0}")]
     Translate(String),
     /// The translated SQLite DDL failed to apply to the local database.

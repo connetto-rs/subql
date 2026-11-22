@@ -95,6 +95,12 @@ pub struct PgSqliteEmuSource {
     session: Session,
     connection: SqliteConnection,
     pg_catalog: ParserDB,
+    /// The DDL's schema as pg2sqlite reads it, which each statement
+    /// [`Self::execute_sql`] runs is translated against.
+    translation_schema: ParserDB,
+    /// The options the DDL and each statement [`Self::execute_sql`] runs are
+    /// translated under.
+    translation_options: Pg2SqliteOptions,
     decoder: PgOutputDecoder,
     order: PgOutputOrder,
     pending: VecDeque<PgSourceItem>,
@@ -189,6 +195,9 @@ impl PgSqliteEmuSource {
         let sqlite_ddl = translator
             .translate_to_sql(&translation_options)
             .map_err(|e| PgSqliteEmuError::Translate(alloc::format!("{e:?}")))?;
+        let translation_schema = translator
+            .build_schema()
+            .map_err(|e| PgSqliteEmuError::Translate(alloc::format!("{e:?}")))?;
         // DDL from the pg2sqlite translator: diesel cannot express CREATE TABLE
         // DDL through its query DSL, so raw sql_query is correct here.
         for stmt in sqlite_ddl.iter() {
@@ -204,6 +213,8 @@ impl PgSqliteEmuSource {
             connection,
             session,
             pg_catalog,
+            translation_schema,
+            translation_options,
             decoder: PgOutputDecoder::with_protocol_version(u32::from(PROTOCOL_VERSION)),
             order: PgOutputOrder::new(),
             pending: VecDeque::new(),
@@ -311,20 +322,27 @@ impl PgSqliteEmuSource {
         Self::new(conn, pg_ddl)
     }
 
-    /// Convenience: run `sql` as a single diesel `sql_query` against
-    /// the wrapped connection and return the number of rows affected.
+    /// Run the PostgreSQL statements in `sql` against the wrapped
+    /// connection and return the number of rows the last one affected.
     /// Named `execute_sql` rather than `execute` so it does not clash
     /// with diesel's `RunQueryDsl::execute`, whose by-value receiver
     /// would otherwise shadow this method whenever the query DSL is in
     /// scope.
     ///
+    /// `sql` is translated by `pg2sqlite` against the source's schema, as
+    /// the DDL was, so a value is stored as the text the translation writes
+    /// for its column, the way a replica holds the row a server sends. A
+    /// `timestamptz` literal in any offset is stored as UTC text.
+    ///
     /// Saves doctests and short integration tests from importing
     /// `diesel::{sql_query, RunQueryDsl}` just to drive DML. Use
     /// [`Self::connection`] when the caller needs a bind-parameter
-    /// query, a typed diesel expression, or a batch statement.
+    /// query or a typed diesel expression, each of which runs on SQLite
+    /// untranslated.
     ///
     /// # Errors
     ///
+    /// [`PgSqliteEmuError::Translate`] when `pg2sqlite` refuses `sql`, and
     /// [`PgSqliteEmuError::ApplyDdl`] on any diesel execution error.
     ///
     /// # Examples
@@ -340,9 +358,21 @@ impl PgSqliteEmuSource {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn execute_sql(&mut self, sql: &str) -> Result<usize, PgSqliteEmuError> {
-        // General-purpose "run any SQL" convenience for tests and doctests:
-        // the caller provides arbitrary SQL, so the typed DSL cannot be used.
-        Ok(sql_query(sql).execute(&mut self.connection)?)
+        let script = Pg2Sqlite::default()
+            .sql(sql)
+            .and_then(|translator| {
+                translator.translate_to_sql_with_schema(
+                    &self.translation_schema,
+                    &self.translation_options,
+                )
+            })
+            .map_err(|e| PgSqliteEmuError::Translate(alloc::format!("{e:?}")))?;
+        // The translated statements are SQLite text, which the typed DSL cannot run.
+        let mut affected = 0;
+        for statement in script.files.iter() {
+            affected = sql_query(statement).execute(&mut self.connection)?;
+        }
+        Ok(affected)
     }
 
     /// Drain every item currently pending.
@@ -870,6 +900,33 @@ mod tests {
             "commit follows"
         );
         assert!(src.poll_next_item().unwrap().is_none());
+    }
+
+    /// A `timestamptz` literal PostgreSQL accepts in any offset is stored as
+    /// the UTC text the translation writes, the way a replica holds the row
+    /// the server sends.
+    #[test]
+    fn a_timestamptz_literal_with_an_offset_is_stored_as_utc_text() {
+        use diesel::QueryDsl;
+
+        diesel::table! {
+            stamps (id) {
+                id -> Integer,
+                observed -> Text,
+            }
+        }
+
+        let mut src = PgSqliteEmuSource::open_in_memory(
+            "CREATE TABLE stamps (id INT PRIMARY KEY, observed TIMESTAMPTZ NOT NULL);",
+        )
+        .unwrap();
+        src.execute_sql("INSERT INTO stamps VALUES (1, '2026-09-23 15:42:07.957522+02')")
+            .unwrap();
+        let stored: String = stamps::table
+            .select(stamps::observed)
+            .get_result(src.connection())
+            .unwrap();
+        assert_eq!(stored, "2026-09-23 13:42:07.957522+00:00");
     }
 
     /// The emulated stream names a table and its columns as PostgreSQL stores
