@@ -83,3 +83,35 @@ fn followed_rules_lacking_a_served_table_refuse_it_as_unknown() {
         .register(SubscriptionRequest::new(1u64, "SELECT * FROM items"))
         .expect("the followed rules name items");
 }
+
+#[cfg(all(feature = "diesel-typed-sqlite", feature = "executor-diesel"))]
+#[test]
+fn a_resolving_engine_follows_rules_read_under_another_dialect() {
+    use diesel::{Connection as _, SqliteConnection};
+    use sqlparser::dialect::SQLiteDialect;
+    use subql::backend::SQLite;
+    use subql::reexec::{AutoResolvingEngine, DieselConnector, SyncMode};
+
+    let served = ParserDB::parse::<SQLiteDialect>(SERVED_DDL).unwrap();
+    let items = catalog_helpers::table_id::<SQLite, _>(&served, "items").unwrap();
+    let mut engine: AutoResolvingEngine<TestEvent<SQLite>, DefaultIds, ParserDB, _> =
+        AutoResolvingEngine::new(
+            SubscriptionEngine::new(served, SQLiteDialect {}),
+            SyncMode(DieselConnector::<_, SQLite>::new(
+                SqliteConnection::establish(":memory:").unwrap(),
+            )),
+        );
+    engine.follow_access_rules(Arc::new(parse(SECURED_DDL)));
+
+    let refused = engine.register(
+        SubscriptionRequest::new(1u64, "SELECT COUNT(*) FROM items"),
+        (),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(RegisterError::AggregatorOnRlsTable { table_id }) if table_id == items
+        ),
+        "the PostgreSQL rules secure the SQLite engine's items, got {refused:?}"
+    );
+}

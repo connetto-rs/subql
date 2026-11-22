@@ -41,7 +41,7 @@ pub fn plan_term<B: crate::backend::Backend, DB: DatabaseLike>(
     table: TableId,
     guarded_table: &str,
     database: &DB,
-    rules: AccessRules<'_, DB>,
+    rules: &AccessRules<'_, DB>,
     translation: &Translation,
     acting_role: Option<&str>,
 ) -> Result<TermPlan, RegisterError> {
@@ -105,7 +105,7 @@ fn caller_plan<B: crate::backend::Backend, DB: DatabaseLike>(
     term: &CompiledTerm,
     table: TableId,
     database: &DB,
-    rules: AccessRules<'_, DB>,
+    rules: &AccessRules<'_, DB>,
     shapes: &TermShapes,
     caller: TermCaller,
 ) -> Result<TermPlan, RegisterError> {
@@ -200,7 +200,7 @@ fn member_columns<B: crate::backend::Backend, DB: DatabaseLike>(
     table: TableId,
     shapes: &TermShapes,
     database: &DB,
-    rules: AccessRules<'_, DB>,
+    rules: &AccessRules<'_, DB>,
 ) -> Result<TermMovement, RegisterError> {
     let relation =
         match &shapes.chain {
@@ -289,7 +289,7 @@ fn align_with_the_filter<B: crate::backend::Backend, DB: DatabaseLike>(
 fn read_from_one_row<B: crate::backend::Backend, DB: DatabaseLike>(
     entry: &RelationShapes,
     database: &DB,
-    rules: AccessRules<'_, DB>,
+    rules: &AccessRules<'_, DB>,
 ) -> Result<TermMovement, RegisterError> {
     let refuse = |what: &str| {
         RegisterError::MembershipTermRefused(format!(
