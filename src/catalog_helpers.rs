@@ -12,6 +12,7 @@
 //! [`table_arity`], [`schema_fingerprint`], [`primary_key_columns`],
 //! [`column_scalar_kind`], [`column_comparison`], [`table_has_rls`].
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use sql_traits::{
@@ -380,7 +381,10 @@ pub fn table_arity<DB: DatabaseLike>(
     let table = lookup_table(database, table_id)?;
     table
         .number_of_columns(database)
-        .map_err(|error| crate::CatalogError::Lookup { table_id, error })
+        .map_err(|error| crate::CatalogError::Lookup {
+            table_id,
+            error: Box::new(error),
+        })
 }
 
 /// Compute the spec-compliant [`SchemaFingerprint`] for the table.
@@ -427,9 +431,13 @@ pub fn primary_key_columns<DB: DatabaseLike>(
     table_id: TableId,
 ) -> Result<Vec<ColumnId>, crate::CatalogError> {
     let table = lookup_table(database, table_id)?;
-    let ordinals = table
-        .primary_key_column_ids(database)
-        .map_err(|error| crate::CatalogError::Lookup { table_id, error })?;
+    let ordinals =
+        table
+            .primary_key_column_ids(database)
+            .map_err(|error| crate::CatalogError::Lookup {
+                table_id,
+                error: Box::new(error),
+            })?;
     ordinals
         .into_iter()
         .map(|ordinal| {
@@ -826,7 +834,10 @@ pub fn table_columns<DB: DatabaseLike>(
 ) -> Result<impl Iterator<Item = &DB::Column>, crate::CatalogError> {
     lookup_table(database, table_id)?
         .columns(database)
-        .map_err(|error| crate::CatalogError::Lookup { table_id, error })
+        .map_err(|error| crate::CatalogError::Lookup {
+            table_id,
+            error: Box::new(error),
+        })
 }
 
 /// Whether the table has row-level security enabled (per
@@ -858,7 +869,10 @@ pub(crate) fn rls_of<DB: DatabaseLike>(
 ) -> Result<bool, crate::CatalogError> {
     table
         .has_row_level_security(database)
-        .map_err(|error| crate::CatalogError::Lookup { table_id, error })
+        .map_err(|error| crate::CatalogError::Lookup {
+            table_id,
+            error: Box::new(error),
+        })
 }
 
 #[cfg(test)]

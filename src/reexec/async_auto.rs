@@ -445,10 +445,6 @@ where
     /// One planned read, phase two: a whole read streams its pages into the
     /// shared sink, everything else resolves to an answer for phase three.
     /// Holds no exclusive borrow of the engine, so these run concurrently.
-    #[expect(
-        clippy::result_large_err,
-        reason = "both arms hand the trigger back, so boxing the error would allocate per failed read and leave the result as large"
-    )]
     async fn run_one<S>(
         connector: &X,
         shared_sink: &async_lock::Mutex<&mut S>,
