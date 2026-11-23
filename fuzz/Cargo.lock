@@ -996,7 +996,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#fad72eb9f8feac0474036c4be1fe635bf0c4e0fb"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#52391fe2c11dfc0e9942a929889ed29488a7156d"
 dependencies = [
  "diesel",
  "sql-traits",
@@ -1199,7 +1199,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#9b380af915319587db553a62b6ecb51b050e51a1"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#4cdeafc31ce48f6e6b9f53b09fb6240e90d3e940"
 dependencies = [
  "rls2fga-types",
  "serde",
@@ -1213,7 +1213,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#9b380af915319587db553a62b6ecb51b050e51a1"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#4cdeafc31ce48f6e6b9f53b09fb6240e90d3e940"
 dependencies = [
  "serde",
  "sql-values 0.6.0",
@@ -1389,10 +1389,11 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#eab98f8a726c11fcdd6050652e36c0bb38a2242d"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#ce12aeb5ac411b1ee6103831b937777e0cde453e"
 dependencies = [
  "geometric-traits",
  "once_cell",
+ "recursive",
  "serde",
  "sha2",
  "sql-values 0.6.0",
@@ -1453,7 +1454,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#6a37ecb3fd517adee436e56b96e7fce4402a5708"
 dependencies = [
  "log",
  "recursive",
@@ -1495,7 +1496,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#0dc4865c54b21cfdd5659896c7cfb785b2378125"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#6a37ecb3fd517adee436e56b96e7fce4402a5708"
 dependencies = [
  "proc-macro2",
  "quote",

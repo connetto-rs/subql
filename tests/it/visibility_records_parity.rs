@@ -600,6 +600,7 @@ fn compound_replay_relations(catalog: &ParserDB) -> Vec<RelationShapes> {
         }],
         decision: None,
         grants_nobody: false,
+        caller_gate: None,
     }]
 }
 

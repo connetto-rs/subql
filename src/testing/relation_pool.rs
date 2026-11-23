@@ -92,6 +92,7 @@ impl RelationPool {
                     .collect(),
                 decision: entry.decision.clone(),
                 grants_nobody: entry.grants_nobody,
+                caller_gate: entry.caller_gate.clone(),
             })
             .collect()
     }

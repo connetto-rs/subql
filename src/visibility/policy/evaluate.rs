@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 
 use rls2fga_types::RecordDescription;
 use rls2fga_types::{ActionAnswer, ActionJudgement, ActionStatement, RowVersion};
-use rls2fga_types::{RequestComparison, RequestPredicate, RowDecision};
+use rls2fga_types::{CallerGate, RequestComparison, RequestPredicate, RowDecision};
 use sql_traits::prelude::DatabaseLike;
 
 use crate::visibility::records::{grants_everyone, records_from_row_view};
@@ -106,22 +106,9 @@ where
                 Local::Deny
             }
         }
-        RowDecision::RequestGated {
-            shapes,
-            context_key,
-            request_parameter,
-            comparison,
-            ..
-        } => request_gated::<R, DB, S>(
-            shapes,
-            context_key,
-            request_parameter,
-            *comparison,
-            row,
-            db,
-            watcher,
-            values,
-        ),
+        RowDecision::RequestGated { shapes, gate, .. } => {
+            request_gated::<R, DB, S>(shapes, gate, row, db, watcher, values)
+        }
         RowDecision::Everyone { shapes, .. } => everyone::<R, DB, S>(shapes, row, db, watcher),
         RowDecision::Request {
             shapes,
@@ -235,14 +222,11 @@ fn named_by_type<S: Subject + ?Sized>(watcher: &S, subject_type: &str) -> bool {
 ///
 /// The records here grant the wildcard of their subject type, so taking their
 /// subject at face value grants every watcher of that type. The row's side is
-/// in the record's condition context, under `context_key`, and only the
-/// caller's value decides it.
-#[allow(clippy::too_many_arguments)]
+/// in the record's condition context, under the gate's context key, and only
+/// the caller's value decides it.
 fn request_gated<R, DB, S>(
     shapes: &[RecordDescription],
-    context_key: &str,
-    request_parameter: &str,
-    comparison: RequestComparison,
+    gate: &CallerGate,
     row: &R,
     db: &DB,
     watcher: &S,
@@ -254,7 +238,7 @@ where
     S: Subject + ?Sized,
 {
     values.reset();
-    if !watcher.request_value(request_parameter, values) {
+    if !watcher.request_value(&gate.request_parameter, values) {
         // The watcher cannot say what it sent, so nothing completes the
         // comparison here. It loses speed and never correctness.
         return Local::Unresolved;
@@ -284,10 +268,11 @@ where
             if context.values.len() != 1 {
                 return Local::Unresolved;
             }
-            let Some(value) = context.values.get(context_key) else {
+            let Some(value) = context.values.get(&gate.context_key) else {
                 return Local::Unresolved;
             };
-            granted |= named_by_type(watcher, subject_type) && compares(comparison, values, value);
+            granted |=
+                named_by_type(watcher, subject_type) && compares(gate.comparison, values, value);
         }
     }
 

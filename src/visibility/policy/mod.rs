@@ -72,7 +72,7 @@ mod tests {
     use crate::visibility::{EventRow, RowView, RowWrite, Verdict, VisibilityPolicy};
     use crate::{catalog_helpers, ColumnId, ParserDB, TableId, ValueError};
     use rls2fga_types::{ActionStatement, RowVersion};
-    use rls2fga_types::{RequestAtom, RequestComparison, RequestPredicate};
+    use rls2fga_types::{CallerGate, RequestAtom, RequestComparison, RequestPredicate};
 
     #[derive(Debug, PartialEq, Eq)]
     struct Unreachable;
@@ -656,6 +656,7 @@ ALTER TABLE ledger ENABLE ROW LEVEL SECURITY;
             shapes: Vec::new(),
             decision: Some(RowDecision::All(Vec::new())),
             grants_nobody: false,
+            caller_gate: None,
         }];
         let event = insert(docs, docs_row(text("alice"), Value::Null));
         let policy = RowPolicy::new(shared(db, &relations), Delegate::granting("user:alice"));
@@ -2248,13 +2249,16 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
             decision: Some(RowDecision::RequestGated {
                 relation: test_names::relation("owner"),
                 shapes: vec![shape_on("docs", "owner_id")],
-                context_key: "row_department".to_string(),
-                // A parameter the watcher below does answer, so evaluation
-                // reaches the records rather than stopping at the watcher.
-                request_parameter: "app_subjects".to_string(),
-                comparison: RequestComparison::CallerValueEquals,
+                gate: CallerGate {
+                    context_key: "row_department".to_string(),
+                    // A parameter the watcher below does answer, so evaluation
+                    // reaches the records rather than stopping at the watcher.
+                    request_parameter: "app_subjects".to_string(),
+                    comparison: RequestComparison::CallerValueEquals,
+                },
             }),
             grants_nobody: false,
+            caller_gate: None,
         }];
         let event = insert(docs, docs_row(text("alice"), Value::Null));
         let policy = RowPolicy::new(
@@ -2285,11 +2289,14 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
             decision: Some(RowDecision::RequestGated {
                 relation: test_names::relation("owner"),
                 shapes: vec![gated_shape_on("docs", "row_owner", "owner_id")],
-                context_key: "row_owner".to_string(),
-                request_parameter: "app_subjects".to_string(),
-                comparison: RequestComparison::CallerSetHolds,
+                gate: CallerGate {
+                    context_key: "row_owner".to_string(),
+                    request_parameter: "app_subjects".to_string(),
+                    comparison: RequestComparison::CallerSetHolds,
+                },
             }),
             grants_nobody: false,
+            caller_gate: None,
         }];
         let event = insert(docs, docs_row(text("alice"), Value::Null));
         let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
@@ -2323,11 +2330,14 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
             decision: Some(RowDecision::RequestGated {
                 relation: test_names::relation("owner"),
                 shapes: vec![gated_shape_on("docs", "row_owner", "owner_id")],
-                context_key: "row_owner".to_string(),
-                request_parameter: "app_subjects".to_string(),
-                comparison: RequestComparison::CallerSetHolds,
+                gate: CallerGate {
+                    context_key: "row_owner".to_string(),
+                    request_parameter: "app_subjects".to_string(),
+                    comparison: RequestComparison::CallerSetHolds,
+                },
             }),
             grants_nobody: false,
+            caller_gate: None,
         }];
         let event = insert(docs, docs_row(text("alice"), Value::Null));
         let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
@@ -2363,11 +2373,14 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
             decision: Some(RowDecision::RequestGated {
                 relation: test_names::relation("owner"),
                 shapes: vec![gated_shape_on("docs", "row_editor", "owner_id")],
-                context_key: "row_owner".to_string(),
-                request_parameter: "app_subjects".to_string(),
-                comparison: RequestComparison::CallerSetHolds,
+                gate: CallerGate {
+                    context_key: "row_owner".to_string(),
+                    request_parameter: "app_subjects".to_string(),
+                    comparison: RequestComparison::CallerSetHolds,
+                },
             }),
             grants_nobody: false,
+            caller_gate: None,
         }];
         let event = insert(docs, docs_row(text("alice"), Value::Null));
         let policy = RowPolicy::new(
@@ -2488,9 +2501,11 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
         let relations = can_select(RowDecision::RequestGated {
             relation: test_names::relation("owner"),
             shapes: vec![gated_shape_on("docs", "row_owner", "owner_id")],
-            context_key: "row_owner".to_string(),
-            request_parameter: "app_department".to_string(),
-            comparison: RequestComparison::CallerValueUnequals,
+            gate: CallerGate {
+                context_key: "row_owner".to_string(),
+                request_parameter: "app_department".to_string(),
+                comparison: RequestComparison::CallerValueUnequals,
+            },
         });
         let event = insert(docs, docs_row(text("alice"), Value::Null));
         let policy = RowPolicy::new(
@@ -2539,9 +2554,11 @@ CREATE POLICY unset_read ON unset_notes FOR SELECT
         let relations = can_select(RowDecision::RequestGated {
             relation: test_names::relation("owner"),
             shapes: vec![gated_shape_on("docs", "row_owner", "owner_id")],
-            context_key: "row_owner".to_string(),
-            request_parameter: "app_department".to_string(),
-            comparison: RequestComparison::CallerValueUnequals,
+            gate: CallerGate {
+                context_key: "row_owner".to_string(),
+                request_parameter: "app_department".to_string(),
+                comparison: RequestComparison::CallerValueUnequals,
+            },
         });
         let event = insert(docs, docs_row(Value::Null, Value::Null));
         let policy = RowPolicy::new(shared(db, &relations), Named::<Principal>::default());
@@ -2754,6 +2771,7 @@ CREATE POLICY notes_p ON notes USING (
             shapes: Vec::new(),
             decision: Some(decision),
             grants_nobody: false,
+            caller_gate: None,
         }]
     }
 

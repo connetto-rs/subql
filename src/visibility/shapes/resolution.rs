@@ -1918,6 +1918,7 @@ mod tests {
             from_one_row: false,
             decision: None,
             grants_nobody: false,
+            caller_gate: None,
             shapes: alloc::vec![RecordDescription {
                 tables: Vec::new(),
                 derivation: RecordDerivation::Joined {
