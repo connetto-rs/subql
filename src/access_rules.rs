@@ -13,6 +13,8 @@ use sql_traits::prelude::DatabaseLike;
 use crate::{catalog_helpers, CatalogError, TableId};
 
 #[cfg(feature = "membership-term")]
+use crate::read_rule::ReadRule;
+#[cfg(feature = "membership-term")]
 use rls2fga::classifier::function_registry::FunctionRegistry;
 #[cfg(feature = "membership-term")]
 use rls2fga::term::{TermRefusal, TermShapes};
@@ -34,10 +36,8 @@ pub trait FollowedRules: Send + Sync {
     /// Each served table's complete public read rule, and the registry the
     /// rules' functions enrich.
     #[cfg(feature = "membership-term")]
-    fn read_rules(
-        &self,
-        translator: &Translator,
-    ) -> (HashMap<TableId, Arc<Expr>>, FunctionRegistry);
+    fn read_rules(&self, translator: &Translator)
+        -> (HashMap<TableId, ReadRule>, FunctionRegistry);
 
     /// [`rls2fga::term::describe_membership_term`] over these rules.
     #[cfg(feature = "membership-term")]
@@ -116,7 +116,7 @@ impl<R: DatabaseLike> FollowedRules for Followed<R> {
     fn read_rules(
         &self,
         translator: &Translator,
-    ) -> (HashMap<TableId, Arc<Expr>>, FunctionRegistry) {
+    ) -> (HashMap<TableId, ReadRule>, FunctionRegistry) {
         crate::read_rule::read_rules(&*self.database, translator, |table| {
             self.served_ids.get(&table).copied()
         })
@@ -176,7 +176,7 @@ impl<DB: DatabaseLike> AccessRules<'_, DB> {
     pub fn read_rules(
         &self,
         translator: &Translator,
-    ) -> (HashMap<TableId, Arc<Expr>>, FunctionRegistry) {
+    ) -> (HashMap<TableId, ReadRule>, FunctionRegistry) {
         match *self {
             Self::Served(database) => crate::read_rule::read_rules(database, translator, Some),
             Self::Followed(rules) => rules.read_rules(translator),
@@ -228,7 +228,7 @@ impl<DB: DatabaseLike> AccessRules<'_, DB> {
 pub struct Translation {
     pub translator: Translator,
     /// Each table's complete public read rule, under the served catalog's ids.
-    pub read_rules: HashMap<TableId, Arc<Expr>>,
+    pub read_rules: HashMap<TableId, ReadRule>,
     /// The translator's registry enriched with the functions the rules define.
     pub registry: FunctionRegistry,
 }

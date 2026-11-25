@@ -59,6 +59,8 @@ pub struct SubscriptionRequest<I: IdTypes, B: Backend = crate::backend::Postgres
     /// The database role this subscriber reads as, which settles the read
     /// rules of a membership table a term reads through.
     pub(crate) acting_role: Option<String>,
+    /// The values the subscriber's requests carry under each request parameter.
+    pub(crate) request_values: alloc::vec::Vec<(String, alloc::vec::Vec<String>)>,
     /// The value rows this caller's subjects currently match, grouped by the
     /// columns each membership subquery compares, each row carrying the subject
     /// that grants it.
@@ -91,6 +93,7 @@ impl<I: IdTypes, B: Backend> Clone for SubscriptionRequest<I, B> {
             subscriber: self.subscriber.clone(),
             subjects: self.subjects.clone(),
             acting_role: self.acting_role.clone(),
+            request_values: self.request_values.clone(),
             term_values: self.term_values.clone(),
         }
     }
@@ -117,6 +120,7 @@ impl<I: IdTypes, B: Backend> SubscriptionRequest<I, B> {
             subscriber: None,
             subjects: alloc::vec::Vec::new(),
             acting_role: None,
+            request_values: alloc::vec::Vec::new(),
             term_values: alloc::vec::Vec::new(),
         }
     }
@@ -201,6 +205,22 @@ impl<I: IdTypes, B: Backend> SubscriptionRequest<I, B> {
     #[must_use]
     pub fn acting_role(mut self, role: impl Into<String>) -> Self {
         self.acting_role = Some(role.into());
+        self
+    }
+
+    /// State the values this subscriber's requests carry under the `rls2fga` request `parameter`, as `Subject::request_value` answers them, so the read rule's request-only clauses such as `'items:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))` fold.
+    ///
+    /// Each value is one element of the split setting, and no values states an unset setting.
+    #[must_use]
+    pub fn request_value<V: Into<String>>(
+        mut self,
+        parameter: impl Into<String>,
+        values: impl IntoIterator<Item = V>,
+    ) -> Self {
+        self.request_values.push((
+            parameter.into(),
+            values.into_iter().map(Into::into).collect(),
+        ));
         self
     }
 

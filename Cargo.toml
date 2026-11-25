@@ -8,13 +8,10 @@ exclude = ["fuzz"]
 [patch.crates-io]
 # Followed at main, whose version the `pg_walstream` requirement must match for the patch to apply.
 pg_walstream = { git = "https://github.com/isdaniel/pg-walstream", branch = "main" }
-# diesel-rs main carries `DatabaseErrorInformation::native_code`, which the
-# re-execution failure classification reads, not yet released. Named with no
-# branch, exactly as diesel-sqlite-session names it, so both graphs resolve to
-# one diesel. Drop once it lands in a diesel release.
-diesel = { git = "https://github.com/diesel-rs/diesel" }
-# Lives in diesel-rs and forwards the MySQL error number to `native_code`.
-diesel-async = { git = "https://github.com/diesel-rs/diesel" }
+# The fork's `future` branch is diesel main plus #5395 and #5396, whose table-valued functions pg2sqlite registers.
+diesel = { git = "https://github.com/LucaCappelletti94/diesel", branch = "future" }
+diesel-async = { git = "https://github.com/LucaCappelletti94/diesel", branch = "future" }
+sqlstate = { git = "https://github.com/LucaCappelletti94/diesel", branch = "future" }
 # Followed at main, whose version the `sqlparser` requirement must match for the patch to apply.
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 sqlparser_derive = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
@@ -22,8 +19,11 @@ sqlparser_derive = { git = "https://github.com/apache/datafusion-sqlparser-rs", 
 sql-values = { git = "https://github.com/connetto-rs/sql-values", branch = "main" }
 # Followed at main, whose version the `sqlite-diff-rs` requirement must match for the patch to apply.
 sqlite-diff-rs = { git = "https://github.com/connetto-rs/sqlite-diff-rs", branch = "main" }
-# Lives in diesel-rs, named as `diesel` is above, so it builds against that one diesel.
-diesel-dynamic-schema = { git = "https://github.com/diesel-rs/diesel" }
+diesel-dynamic-schema = { git = "https://github.com/LucaCappelletti94/diesel", branch = "future" }
+
+# pg2sqlite-runtime names diesel-dynamic-schema from diesel-rs, so it follows the fork as well.
+[patch."https://github.com/diesel-rs/diesel"]
+diesel-dynamic-schema = { git = "https://github.com/LucaCappelletti94/diesel", branch = "future" }
 
 [package]
 name = "subql"

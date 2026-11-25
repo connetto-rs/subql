@@ -282,6 +282,10 @@ pub enum RegisterError {
     /// compile the filter and this carries its wording for that refusal.
     #[error("Membership term refused: {0}")]
     MembershipTermRefused(String),
+
+    /// A value the request states under a request parameter holds the separator its policy splits that setting on.
+    #[error("Request value refused: {0}")]
+    RequestValueRefused(String),
 }
 
 /// Error decoding a carried CDC cell into its typed [`crate::backend::Value`].

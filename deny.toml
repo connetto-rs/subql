@@ -42,8 +42,8 @@ allow-git = [
     # Repoint at upstream apache/datafusion-sqlparser-rs once #2349 merges.
     "https://github.com/LucaCappelletti94/sqlparser-rs",
     "https://github.com/apache/datafusion-sqlparser-rs",
-    # diesel sqlite hooks and MySQL `execute_returning_id`, on main but unreleased.
-    "https://github.com/diesel-rs/diesel",
+    # diesel main plus the table-valued functions of #5395 and #5396, which pg2sqlite registers.
+    "https://github.com/LucaCappelletti94/diesel",
     # pg2sqlite, the PG-DDL -> SQLite-DDL translator behind `pg-sqlite-emu`.
     "https://github.com/connetto-rs/pg2sqlite",
 ]
