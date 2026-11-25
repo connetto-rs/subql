@@ -14,7 +14,10 @@ use rls2fga::translator::Translator;
 use rls2fga_types::{ConfidenceLevel, PolicyCommand};
 use sql_traits::prelude::{DatabaseLike, ExpressionScope, PolicyLike, SemanticProofs, TableLike};
 use sql_traits::structs::IdentifierCase;
-use sqlparser::ast::{BinaryOperator, CastKind, Expr, InTarget, Value as SqlValue};
+use sqlparser::ast::{
+    BinaryOperator, CastKind, Expr, Function, FunctionArguments, InTarget, ObjectNamePart,
+    Value as SqlValue,
+};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser_canonicalize::Canonicalizer;
 
@@ -175,11 +178,18 @@ fn complete(classification: &ClassifiedExpr, min_confidence: ConfidenceLevel) ->
     }
 }
 
-/// Whether the clause reads the request's database role.
+/// Whether the clause reads the request's database role, which sqlparser parses as an argument-less call.
 fn role_keyworded(clause: &Expr) -> bool {
     sqlparser::ast::visit_expressions(clause, |node| match node {
-        Expr::Identifier(ident)
-            if ident.quote_style.is_none() && role_keyword(&ident.value).is_some() =>
+        Expr::Function(Function {
+            name,
+            args: FunctionArguments::None,
+            ..
+        }) if matches!(
+            name.0.as_slice(),
+            [ObjectNamePart::Identifier(ident)]
+                if ident.quote_style.is_none() && role_keyword(&ident.value).is_some()
+        ) =>
         {
             ControlFlow::Break(())
         }

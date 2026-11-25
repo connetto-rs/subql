@@ -87,9 +87,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "barnes-hut-tree"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dff3e0b77b50cc89e6bf56d36f73c7a6a145831967155a36ff08062a5c78af1e"
+checksum = "14fc8ba8ae4ccda4bdd818ea58b2c203a422bc1ae784ae49ab40f47030c8d180"
 dependencies = [
  "num-traits",
  "rayon",
@@ -161,18 +161,18 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.12.1"
+version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "cc"
-version = "1.11.2"
+version = "1.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33ef9e3e8154a45c7a95cff4c1299702106ad94062d7bb85fdc5d3a5afd91d45"
+checksum = "02f0e023adb368345ce0ca6cdfc0f24a06554468d0e8503e14a0841de79bfa69"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "diesel"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
+source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#e598203dd02a6cc96b1d7521014fda9e588b532d"
 dependencies = [
  "bigdecimal",
  "bitflags",
@@ -379,7 +379,7 @@ dependencies = [
  "num-traits",
  "serde_json",
  "sqlite-wasm-rs",
- "sqlstate 0.2.0 (git+https://github.com/diesel-rs/diesel)",
+ "sqlstate",
  "time",
  "uuid",
 ]
@@ -387,7 +387,7 @@ dependencies = [
 [[package]]
 name = "diesel-dynamic-schema"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
+source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#e598203dd02a6cc96b1d7521014fda9e588b532d"
 dependencies = [
  "diesel",
 ]
@@ -406,7 +406,7 @@ dependencies = [
 [[package]]
 name = "diesel_attribute_parser"
 version = "0.1.0"
-source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
+source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#e598203dd02a6cc96b1d7521014fda9e588b532d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -416,7 +416,7 @@ dependencies = [
 [[package]]
 name = "diesel_derives"
 version = "2.4.0"
-source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
+source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#e598203dd02a6cc96b1d7521014fda9e588b532d"
 dependencies = [
  "diesel_attribute_parser",
  "diesel_table_macro_syntax",
@@ -429,7 +429,7 @@ dependencies = [
 [[package]]
 name = "diesel_table_macro_syntax"
 version = "0.4.0"
-source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
+source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#e598203dd02a6cc96b1d7521014fda9e588b532d"
 dependencies = [
  "syn 3.0.10",
 ]
@@ -453,7 +453,7 @@ checksum = "117240f60069e65410b3ae1bb213295bd828f707b5bec6596a1afc8793ce0cbc"
 [[package]]
 name = "dsl_auto_type"
 version = "0.3.0"
-source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
+source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#e598203dd02a6cc96b1d7521014fda9e588b532d"
 dependencies = [
  "darling",
  "either",
@@ -595,7 +595,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f03f88beed0b99cac4fa916335285dcdf03011f18dedcf9c0e4f9bd69f560e0f"
 dependencies = [
  "barnes-hut-tree",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.2",
  "lender",
  "multi_ranged",
  "num-traits",
@@ -646,9 +646,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.17.1"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -699,7 +699,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.2",
 ]
 
 [[package]]
@@ -710,9 +710,9 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jiff"
-version = "0.2.43"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
+checksum = "175dc66334db3b9ab9985bf8b61cfed50dc16d20964bb47f9e479adcae984a7f"
 dependencies = [
  "jiff-core",
  "jiff-static",
@@ -724,18 +724,18 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "0.1.5"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffe6854081f5ac0a3046a9b223729ccd7a20b1e0e8277e44dc0660eedf67dfe2"
+checksum = "e599b80292e597019b8b3e392de3f4bea2959ddfb8c7dff60e035e9e311a2c1b"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.43"
+version = "0.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
+checksum = "c7b1af7547d47354bc438d797e3854601bde8f8d185780c5ba4ab27afa54f1ba"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -745,9 +745,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-tzdb"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7"
+checksum = "0980fca2cc272465bd60e82397607ba9f33add9e48defd77923301bbd03808f2"
 
 [[package]]
 name = "jobserver"
@@ -996,21 +996,32 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg2sqlite"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#52391fe2c11dfc0e9942a929889ed29488a7156d"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#0e88668e2114fb32ba22f65ea6349a1081d83069"
 dependencies = [
  "diesel",
+ "pg2sqlite-runtime",
  "sql-traits",
  "sql-values 0.6.0",
  "sqlparser",
  "sqlparser-plpgsql",
- "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlstate",
  "thiserror",
+]
+
+[[package]]
+name = "pg2sqlite-runtime"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/pg2sqlite?branch=main#0e88668e2114fb32ba22f65ea6349a1081d83069"
+dependencies = [
+ "diesel",
+ "diesel-dynamic-schema",
+ "sql-values 0.6.0",
 ]
 
 [[package]]
 name = "pg_walstream"
 version = "0.10.0"
-source = "git+https://github.com/isdaniel/pg-walstream?branch=main#aca9e32d23e12951b03b3ff0ce68f795df6a7c38"
+source = "git+https://github.com/isdaniel/pg-walstream?branch=main#8099d664c1c3d96167875739a7cd6c80afde95a2"
 dependencies = [
  "bytes",
  "chrono",
@@ -1019,15 +1030,15 @@ dependencies = [
  "memchr",
  "serde",
  "smallvec",
- "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlstate",
  "tracing",
 ]
 
 [[package]]
 name = "pin-project-lite"
-version = "0.2.17"
+version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+checksum = "c938015719552d665fd0553b90d96cd7ff58e83e4c061ca99e6bb78865a72752"
 
 [[package]]
 name = "pkg-config"
@@ -1052,9 +1063,9 @@ dependencies = [
 
 [[package]]
 name = "postcard"
-version = "1.1.3"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6764c3b5dd454e283a30e6dfe78e9b31096d9e32036b5d1eaac7a6119ccb9a24"
+checksum = "5431b3dcfdf6d1985c87d11f267a171c0dec0a8cd544c6727b747d36365f1fca"
 dependencies = [
  "cobs",
  "embedded-io 0.4.0",
@@ -1114,9 +1125,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
+checksum = "8f6fa277c67e6ea590466f04c3fe82cb509f0864fe470643e5570de9514a9b11"
 dependencies = [
  "rand_core",
 ]
@@ -1169,9 +1180,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.13.1"
+version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+checksum = "9807af0e638c12e753aa1b4e601791bf2a8f71274023c8bbeec12fc149950857"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -1181,9 +1192,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.18"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+checksum = "41d60ef07df457506a0a1a2073112eb4aae5733dbd2813c3da77d1b0fd441158"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -1192,14 +1203,14 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.11"
+version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 
 [[package]]
 name = "rls2fga"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#4cdeafc31ce48f6e6b9f53b09fb6240e90d3e940"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#5adb9b96b0c1078f147ad1d1b001b498433fff70"
 dependencies = [
  "rls2fga-types",
  "serde",
@@ -1213,7 +1224,7 @@ dependencies = [
 [[package]]
 name = "rls2fga-types"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/rls2fga?branch=main#4cdeafc31ce48f6e6b9f53b09fb6240e90d3e940"
+source = "git+https://github.com/connetto-rs/rls2fga?branch=main#5adb9b96b0c1078f147ad1d1b001b498433fff70"
 dependencies = [
  "serde",
  "sql-values 0.6.0",
@@ -1379,9 +1390,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.16.5"
+version = "1.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
+checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
 dependencies = [
  "serde",
 ]
@@ -1389,7 +1400,7 @@ dependencies = [
 [[package]]
 name = "sql-traits"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sql-traits?branch=main#ce12aeb5ac411b1ee6103831b937777e0cde453e"
+source = "git+https://github.com/connetto-rs/sql-traits?branch=main#156bbb0d90e24f086b0d9616a14e12d67a105766"
 dependencies = [
  "geometric-traits",
  "once_cell",
@@ -1401,9 +1412,12 @@ dependencies = [
  "sqlparser-canonicalize",
  "sqlparser-expr-eval",
  "sqlparser-plpgsql",
- "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlparser-plpgsql-dataflow",
+ "sqlstate",
+ "stacker",
  "thiserror",
  "unicode-normalization",
+ "yoke",
 ]
 
 [[package]]
@@ -1432,7 +1446,7 @@ name = "sqlite-diff-rs"
 version = "0.20.0"
 source = "git+https://github.com/connetto-rs/sqlite-diff-rs?branch=main#1d704201ff7df2e1fa7c385e0d6e2b43e875d30f"
 dependencies = [
- "hashbrown 0.17.1",
+ "hashbrown 0.17.2",
  "indexmap",
  "maxwell-cdc",
  "pg_walstream",
@@ -1454,7 +1468,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.64.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#6a37ecb3fd517adee436e56b96e7fce4402a5708"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#af9872c5344b31c10dbf953ee684db61ff276394"
 dependencies = [
  "log",
  "recursive",
@@ -1476,7 +1490,7 @@ dependencies = [
 [[package]]
 name = "sqlparser-expr-eval"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#46deb4392399a9658ac504ad39fd32556d4f9475"
+source = "git+https://github.com/connetto-rs/sqlparser-expr-eval?branch=main#1e87038c58ca7ed3bc931a5f2efa08dc3ff54388"
 dependencies = [
  "rpds",
  "sql-values 0.6.0",
@@ -1486,17 +1500,29 @@ dependencies = [
 [[package]]
 name = "sqlparser-plpgsql"
 version = "0.1.0"
-source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#f5ea51d2d98a1ce18fc47f74185836165fcac612"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql?branch=main#f5debf1c49fe774f3bbfa1b51dc0951c8e24b43a"
 dependencies = [
  "sqlparser",
- "sqlstate 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlstate",
+ "thiserror",
+]
+
+[[package]]
+name = "sqlparser-plpgsql-dataflow"
+version = "0.1.0"
+source = "git+https://github.com/connetto-rs/sqlparser-plpgsql-dataflow?branch=main#8e1ad97f3229fae337d015c39a668767acebd6a0"
+dependencies = [
+ "sqlparser",
+ "sqlparser-expr-eval",
+ "sqlparser-plpgsql",
+ "sqlstate",
  "thiserror",
 ]
 
 [[package]]
 name = "sqlparser_derive"
 version = "0.7.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#6a37ecb3fd517adee436e56b96e7fce4402a5708"
+source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#af9872c5344b31c10dbf953ee684db61ff276394"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1506,13 +1532,13 @@ dependencies = [
 [[package]]
 name = "sqlstate"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "858cea190fe7555971c35a5eb336858f1bf962a2bd7ceb8704fb1759b36af2cd"
+source = "git+https://github.com/LucaCappelletti94/diesel?branch=future#e598203dd02a6cc96b1d7521014fda9e588b532d"
 
 [[package]]
-name = "sqlstate"
-version = "0.2.0"
-source = "git+https://github.com/diesel-rs/diesel#fc7dc64457ed2dba404a0ae485410053a2d3c7ab"
+name = "stable_deref_trait"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stable_try_trait_v2"
@@ -1691,9 +1717,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "toml"
-version = "1.2.1+spec-1.1.0"
+version = "1.2.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5755c51863cdac711f1956baf8eb9588e060755f7d3c4c979e70ea1e1f32cd7"
+checksum = "26b1f26e9485c1fa43ee89fe76e9f3fb9e2e52bb227f8594b4d687496b83d073"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -1715,9 +1741,9 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.5+spec-1.1.0"
+version = "1.1.7+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
+checksum = "0bb28d6e049a9766c3bd91a8326e6179f5b132dec87906bb97018ef7a2f3431a"
 dependencies = [
  "winnow",
 ]
@@ -1806,9 +1832,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.29.2"
+version = "1.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
+checksum = "3c14b15dffa2f4bd712103e857140aa04a4f2ff6e955c77d7eb8e53ee02a3b64"
 dependencies = [
  "js-sys",
  "serde_core",
@@ -2022,24 +2048,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 
 [[package]]
-name = "zerocopy"
-version = "0.8.63"
+name = "yoke"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5fe1f8f1b06191a00962174c61aa5005e0bb391a6d80d07e24d115c01a92ed8"
+checksum = "417ef3fcf6c300b7dbd25c85531a746931c02ad536f3cf4786ed1e88223340b3"
+dependencies = [
+ "stable_deref_trait",
+ "zerofrom",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.65"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32bc8a75f879cd6fe53a6bedf3c28f0e1b914c77424fc2be9e2ec85d7d25aff5"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.63"
+version = "0.8.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "863ad3ac83293fb4d740aedbfdc9240dd8d1a50c1099acd76ce80ce7c7230c7f"
+checksum = "b8bfd2644ea1681f60cf95029ff18aa8ad1cc3f7b8fe37286f8e473bb29f816b"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zerofrom"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272"
 
 [[package]]
 name = "zmij"
