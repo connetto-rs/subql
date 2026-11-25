@@ -161,3 +161,44 @@ fn a_request_scalar_inside_a_permissive_arm_settles_too() {
         assert_eq!(reached(&mut engine, items, 2, "shared"), admitted, "{mode}");
     }
 }
+
+/// A clause the classifier rates below the threshold on its own, such as a
+/// blocklist only a restrictive policy reads, is no request test, so the cap
+/// beside it settles as it does alone.
+#[test]
+fn a_blocklist_beside_the_cap_is_judged_as_without_it() {
+    const BLOCKS: &str = "CREATE TABLE blocks(item_id INTEGER, user_id TEXT, PRIMARY KEY (item_id, user_id));
+     CREATE POLICY items_unblocked ON items AS RESTRICTIVE FOR SELECT USING (
+       NOT EXISTS (SELECT 1 FROM blocks b
+                   WHERE b.item_id = items.id AND b.user_id = current_setting('app.user_id', true)));";
+    let (mut uncapped, uncapped_items) = engine_with(&format!(
+        "{} {BLOCKS}",
+        CAPPED
+            .split_once("CREATE POLICY items_cap_read")
+            .expect("the cap")
+            .0
+    ));
+    let (mut capped, capped_items) = engine_with(&format!("{CAPPED} {BLOCKS}"));
+    assert_eq!(
+        folded(&mut capped, alice(1).request_value("app_bot_list", ["*"])),
+        folded(&mut uncapped, alice(1)),
+    );
+    assert_eq!(reached(&mut capped, capped_items, 1, "alice"), [1]);
+    assert_eq!(reached(&mut uncapped, uncapped_items, 1, "alice"), [1]);
+}
+
+#[test]
+fn a_cap_two_policies_repeat_settles_as_one() {
+    let (mut engine, items) = engine_with(&format!(
+        "{CAPPED}
+         CREATE POLICY items_cap_list ON items AS RESTRICTIVE FOR SELECT USING (
+           'items:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
+           OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));"
+    ));
+    assert!(folded(
+        &mut engine,
+        alice(1).request_value("app_bot_list", ["items:read"])
+    ));
+    assert_eq!(reached(&mut engine, items, 1, "alice"), [1]);
+    assert_eq!(reached(&mut engine, items, 2, "carol"), [0u64; 0]);
+}

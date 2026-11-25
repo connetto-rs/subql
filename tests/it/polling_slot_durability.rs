@@ -178,6 +178,62 @@ fn an_unacknowledged_event_replays_after_the_source_is_dropped() {
     common::drop_slot(&mut setup, &slot);
 }
 
+/// A truncate of two tables announces both relations, and a peek that re-reads
+/// the unacknowledged transaction announces neither again.
+#[test]
+#[ignore = "requires Docker; run with --ignored"]
+fn a_truncate_of_two_tables_delivers_each_relation_once() {
+    common::assert_docker_available();
+    let db = common::pg_database();
+    let mut setup = db.connect();
+    let mut dml = db.connect();
+    let slot = db.slot("subql_polling_truncate_relations");
+    let publication = "subql_polling_truncate_relations_pub";
+    // DDL and TRUNCATE, which the query DSL does not express.
+    for statement in [
+        PG_DDL,
+        "CREATE TABLE lines (id INT PRIMARY KEY)",
+        "CREATE PUBLICATION subql_polling_truncate_relations_pub FOR TABLE orders, lines",
+    ] {
+        sql_query(statement).execute(&mut setup).expect(statement);
+    }
+    common::create_pgoutput_slot(&mut setup, &slot);
+
+    let config = config(db.url(), &slot, publication);
+    let catalog = ParserDB::parse::<PostgreSqlDialect>(&format!(
+        "{DDL} CREATE TABLE lines (id INT PRIMARY KEY);"
+    ))
+    .expect("parse DDL");
+
+    common::multi_thread_rt().block_on(async move {
+        let mut source = PollingPgCdcSource::connect(config, catalog)
+            .await
+            .expect("connect polling source");
+        sql_query("TRUNCATE orders, lines")
+            .execute(&mut dml)
+            .expect("truncate");
+
+        let mut announced = Vec::new();
+        loop {
+            match next_item(&mut source, "the truncate").await {
+                SourceItem::Relation(relation) => announced.push(relation.table().to_owned()),
+                SourceItem::Event(_) => {}
+                SourceItem::Commit(_) => break,
+            }
+        }
+        announced.sort();
+        assert_eq!(announced, ["lines", "orders"]);
+        let second = tokio::time::timeout(Duration::from_millis(500), source.next_item()).await;
+        assert!(
+            second.is_err(),
+            "a peek that re-reads the unacknowledged truncate announces nothing again, \
+             got {second:?}"
+        );
+        drop(source);
+    });
+    common::drop_slot(&mut setup, &slot);
+}
+
 /// A fresh polling source delivers the table's `Relation` ahead of its
 /// first row, and a peek that re-reads the unacknowledged transaction does
 /// not deliver it a second time.
