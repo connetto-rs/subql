@@ -13,7 +13,7 @@ use core::time::Duration;
 use pg_walstream::{parse_lsn, Lsn, PgOutputDecoder, PgReplicationConnection};
 
 use crate::wal::{PgOutputOrder, PgRowItem, PgSourceItem, ReleaseQueue, SourceItem};
-use crate::PgCommitPosition;
+use crate::{PgCommitPosition, PgLsn};
 
 use super::helpers::{hex_decode, render_lsn, sql_string_literal};
 use super::PollingPgCdcError;
@@ -63,6 +63,9 @@ pub(super) fn polling_loop(
     let mut releases = ReleaseQueue::new();
     // A peek re-reads every unacknowledged transaction at the same positions.
     let mut last_delivered: Option<PgCommitPosition> = None;
+    // pgoutput announces a relation again in every peek, at the LSN it first
+    // had, and a truncate announces each of its tables at one LSN.
+    let mut last_relations: Option<(PgLsn, Vec<u32>)> = None;
 
     let unseen = |last: Option<PgCommitPosition>, position| last.is_none_or(|last| position > last);
     let slot = sql_string_literal(&slot_name);
@@ -192,7 +195,19 @@ pub(super) fn polling_loop(
                         }
                         SourceItem::Event(ev)
                     }
-                    PgRowItem::Relation(relation) => SourceItem::Relation(relation),
+                    PgRowItem::Relation(relation) => {
+                        match &mut last_relations {
+                            Some((lsn, _)) if relation.lsn() < *lsn => continue,
+                            Some((lsn, oids)) if relation.lsn() == *lsn => {
+                                if oids.contains(&relation.oid()) {
+                                    continue;
+                                }
+                                oids.push(relation.oid());
+                            }
+                            _ => last_relations = Some((relation.lsn(), vec![relation.oid()])),
+                        }
+                        SourceItem::Relation(relation)
+                    }
                 };
                 if event_tx.blocking_send(Ok(outgoing)).is_err() {
                     return;

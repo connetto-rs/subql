@@ -122,22 +122,41 @@ impl Subject for Stated<'_> {
 
 /// `rule` with each of `gates` replaced by its verdict.
 fn settled(rule: &Expr, gates: &[RequestGate], verdicts: &[bool]) -> Expr {
-    if let Some(position) = gates.iter().position(|gate| gate.clause == *rule) {
-        return Expr::Value(SqlValue::Boolean(verdicts[position]).into());
+    replaced(rule, &mut |node| {
+        let position = gates.iter().position(|gate| gate.clause == *node)?;
+        Some(Expr::Value(SqlValue::Boolean(verdicts[position]).into()))
+    })
+}
+
+/// `clause` with each subtree `replace` answers for replaced, asked top down through `AND`, `OR` and parentheses.
+fn replaced(clause: &Expr, replace: &mut impl FnMut(&Expr) -> Option<Expr>) -> Expr {
+    if let Some(replacement) = replace(clause) {
+        return replacement;
     }
-    match rule {
+    match clause {
         Expr::BinaryOp {
             left,
             op: op @ (BinaryOperator::And | BinaryOperator::Or),
             right,
         } => Expr::BinaryOp {
-            left: Box::new(settled(left, gates, verdicts)),
+            left: Box::new(replaced(left, replace)),
             op: op.clone(),
-            right: Box::new(settled(right, gates, verdicts)),
+            right: Box::new(replaced(right, replace)),
         },
-        Expr::Nested(inner) => Expr::Nested(Box::new(settled(inner, gates, verdicts))),
+        Expr::Nested(inner) => Expr::Nested(Box::new(replaced(inner, replace))),
         other => other.clone(),
     }
+}
+
+/// Whether `clause` is an `AND`, an `OR` or parentheses, which [`replaced`] reads through.
+const fn connective(clause: &Expr) -> bool {
+    matches!(
+        clause,
+        Expr::BinaryOp {
+            op: BinaryOperator::And | BinaryOperator::Or,
+            ..
+        } | Expr::Nested(_)
+    )
 }
 
 /// Compose each RLS-enabled table's complete public read rule, keyed by the
@@ -281,7 +300,7 @@ fn public_read_rule<DB: DatabaseLike>(
                 policy.command(),
             )
         };
-        let clause = gates.gated(clause, &classify, min_confidence);
+        let clause = gates.gated(&clause, &classify, min_confidence);
         match policy.mode() {
             PolicyMode::Permissive => permissive.push(clause),
             PolicyMode::Restrictive => restrictive.push(clause),
@@ -305,44 +324,29 @@ impl Gates {
     /// `clause` with its constant tests settled and its request-only clauses, each the largest reading only the request, recorded.
     fn gated(
         &mut self,
-        clause: Expr,
+        clause: &Expr,
         classify: &impl Fn(&Expr) -> ClassifiedExpr,
         min_confidence: ConfidenceLevel,
     ) -> Expr {
-        let classified = classify(&clause);
-        if classified.confidence >= min_confidence {
-            match classified.pattern.request_test() {
-                Some(RequestTest::Constant(holds)) => {
-                    return Expr::Value(SqlValue::Boolean(holds).into());
-                }
-                Some(RequestTest::Predicate(test)) => {
+        replaced(clause, &mut |node| {
+            let classified = classify(node);
+            if classified.confidence < min_confidence {
+                return None;
+            }
+            match classified.pattern.request_test()? {
+                RequestTest::Constant(holds) => Some(Expr::Value(SqlValue::Boolean(holds).into())),
+                RequestTest::Predicate(test) => {
                     self.split_sets(&classified.pattern);
-                    if !self.gates.iter().any(|gate| gate.clause == clause) {
+                    if !self.gates.iter().any(|gate| gate.clause == *node) {
                         self.gates.push(RequestGate {
-                            clause: clause.clone(),
+                            clause: node.clone(),
                             test,
                         });
                     }
-                    return clause;
+                    Some(node.clone())
                 }
-                None => {}
             }
-        }
-        match clause {
-            Expr::BinaryOp {
-                left,
-                op: op @ (BinaryOperator::And | BinaryOperator::Or),
-                right,
-            } => Expr::BinaryOp {
-                left: Box::new(self.gated(*left, classify, min_confidence)),
-                op,
-                right: Box::new(self.gated(*right, classify, min_confidence)),
-            },
-            Expr::Nested(inner) => {
-                Expr::Nested(Box::new(self.gated(*inner, classify, min_confidence)))
-            }
-            other => other,
-        }
+        })
     }
 
     /// Record the separator each caller set `pattern` splits is split on.
@@ -412,24 +416,17 @@ fn role_keyworded(clause: &Expr) -> bool {
 /// written, only where the semantic proofs give both spellings one canonical
 /// text, so a converting cast such as `(ch)::text` on a `char` column stays.
 fn written_spelling<DB: DatabaseLike>(clause: &Expr, table: &DB::Table, database: &DB) -> Expr {
-    match clause {
-        Expr::BinaryOp {
-            left,
-            op: op @ (BinaryOperator::And | BinaryOperator::Or),
-            right,
-        } => Expr::BinaryOp {
-            left: Box::new(written_spelling(left, table, database)),
-            op: op.clone(),
-            right: Box::new(written_spelling(right, table, database)),
-        },
-        Expr::Nested(inner) => Expr::Nested(Box::new(written_spelling(inner, table, database))),
-        comparison => match without_conversions(comparison) {
+    replaced(clause, &mut |comparison| {
+        if connective(comparison) {
+            return None;
+        }
+        Some(match without_conversions(comparison) {
             Some(respelled) if canonically_alike(&respelled, comparison, table, database) => {
                 respelled
             }
             _ => comparison.clone(),
-        },
-    }
+        })
+    })
 }
 
 /// `comparison` without the conversions the deparse spells, or `None` when it
