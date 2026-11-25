@@ -331,6 +331,20 @@ where
     }
 }
 
+/// Whether the values `watcher` sent satisfy `predicate`, or `None` when it cannot say what it sent for a parameter the predicate reads.
+#[cfg(feature = "membership-term")]
+pub fn request_holds<S: Subject + ?Sized>(
+    predicate: &RequestPredicate,
+    watcher: &S,
+    values: &mut RequestValues,
+) -> Option<bool> {
+    match holds(predicate, watcher, values) {
+        Local::Allow => Some(true),
+        Local::Deny => Some(false),
+        Local::Unresolved => None,
+    }
+}
+
 /// Whether the values `watcher` sent satisfy `predicate`.
 fn holds<S: Subject + ?Sized>(
     predicate: &RequestPredicate,

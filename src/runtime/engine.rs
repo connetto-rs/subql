@@ -696,29 +696,33 @@ where
                 .as_ref()
                 .and_then(|translation| translation.read_rules.get(&compiled.table_id))
             {
-                if let Ok(folded) =
-                    crate::compiler::parser::parse_compile_normalize_and_prefilter_with_read_rule::<
-                        E::Backend,
-                        DB,
-                    >(
-                        &spec.sql,
-                        &self.dialect,
-                        &self.database,
-                        &spec.binds,
-                        self.division_increment,
-                        rule,
-                    )
-                {
-                    if let Ok(plans) = self.check_membership_terms(
-                        &folded.terms,
-                        folded.table_id,
-                        &folded.projection,
-                        acting_role,
-                    ) {
-                        if plans.iter().all(|plan| {
-                            plan.caller != TermCaller::Identity || spec.subscriber.is_some()
-                        }) {
-                            return Ok((folded, plans, Some(Arc::clone(rule))));
+                // A rule whose request-only clauses the request leaves
+                // unsettled is not folded, and the query alone answers.
+                if let Some(rule) = rule.settle(&spec.request_values)? {
+                    if let Ok(folded) =
+                        crate::compiler::parser::parse_compile_normalize_and_prefilter_with_read_rule::<
+                            E::Backend,
+                            DB,
+                        >(
+                            &spec.sql,
+                            &self.dialect,
+                            &self.database,
+                            &spec.binds,
+                            self.division_increment,
+                            &rule,
+                        )
+                    {
+                        if let Ok(plans) = self.check_membership_terms(
+                            &folded.terms,
+                            folded.table_id,
+                            &folded.projection,
+                            acting_role,
+                        ) {
+                            if plans.iter().all(|plan| {
+                                plan.caller != TermCaller::Identity || spec.subscriber.is_some()
+                            }) {
+                                return Ok((folded, plans, Some(rule)));
+                            }
                         }
                     }
                 }
