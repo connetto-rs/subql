@@ -325,34 +325,41 @@ where
         linked |= !records.is_empty();
     }
     if linked {
-        holds(predicate, watcher, values)
+        holds(
+            predicate,
+            watcher.acting_role(),
+            &|parameter, out| watcher.request_value(parameter, out),
+            values,
+        )
     } else {
         Local::Deny
     }
 }
 
-/// Whether the values `watcher` sent satisfy `predicate`, or `None` when it cannot say what it sent for a parameter the predicate reads.
+/// Whether the values `sent` answers satisfy `predicate` for a caller acting as `acting_role`, or `None` when it cannot say what was sent for a parameter the predicate reads.
 #[cfg(feature = "membership-term")]
-pub fn request_holds<S: Subject + ?Sized>(
+pub fn request_holds(
     predicate: &RequestPredicate,
-    watcher: &S,
+    acting_role: Option<&str>,
+    sent: &impl Fn(&str, &mut RequestValues) -> bool,
     values: &mut RequestValues,
 ) -> Option<bool> {
-    match holds(predicate, watcher, values) {
+    match holds(predicate, acting_role, sent, values) {
         Local::Allow => Some(true),
         Local::Deny => Some(false),
         Local::Unresolved => None,
     }
 }
 
-/// Whether the values `watcher` sent satisfy `predicate`.
-fn holds<S: Subject + ?Sized>(
+/// Whether the values `sent` answers, as `Subject::request_value` does, satisfy `predicate`.
+fn holds(
     predicate: &RequestPredicate,
-    watcher: &S,
+    acting_role: Option<&str>,
+    sent: &impl Fn(&str, &mut RequestValues) -> bool,
     values: &mut RequestValues,
 ) -> Local {
     match predicate {
-        RequestPredicate::ActsAs { role } => match watcher.acting_role() {
+        RequestPredicate::ActsAs { role } => match acting_role {
             Some(acting) if acting == role => Local::Allow,
             Some(_) => Local::Deny,
             None => Local::Unresolved,
@@ -361,7 +368,7 @@ fn holds<S: Subject + ?Sized>(
             values.reset();
             // A watcher that cannot say what it sent loses speed and never
             // correctness.
-            if !watcher.request_value(&atom.request_parameter, values) {
+            if !sent(&atom.request_parameter, values) {
                 return Local::Unresolved;
             }
             if compares(atom.comparison, values, &atom.value) {
@@ -370,13 +377,13 @@ fn holds<S: Subject + ?Sized>(
                 Local::Deny
             }
         }
-        RequestPredicate::Any(children) => {
-            any(children.iter().map(|child| holds(child, watcher, values)))
-        }
+        RequestPredicate::Any(children) => any(children
+            .iter()
+            .map(|child| holds(child, acting_role, sent, values))),
         RequestPredicate::Carries { request_parameter }
         | RequestPredicate::Omits { request_parameter } => {
             values.reset();
-            if !watcher.request_value(request_parameter, values) {
+            if !sent(request_parameter, values) {
                 return Local::Unresolved;
             }
             let mut sent = values.values();
@@ -394,9 +401,9 @@ fn holds<S: Subject + ?Sized>(
                 Local::Deny
             }
         }
-        RequestPredicate::All(children) => {
-            all(children.iter().map(|child| holds(child, watcher, values)))
-        }
+        RequestPredicate::All(children) => all(children
+            .iter()
+            .map(|child| holds(child, acting_role, sent, values))),
     }
 }
 

@@ -1,6 +1,5 @@
 //! Complete public read rules for caller-bound registration.
 
-use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -28,7 +27,7 @@ use sqlparser_canonicalize::Canonicalizer;
 
 use crate::catalog_helpers::{contract_table_id, lookup_table, rls_of, table_has_rls};
 use crate::visibility::policy::evaluate::request_holds;
-use crate::visibility::policy::{RequestValues, Subject};
+use crate::visibility::policy::RequestValues;
 use crate::{RegisterError, TableId};
 
 /// A table's complete public read rule, beside its request-only clauses, which each registration settles from its request.
@@ -70,11 +69,11 @@ impl ReadRule {
         &self,
         stated: &[(String, Vec<String>)],
     ) -> Result<Option<Arc<Expr>>, RegisterError> {
-        let request = Stated(stated);
+        let sent = |parameter: &str, out: &mut RequestValues| stated_value(stated, parameter, out);
         let mut values = RequestValues::new();
         for (parameter, separator) in &self.separators {
             values.reset();
-            if request.request_value(parameter, &mut values)
+            if sent(parameter, &mut values)
                 && values
                     .values()
                     .any(|value| value.contains(separator.as_str()))
@@ -90,7 +89,8 @@ impl ReadRule {
         }
         let mut verdicts = Vec::with_capacity(self.gates.len());
         for gate in &self.gates {
-            let Some(verdict) = request_holds(&gate.test, &request, &mut values) else {
+            // The acting role is left unstated, so a gate on it keeps query-only matching.
+            let Some(verdict) = request_holds(&gate.test, None, &sent, &mut values) else {
                 return Ok(None);
             };
             verdicts.push(verdict);
@@ -99,25 +99,20 @@ impl ReadRule {
     }
 }
 
-/// The values a registration's request states, read as a watcher sends them.
-struct Stated<'request>(&'request [(String, Vec<String>)]);
-
-impl Subject for Stated<'_> {
-    /// Only the request values are read, so a request names no subject.
-    fn subjects(&self) -> impl Iterator<Item = Cow<'_, str>> {
-        core::iter::empty()
-    }
-
-    fn request_value(&self, parameter: &str, out: &mut RequestValues) -> bool {
-        let mut stated = false;
-        for (_, values) in self.0.iter().filter(|(name, _)| name == parameter) {
-            stated = true;
-            for value in values {
-                out.push(value);
-            }
+/// Push the values `stated` gives `parameter` into `out`, answering whether `stated` names it.
+fn stated_value(
+    stated: &[(String, Vec<String>)],
+    parameter: &str,
+    out: &mut RequestValues,
+) -> bool {
+    let mut named = false;
+    for (_, values) in stated.iter().filter(|(name, _)| name == parameter) {
+        named = true;
+        for value in values {
+            out.push(value);
         }
-        stated
     }
+    named
 }
 
 /// `rule` with each of `gates` replaced by its verdict.
